@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "Mystiwan-E-Business",
+    "slug": "mystiwan-e-business",
+    "version": "1.0.3",
+    "orientation": "portrait",
+    "icon": "./assets/mystiwan.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/mystiwan.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.stephenj2.mystiwanebusiness",
+      "infoPlist": {
+        "UIBackgroundModes": ["remote-notification"]
+      }
+    },
+    "android": {
+      "icon": "./assets/mystiwan.png",
+      "edgeToEdgeEnabled": true,
+      "package": "com.stephenj2.mystiwanebusiness",
+      "googleServicesFile": "./google-services.json",
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "WAKE_LOCK"]
+    },
+    "notification": {
+      "icon": "./assets/mystiwan.png",
+      "color": "#ffffff",
+      "androidMode": "default",
+      "androidCollapsedTitle": "Mystiwan-E-Business",
+      "iosDisplayInForeground": true
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/mystiwan.png",
+          "color": "#ffffff",
+          "defaultChannel": "default",
+          "sounds": [],
+          "mode": "production",
+          "android": {
+            "useNextNotificationsApi": true
+          }
+        }
+      ],
+      "expo-web-browser"
+    ],
+    "scheme": "mystiwanebusiness",
+    "web": {
+      "favicon": "./assets/mystiwan.png",
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "a1e1f30e-434e-4ae3-94f6-1f06eaa00de8"
+      }
+    }
+  }
+}

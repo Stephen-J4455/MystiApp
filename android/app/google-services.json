@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1094266234026",
+    "project_id": "mystiwan-97276",
+    "storage_bucket": "mystiwan-97276.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1094266234026:android:f23b0281a9373f789a9cd3",
+        "android_client_info": {
+          "package_name": "com.stephenj2.mystiwanebusiness"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDBhRLEjo6IfNRgNjWA4OI243_vJz7uj3g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

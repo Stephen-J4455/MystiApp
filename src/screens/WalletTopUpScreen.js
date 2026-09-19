@@ -1,0 +1,970 @@
+import React, { useState, useEffect, useMemo, useCallback } from "react";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  Alert,
+  Modal,
+  StatusBar,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
+import { supabase } from "../lib/supabase";
+import { useNotification } from "../contexts/NotificationContext";
+import colors from "../components/theme";
+import { PAYSTACK_PUBLIC_KEY } from "../lib/config";
+import { WebView } from "react-native-webview";
+import { Platform } from "react-native";
+import { usePaystackPayment } from "../hooks/usePaystackPayment";
+
+const generatePaystackHTML = (amount, email, reference) => {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Paystack Payment</title>
+      <script src="https://js.paystack.co/v1/inline.js"></script>
+      <style>
+        :root {
+          --primary: #006769;
+          --secondary: #2B5F1F;
+          --accent: #40A578;
+          --light: #f7f9fa;
+        }
+        body {
+          margin: 0;
+          padding: 0 20px;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          background: linear-gradient(135deg, var(--primary), var(--secondary));
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+        }
+        .container {
+          background: white;
+          border-radius: 24px;
+          padding: 40px 30px;
+          width: 100%;
+          max-width: 380px;
+          box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+          text-align: center;
+          transform: translateY(0);
+          transition: all 0.3s ease;
+        }
+        .icon-container {
+          width: 70px;
+          height: 70px;
+          background-color: #e6f7f7;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          margin: 0 auto 24px;
+        }
+        .icon {
+          font-size: 32px;
+          color: var(--primary);
+        }
+        .title {
+          font-size: 22px;
+          font-weight: 800;
+          color: #1A1A1A;
+          margin-bottom: 12px;
+        }
+        .subtitle {
+          font-size: 14px;
+          color: #666;
+          margin-bottom: 30px;
+          line-height: 1.5;
+        }
+        .amount-container {
+          background-color: var(--light);
+          padding: 20px;
+          border-radius: 16px;
+          margin-bottom: 35px;
+          border: 1px solid #eee;
+        }
+        .amount-label {
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--primary);
+          text-transform: uppercase;
+          letter-spacing: 1px;
+          margin-bottom: 8px;
+        }
+        .amount {
+          font-size: 32px;
+          font-weight: 900;
+          color: #1A1A1A;
+        }
+        .pay-button {
+          width: 100%;
+          padding: 18px;
+          background: linear-gradient(to right, var(--primary), var(--accent));
+          color: white;
+          border: none;
+          border-radius: 16px;
+          font-size: 16px;
+          font-weight: 700;
+          cursor: pointer;
+          box-shadow: 0 8px 20px rgba(0, 103, 105, 0.3);
+          transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+        .pay-button:active {
+          transform: scale(0.98);
+          box-shadow: 0 4px 10px rgba(0, 103, 105, 0.2);
+        }
+        .cancel-button {
+          margin-top: 20px;
+          padding: 10px 20px;
+          color: #888;
+          background: none;
+          border: none;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: color 0.2s ease;
+        }
+        .cancel-button:hover {
+          color: var(--danger, #e74c3c);
+        }
+        .secure-note {
+          margin-top: 30px;
+          font-size: 11px;
+          color: #aaa;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .secure-note span {
+          margin-right: 5px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="icon-container">
+          <span class="icon">💼</span>
+        </div>
+        <h2 class="title">Wallet Top-up</h2>
+        <p class="subtitle">Complete your wallet top-up to continue providing services as an agent. Your transaction is secure.</p>
+        
+        <div class="amount-container">
+          <div class="amount-label">Top-up Amount</div>
+          <div class="amount">GHS ${amount.toFixed(2)}</div>
+        </div>
+        
+        <button id="paystack-button" class="pay-button">
+          Pay with Paystack
+        </button>
+        
+        <button onclick="window.ReactNativeWebView.postMessage(JSON.stringify({type: 'cancel'}))" class="cancel-button">
+          Cancel Transaction
+        </button>
+        
+        <div class="secure-note">
+          <span>🛡️</span> Secure Transaction by Paystack
+        </div>
+      </div>
+
+      <script>
+        document.getElementById('paystack-button').onclick = function() {
+          var handler = PaystackPop.setup({
+            key: '${PAYSTACK_PUBLIC_KEY}',
+            email: '${email}',
+            amount: ${amount * 100},
+            currency: 'GHS',
+            ref: '${reference}',
+            callback: function(response) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'success',
+                data: response
+              }));
+            },
+            onClose: function() {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'cancel'
+              }));
+            }
+          });
+          handler.openIframe();
+        };
+      </script>
+    </body>
+    </html>
+  `;
+};
+
+export default function WalletTopUpScreen({ navigation }) {
+  const { showError, showSuccess } = useNotification();
+  const [amount, setAmount] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [userEmail, setUserEmail] = useState("");
+  const [paystackModalVisible, setPaystackModalVisible] = useState(false);
+  const [currentReference, setCurrentReference] = useState("");
+  const [currentBalance, setCurrentBalance] = useState(0);
+
+  const predefinedAmounts = [50, 100, 200, 500, 1000];
+
+  // Paystack payment handlers
+  const handlePaymentSuccess = useCallback(
+    async (response) => {
+      console.log("Wallet topup payment successful:", response);
+      setPaystackModalVisible(false);
+
+      try {
+        const { data: result, error } = await supabase.functions.invoke(
+          "verify-wallet-topup",
+          {
+            body: {
+              reference: currentReference,
+              amount: parseFloat(amount),
+            },
+          }
+        );
+
+        if (result && result.success && !result.already_processed) {
+          showSuccess(
+            "Top-up Successful!",
+            `Your wallet has been credited with Ghc ${parseFloat(amount)}`
+          );
+
+          // Update local balance
+          if (result.new_balance !== undefined) {
+            setCurrentBalance(result.new_balance);
+          }
+
+          // Reset form
+          setAmount("");
+          setCurrentReference("");
+        } else {
+          showError(
+            "Verification Failed",
+            "Please contact support if amount was debited"
+          );
+        }
+      } catch (error) {
+        console.error("Verification error:", error);
+        showError("Verification Error", "Please contact support");
+      }
+    },
+    [currentReference, amount, showError, showSuccess]
+  );
+
+  const handlePaymentClose = useCallback(() => {
+    console.log("Wallet topup payment cancelled");
+    setPaystackModalVisible(false);
+    showError("Payment Cancelled", "Top-up was not completed");
+  }, [showError]);
+
+  // Paystack configuration
+  const paystackConfig = useMemo(() => {
+    if (!amount || !userEmail || !currentReference) return null;
+
+    return {
+      reference: currentReference,
+      email: userEmail,
+      amount: Math.floor(parseFloat(amount) * 100),
+      currency: "GHS",
+      publicKey: PAYSTACK_PUBLIC_KEY,
+      metadata: {
+        type: "wallet_topup",
+        amount: parseFloat(amount),
+      },
+      onSuccess: handlePaymentSuccess,
+      onClose: handlePaymentClose,
+    };
+  }, [
+    amount,
+    userEmail,
+    currentReference,
+    handlePaymentSuccess,
+    handlePaymentClose,
+  ]);
+
+  const { initializePayment, isLoaded, isLoading } =
+    usePaystackPayment(paystackConfig);
+
+  useEffect(() => {
+    fetchUserData();
+
+    // Set up realtime subscription for wallet balance updates
+    let walletSubscription = null;
+
+    const setupWalletRealtime = async () => {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (user) {
+          walletSubscription = supabase
+            .channel("wallet_balance_realtime")
+            .on(
+              "postgres_changes",
+              {
+                event: "UPDATE",
+                schema: "public",
+                table: "agent_wallet",
+                filter: `agent_id=eq.${user.id}`,
+              },
+              (payload) => {
+                console.log("Wallet balance updated:", payload);
+                setCurrentBalance(payload.new.balance || 0);
+              }
+            )
+            .subscribe();
+        }
+      } catch (error) {
+        console.error("Error setting up wallet realtime subscription:", error);
+      }
+    };
+
+    setupWalletRealtime();
+
+    return () => {
+      if (walletSubscription) {
+        supabase.removeChannel(walletSubscription);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    // Check for payment completion when screen comes back into focus
+    const checkPaymentStatus = async () => {
+      if (currentReference) {
+        try {
+          const { data: result, error } = await supabase.functions.invoke(
+            "verify-wallet-topup",
+            {
+              body: {
+                reference: currentReference,
+                amount: parseFloat(amount),
+              },
+            }
+          );
+
+          if (result && result.success && !result.already_processed) {
+            showSuccess(
+              "Top-up Successful!",
+              `Your wallet has been credited with Ghc ${parseFloat(amount)}`
+            );
+
+            // Update local balance
+            if (result.new_balance !== undefined) {
+              setCurrentBalance(result.new_balance);
+            }
+
+            // Reset form and reference
+            setAmount("");
+            setCurrentReference("");
+          }
+        } catch (error) {
+          console.error("Payment status check error:", error);
+        }
+      }
+    };
+
+    checkPaymentStatus();
+  }, [currentReference, amount]);
+
+  const fetchUserData = async () => {
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        showError("Authentication Error", "Please log in to continue");
+        return;
+      }
+
+      setUserEmail(user.email);
+
+      // Fetch current wallet balance
+      const { data: wallet, error: walletError } = await supabase
+        .from("agent_wallet")
+        .select("balance")
+        .eq("agent_id", user.id)
+        .single();
+
+      if (walletError) {
+        console.error("Error fetching wallet:", walletError);
+        setCurrentBalance(0);
+      } else {
+        setCurrentBalance(wallet?.balance || 0);
+      }
+    } catch (error) {
+      console.error("Error fetching user data:", error);
+      showError("Error", "Failed to load user data");
+    }
+  };
+
+  const handleAmountSelect = (selectedAmount) => {
+    setAmount(selectedAmount.toString());
+  };
+
+  const handleTopUp = async () => {
+    const topUpAmount = parseFloat(amount);
+
+    console.log("Starting top-up with amount:", amount, "parsed:", topUpAmount);
+
+    if (!amount.trim() || isNaN(topUpAmount) || topUpAmount <= 0) {
+      showError("Invalid Amount", "Please enter a valid amount greater than 0");
+      return;
+    }
+
+    if (topUpAmount < 5) {
+      showError("Minimum Amount", "Minimum top-up amount is Ghc 5");
+      return;
+    }
+
+    if (topUpAmount > 5000) {
+      showError("Maximum Amount", "Maximum top-up amount is Ghc 5000");
+      return;
+    }
+
+    try {
+      // Get current user
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        showError("Authentication Error", "Please log in to continue");
+        return;
+      }
+
+      console.log("User email:", user.email, "userEmail state:", userEmail);
+
+      // Generate unique reference
+      const reference = `wallet_${Date.now()}_${Math.random()
+        .toString(36)
+        .substr(2, 9)}`;
+      setCurrentReference(reference);
+
+      // Store top-up details for verification
+      const topUpData = {
+        agent_id: user.id,
+        amount: topUpAmount,
+        reference: reference,
+        status: "pending",
+      };
+
+      // Insert pending top-up record
+      const { error: insertError } = await supabase
+        .from("wallet_topups")
+        .insert(topUpData);
+
+      if (insertError) {
+        console.error("Error storing top-up data:", insertError);
+        showError("Error", "Failed to initiate top-up");
+        return;
+      }
+
+      // Show Paystack modal
+      console.log("Opening Paystack modal with reference:", reference);
+      console.log("Paystack public key exists:", !!PAYSTACK_PUBLIC_KEY);
+      console.log("User email:", userEmail);
+      console.log("Amount:", topUpAmount);
+      setPaystackModalVisible(true);
+    } catch (error) {
+      console.error("Top-up error:", error);
+      showError("Error", "Failed to initiate top-up");
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <StatusBar
+        translucent
+        backgroundColor="transparent"
+        barStyle="dark-content"
+      />
+
+      {/* Floating Back Button */}
+      <TouchableOpacity
+        style={styles.floatingBackButton}
+        onPress={() => navigation.goBack()}
+      >
+        <View style={styles.backButtonCircle}>
+          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+        </View>
+      </TouchableOpacity>
+
+      <ScrollView
+        style={styles.content}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.contentHeader}>
+          <Text style={styles.screenTitle}>Top Up Wallet</Text>
+        </View>
+        {/* Current Balance */}
+        <View style={styles.balanceCard}>
+          <Ionicons name="wallet" size={32} color={colors.primary} />
+          <View style={styles.balanceTextContainer}>
+            <Text style={styles.balanceLabel}>Current Balance</Text>
+            <Text style={styles.balanceAmount}>
+              Ghc{currentBalance.toFixed(2)}
+            </Text>
+          </View>
+        </View>
+
+        {/* Amount Selection */}
+        <View style={styles.amountSection}>
+          <Text style={styles.sectionTitle}>Select Amount</Text>
+
+          <View style={styles.predefinedAmounts}>
+            {predefinedAmounts.map((amt) => (
+              <TouchableOpacity
+                key={amt}
+                style={[
+                  styles.amountButton,
+                  amount === amt.toString() && styles.amountButtonSelected,
+                ]}
+                onPress={() => handleAmountSelect(amt)}
+              >
+                <Text
+                  style={[
+                    styles.amountButtonText,
+                    amount === amt.toString() &&
+                    styles.amountButtonTextSelected,
+                  ]}
+                >
+                  Ghc{amt}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* Custom Amount Input */}
+          <View style={styles.customAmountContainer}>
+            <Text style={styles.customAmountLabel}>Or enter custom amount</Text>
+            <View style={styles.amountInputContainer}>
+              <Text style={styles.currencyPrefix}>Ghc</Text>
+              <TextInput
+                style={styles.amountInput}
+                value={amount}
+                onChangeText={(text) => {
+                  // Allow only numbers and decimal point
+                  const cleanedText = text.replace(/[^0-9.]/g, "");
+                  setAmount(cleanedText);
+                }}
+                placeholder="0.00"
+                placeholderTextColor={colors.secondary}
+                keyboardType="decimal-pad"
+                maxLength={7}
+              />
+            </View>
+          </View>
+        </View>
+
+        {/* Top Up Button */}
+        <View style={styles.buttonContainer}>
+          <TouchableOpacity
+            style={[
+              styles.topUpButton,
+              (!amount.trim() || loading) && styles.topUpButtonDisabled,
+            ]}
+            onPress={handleTopUp}
+            disabled={!amount.trim() || loading}
+          >
+            <Ionicons name="card" size={20} color="#fff" />
+            <Text style={styles.topUpButtonText}>
+              {loading ? "Processing..." : `Top Up Ghc ${amount || "0.00"}`}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Info Section */}
+        <View style={styles.infoSection}>
+          <Text style={styles.infoTitle}>Important Information</Text>
+          <Text style={styles.infoText}>
+            • Minimum top-up amount: Ghc 5{"\n"}• Maximum top-up amount: Ghc
+            5000{"\n"}• Payment will open in-app{"\n"}• Funds are credited
+            instantly after payment{"\n"}• All payments are processed securely
+            via Paystack
+          </Text>
+        </View>
+      </ScrollView>
+
+      {/* Paystack Payment Modal */}
+      <Modal
+        visible={paystackModalVisible}
+        animationType="slide"
+        onRequestClose={() => setPaystackModalVisible(false)}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+
+          {Platform.OS === "web" ? (
+            // Web implementation using Paystack inline SDK
+            <View
+              style={{
+                flex: 1,
+                backgroundColor: "white",
+                justifyContent: "center",
+                alignItems: "center",
+                padding: 20,
+              }}
+            >
+              <View
+                style={{ maxWidth: 400, width: "100%", alignItems: "center" }}
+              >
+                <Text
+                  style={{
+                    fontSize: 24,
+                    fontWeight: "bold",
+                    color: colors.primary,
+                    marginBottom: 20,
+                  }}
+                >
+                  Complete Your Payment
+                </Text>
+                <Text style={{ fontSize: 18, marginBottom: 30 }}>
+                  Amount: GHS {parseFloat(amount)}
+                </Text>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: "#007bff",
+                    paddingHorizontal: 30,
+                    paddingVertical: 15,
+                    borderRadius: 8,
+                    width: "100%",
+                    alignItems: "center",
+                  }}
+                  onPress={() => {
+                    initializePayment(paystackConfig);
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "white",
+                      fontSize: 16,
+                      fontWeight: "bold",
+                    }}
+                  >
+                    Pay Now
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{ marginTop: 20 }}
+                  onPress={() => setPaystackModalVisible(false)}
+                >
+                  <Text style={{ color: colors.secondary, fontSize: 16 }}>
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            // Mobile implementation using WebView
+            <WebView
+              source={{
+                html: generatePaystackHTML(
+                  parseFloat(amount),
+                  userEmail,
+                  currentReference
+                ),
+              }}
+              style={{ flex: 1 }}
+              userAgent="Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36"
+              scalesPageToFit={true}
+              javaScriptEnabled={true}
+              domStorageEnabled={true}
+              onMessage={async (event) => {
+                console.log(
+                  "WebView message received:",
+                  event.nativeEvent.data
+                );
+                const message = JSON.parse(event.nativeEvent.data);
+
+                if (message.type === "success") {
+                  console.log(
+                    "Payment success callback received:",
+                    message.data
+                  );
+                  setPaystackModalVisible(false);
+                  try {
+                    const { data: result, error } =
+                      await supabase.functions.invoke("verify-wallet-topup", {
+                        body: {
+                          reference: currentReference,
+                          amount: parseFloat(amount),
+                        },
+                      });
+
+                    if (result && result.success && !result.already_processed) {
+                      showSuccess(
+                        "Top-up Successful!",
+                        `Your wallet has been credited with Ghc ${parseFloat(
+                          amount
+                        )}`
+                      );
+
+                      // Update local balance
+                      if (result.new_balance !== undefined) {
+                        setCurrentBalance(result.new_balance);
+                      }
+
+                      // Reset form
+                      setAmount("");
+                      setCurrentReference("");
+                    } else {
+                      showError(
+                        "Verification Failed",
+                        "Please contact support if amount was debited"
+                      );
+                    }
+                  } catch (error) {
+                    console.error("Verification error:", error);
+                    showError("Verification Error", "Please contact support");
+                  }
+                } else if (message.type === "cancel") {
+                  console.log("Payment cancelled by user");
+                  setPaystackModalVisible(false);
+                  showError("Payment Cancelled", "Top-up was not completed");
+                }
+              }}
+            />
+          )}
+        </SafeAreaView>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.white,
+  },
+  floatingBackButton: {
+    position: "absolute",
+    top: 50,
+    left: 20,
+    zIndex: 10,
+  },
+  backButtonCircle: {
+    width: 45,
+    height: 45,
+    borderRadius: 23,
+    backgroundColor: "rgba(255, 255, 255, 0.9)",
+    justifyContent: "center",
+    alignItems: "center",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
+  contentHeader: {
+    paddingHorizontal: 20,
+    marginTop: 110, // Accounts for floating back button
+    marginBottom: 10,
+  },
+  screenTitle: {
+    fontSize: 28,
+    fontWeight: "bold",
+    color: colors.dark,
+  },
+  header: {
+    paddingHorizontal: 20,
+    paddingVertical: 15,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: colors.white,
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.light,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: colors.dark,
+  },
+  content: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+  balanceCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.white,
+    padding: 24,
+    borderRadius: 24,
+    marginBottom: 24,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  balanceTextContainer: {
+    marginLeft: 16,
+    flex: 1,
+  },
+  balanceLabel: {
+    fontSize: 13,
+    color: colors.dark,
+    opacity: 0.6,
+    marginBottom: 4,
+  },
+  balanceAmount: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: colors.primary,
+  },
+  amountSection: {
+    backgroundColor: colors.white,
+    padding: 24,
+    borderRadius: 24,
+    marginBottom: 24,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: colors.dark,
+    marginBottom: 20,
+  },
+  predefinedAmounts: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 12,
+    marginBottom: 24,
+  },
+  amountButton: {
+    backgroundColor: colors.light,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "transparent",
+    minWidth: "30%",
+    alignItems: "center",
+  },
+  amountButtonSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  amountButtonText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: colors.primary,
+  },
+  amountButtonTextSelected: {
+    color: colors.white,
+  },
+  customAmountContainer: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 20,
+  },
+  customAmountLabel: {
+    fontSize: 14,
+    color: colors.dark,
+    opacity: 0.5,
+    marginBottom: 12,
+  },
+  amountInputContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    backgroundColor: colors.light,
+  },
+  currencyPrefix: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: colors.dark,
+    marginRight: 10,
+  },
+  amountInput: {
+    flex: 1,
+    fontSize: 18,
+    paddingVertical: 14,
+    color: colors.dark,
+    fontWeight: "600",
+  },
+  buttonContainer: {
+    marginBottom: 24,
+  },
+  topUpButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    paddingVertical: 18,
+    borderRadius: 20,
+    elevation: 4,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  topUpButtonDisabled: {
+    backgroundColor: colors.border,
+    elevation: 0,
+    shadowOpacity: 0,
+  },
+  topUpButtonText: {
+    color: colors.white,
+    fontSize: 16,
+    fontWeight: "800",
+    marginLeft: 10,
+  },
+  infoSection: {
+    backgroundColor: colors.white,
+    padding: 24,
+    borderRadius: 24,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+  },
+  infoTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: colors.dark,
+    marginBottom: 12,
+  },
+  infoText: {
+    fontSize: 14,
+    color: colors.dark,
+    opacity: 0.6,
+    lineHeight: 22,
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: colors.white,
+  },
+
+});
