@@ -42,7 +42,20 @@ Deno.serve(async (req) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
     const supabaseServiceRoleKey =
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? supabaseAnonKey;
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+    if (!supabaseUrl || !supabaseServiceRoleKey) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Missing config: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for this edge function.",
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
 
     const supabaseAuth = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
@@ -122,13 +135,14 @@ Deno.serve(async (req) => {
       const email = String(userData?.email || "").trim();
       const password = String(userData?.password || "").trim();
       const fullName = String(userData?.full_name || "").trim();
+      const businessName = String(userData?.business_name || "").trim();
       const phone = String(userData?.phone || "").trim();
       const initialBalance = Number(userData?.initialBalance || 0);
 
-      if (!email || !password || !fullName) {
+      if (!email || !password || !fullName || !businessName) {
         return new Response(
           JSON.stringify({
-            error: "Email, password, and full name are required",
+            error: "Email, password, full name, and business name are required",
           }),
           {
             status: 400,
@@ -143,6 +157,7 @@ Deno.serve(async (req) => {
           password,
           user_metadata: {
             full_name: fullName,
+            business_name: businessName,
             phone: phone || null,
             role: "Agent",
             super_agent_id: user.id,
@@ -175,6 +190,298 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },
       );
+    }
+
+    if (action === "updateSubAgent") {
+      if (userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({ error: "Only super agents can update sub agents" }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const targetAgentId = String(userData?.agent_id || "").trim();
+      if (!targetAgentId) {
+        return new Response(
+          JSON.stringify({ error: "agent_id is required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const updatePayload: Record<string, unknown> = {};
+      if (userData?.full_name !== undefined) {
+        updatePayload.full_name = String(userData.full_name).trim();
+      }
+      if (userData?.business_name !== undefined) {
+        updatePayload.business_name = String(userData.business_name).trim() ||
+          null;
+      }
+      if (userData?.phone !== undefined) {
+        updatePayload.phone = String(userData.phone).trim() || null;
+      }
+
+      if (Object.keys(updatePayload).length === 0) {
+        return new Response(
+          JSON.stringify({ error: "No editable fields supplied" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: existingUser, error: fetchError } =
+        await supabaseAdmin.auth.admin.getUserById(targetAgentId);
+
+      if (fetchError || !existingUser?.user) {
+        return new Response(
+          JSON.stringify({ error: "Sub agent not found" }),
+          {
+            status: 404,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const existingMeta = existingUser.user.user_metadata || {};
+      if (
+        String(existingMeta.super_agent_id || "") !== String(user.id)
+      ) {
+        return new Response(
+          JSON.stringify({
+            error: "Sub agent does not belong to this super agent",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const mergedMeta = { ...existingMeta, ...updatePayload };
+
+      const { data: updatedUser, error: updateError } =
+        await supabaseAdmin.auth.admin.updateUserById(targetAgentId, {
+          user_metadata: mergedMeta,
+        });
+
+      if (updateError) {
+        throw updateError;
+      }
+
+      return new Response(
+        JSON.stringify({ user: updatedUser?.user || null }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    if (action === "deactivateSubAgent") {
+      if (userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({ error: "Only super agents can deactivate sub agents" }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const targetAgentId = String(userData?.agent_id || "").trim();
+      if (!targetAgentId) {
+        return new Response(
+          JSON.stringify({ error: "agent_id is required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: existingUser, error: fetchError } =
+        await supabaseAdmin.auth.admin.getUserById(targetAgentId);
+
+      if (fetchError || !existingUser?.user) {
+        return new Response(
+          JSON.stringify({ error: "Sub agent not found" }),
+          {
+            status: 404,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const existingMeta = existingUser.user.user_metadata || {};
+      if (
+        String(existingMeta.super_agent_id || "") !== String(user.id)
+      ) {
+        return new Response(
+          JSON.stringify({
+            error: "Sub agent does not belong to this super agent",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const mergedMeta = {
+        ...existingMeta,
+        is_active: false,
+        deactivated_at: new Date().toISOString(),
+      };
+
+      const { error: deactivateError } =
+        await supabaseAdmin.auth.admin.updateUserById(targetAgentId, {
+          user_metadata: mergedMeta,
+          ban_duration: "876000h",
+        });
+
+      if (deactivateError) {
+        throw deactivateError;
+      }
+
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "linkPaystackSubaccount") {
+      if (userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({
+            error: "Only super agents can link a Paystack subaccount",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const subaccountCode = String(userData?.subaccount_code || "").trim();
+      const businessName = String(userData?.business_name || "").trim();
+      const settlementBank = String(userData?.settlement_bank || "").trim() ||
+        null;
+      const settlementBankCode = String(
+        userData?.settlement_bank_code || "",
+      ).trim() || null;
+      const accountNumber = String(userData?.account_number || "").trim() ||
+        null;
+      const paystackRawResponse = userData?.paystack_raw_response || null;
+      const isActive = userData?.is_active === undefined
+        ? true
+        : Boolean(userData.is_active);
+      const percentageCharge = userData?.percentage_charge !== undefined &&
+        userData?.percentage_charge !== null
+        ? Number(userData.percentage_charge)
+        : null;
+
+      if (!subaccountCode) {
+        return new Response(
+          JSON.stringify({ error: "subaccount_code is required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const upsertPayload: Record<string, unknown> = {
+        super_agent_id: user.id,
+        subaccount_code: subaccountCode,
+        business_name: businessName || null,
+        settlement_bank: settlementBank,
+        settlement_bank_code: settlementBankCode,
+        account_number: accountNumber,
+        is_active: isActive,
+        paystack_raw_response: paystackRawResponse,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (
+        percentageCharge !== null &&
+        Number.isFinite(percentageCharge) &&
+        percentageCharge >= 0
+      ) {
+        upsertPayload.percentage_charge = percentageCharge;
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("super_agent_paystack")
+        .upsert(upsertPayload, { onConflict: "super_agent_id" })
+        .select();
+
+      if (error) {
+        if (
+          error.code === "42P01" ||
+          /does not exist|relation .* does not exist/i.test(error.message || "")
+        ) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "The super_agent_paystack table is not available yet. Run the latest migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw error;
+      }
+
+      return new Response(JSON.stringify({ subaccount: data?.[0] || null }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "getPaystackSubaccount") {
+      if (userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({ error: "Only super agents can read their subaccount" }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("super_agent_paystack")
+        .select("*")
+        .eq("super_agent_id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        if (
+          error.code === "42P01" ||
+          /does not exist|relation .* does not exist/i.test(error.message || "")
+        ) {
+          return new Response(JSON.stringify({ subaccount: null }), {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        throw error;
+      }
+
+      return new Response(JSON.stringify({ subaccount: data || null }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     return new Response(JSON.stringify({ error: "Unsupported action" }), {

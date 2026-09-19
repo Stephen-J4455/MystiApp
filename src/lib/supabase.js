@@ -1,24 +1,28 @@
 import { createClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
+import { SUPABASE_URL, SUPABASE_ANON_KEY, APP_ENV } from "./env";
 
-const supabaseUrl = "https://sffgznknlmqxtikkyhwu.supabase.co";
-const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmZmd6bmtubG1xeHRpa2t5aHd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY5NzE0NzEsImV4cCI6MjA2MjU0NzQ3MX0.vWmG3p7QcjQWsoS1v9mljyXahYKqFqH40Khyb7OT87U";
+if (!SUPABASE_URL) {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[supabase] SUPABASE_URL is empty for APP_ENV="${APP_ENV}". ` +
+      "Did you forget to set EXPO_PUBLIC_SUPABASE_TEST_URL in your .env.test file?",
+  );
+}
 
-// Use different storage based on platform
 const getStorage = () => {
   if (Platform.OS === "web") {
-    // For web, let Supabase handle storage automatically
-    return undefined; // This will use localStorage automatically
+    return undefined;
   }
   return AsyncStorage;
 };
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: Platform.OS === "web", // Only enable URL detection on web
+    detectSessionInUrl: Platform.OS === "web",
     storage: getStorage(),
   },
 });

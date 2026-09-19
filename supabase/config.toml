@@ -1,5 +1,11 @@
+# Supabase project configuration.
+#
+# The Supabase CLI uses this file to know which project to deploy to. We
+# keep it generic (project_id commented out) and instead let the deploy
+# scripts in supabase/scripts/ pass the right `--project-ref` per
+# environment. See supabase/README.md for details.
+
 [project]
-# Reference your Supabase project ID here
 # project_id = "your-project-id"
 
 [api]
@@ -34,7 +40,6 @@ enable_signup = true
 [edge_runtime]
 enabled = true
 port = 54321
-# Increased timeout for edge function bundling
 inspector_port = 8083
 
 [edge_functions]
@@ -42,3 +47,11 @@ inspector_port = 8083
 bundle_timeout = 300
 # Enable import map
 import_map = "./functions/import_map.json"
+
+# Mark each function as a verifier of database connectivity.
+[functions.health]
+verify_jwt = false
+
+[functions.verify_jwt]
+# Edge functions that need user authentication keep the default (true).
+# All other functions explicitly opt-in above where they should be public.

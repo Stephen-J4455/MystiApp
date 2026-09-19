@@ -111,9 +111,10 @@ export const usePaystackPayment = (config) => {
           amount: config.amount,
           currency: config.currency || "GHS",
           ref: config.reference,
+          subaccount: config.subaccount || null,
         });
 
-        const handler = window.PaystackPop.setup({
+        const setupOptions = {
           key: config.publicKey || PAYSTACK_PUBLIC_KEY,
           email: config.email,
           amount: config.amount,
@@ -134,7 +135,15 @@ export const usePaystackPayment = (config) => {
               config.onClose();
             }
           },
-        });
+        };
+
+        // Pass the Paystack subaccount code if provided so funds are routed
+        // to the super agent's settlement account.
+        if (config.subaccount) {
+          setupOptions.subaccount = config.subaccount;
+        }
+
+        const handler = window.PaystackPop.setup(setupOptions);
 
         console.log("Opening Paystack iframe");
         handler.openIframe();

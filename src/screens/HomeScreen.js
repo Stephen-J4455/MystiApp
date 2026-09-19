@@ -753,6 +753,17 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
+                    navigation.navigate("SuperAgentTierManagement");
+                  }}
+                >
+                  <Ionicons name="layers" size={18} color={colors.primary} />
+                  <Text style={styles.superAgentMenuText}>Tier Management</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.superAgentMenuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
                     navigation.navigate("SuperAgentOffers");
                   }}
                 >

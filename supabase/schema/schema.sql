@@ -195,6 +195,18 @@ CREATE TABLE public.super_agent_assignments (
   CONSTRAINT super_agent_assignments_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES auth.users(id),
   CONSTRAINT super_agent_assignments_offer_id_fkey FOREIGN KEY (offer_id) REFERENCES public.super_agent_offers(id)
 );
+CREATE TABLE public.super_agent_tiers (
+  id bigint NOT NULL DEFAULT nextval('super_agent_tiers_id_seq'::regclass),
+  super_agent_id uuid NOT NULL,
+  name text NOT NULL,
+  description text,
+  is_active boolean NOT NULL DEFAULT true,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT super_agent_tiers_pkey PRIMARY KEY (id),
+  CONSTRAINT super_agent_tiers_super_agent_id_fkey FOREIGN KEY (super_agent_id) REFERENCES auth.users(id),
+  CONSTRAINT super_agent_tiers_name_unique UNIQUE (super_agent_id, name)
+);
 CREATE TABLE public.agent_payment_settlements (
   id bigint NOT NULL DEFAULT nextval('agent_payment_settlements_id_seq'::regclass),
   agent_order_id bigint,

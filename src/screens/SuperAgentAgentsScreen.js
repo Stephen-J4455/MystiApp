@@ -14,6 +14,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import colors from "../components/theme";
+import { getEdgeFunctionName } from "../lib/env";
 
 const normalizeRole = (user) => {
   const role = (user?.user_metadata?.role || user?.app_metadata?.role || "")
@@ -38,6 +39,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const [agents, setAgents] = useState([]);
   const [form, setForm] = useState({
     fullName: "",
+    businessName: "",
     email: "",
     phone: "",
     password: "",
@@ -79,7 +81,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const fetchAgents = async (superAgentId) => {
     try {
       const { data, error } = await supabase.functions.invoke(
-        "super-agent-user-management",
+        getEdgeFunctionName("super-agent-user-management"),
         {
           body: {
             action: "listUsers",
@@ -109,10 +111,14 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const handleCreateSubAgent = async () => {
     if (!currentUser) return;
 
-    const { fullName, email, phone, password, initialBalance } = form;
+    const { fullName, businessName, email, phone, password, initialBalance } =
+      form;
 
-    if (!fullName.trim() || !email.trim()) {
-      showError("Validation", "Full name and email are required.");
+    if (!fullName.trim() || !businessName.trim() || !email.trim()) {
+      showError(
+        "Validation",
+        "Full name, business name, and email are required.",
+      );
       return;
     }
 
@@ -139,13 +145,14 @@ export default function SuperAgentAgentsScreen({ navigation }) {
       setCreatingAgent(true);
 
       const { data: responseData, error: userError } =
-        await supabase.functions.invoke("super-agent-user-management", {
+        await supabase.functions.invoke(getEdgeFunctionName("super-agent-user-management"), {
           body: {
             action: "createSubAgent",
             userData: {
               email: email.trim(),
               password: password.trim(),
               full_name: fullName.trim(),
+              business_name: businessName.trim(),
               phone: phone.trim() || null,
               initialBalance: balance,
             },
@@ -160,6 +167,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
       setForm({
         fullName: "",
+        businessName: "",
         email: "",
         phone: "",
         password: "",
@@ -214,6 +222,16 @@ export default function SuperAgentAgentsScreen({ navigation }) {
             value={form.fullName}
             onChangeText={(value) =>
               setForm((prev) => ({ ...prev, fullName: value }))
+            }
+            style={styles.input}
+          />
+
+          <Text style={styles.label}>Business Name</Text>
+          <TextInput
+            placeholder="Enter business name"
+            value={form.businessName}
+            onChangeText={(value) =>
+              setForm((prev) => ({ ...prev, businessName: value }))
             }
             style={styles.input}
           />
@@ -293,6 +311,10 @@ export default function SuperAgentAgentsScreen({ navigation }) {
                   <Text style={styles.agentName}>
                     {agent.user_metadata?.full_name ||
                       agent.email?.split("@")[0]}
+                  </Text>
+                  <Text style={styles.agentMeta}>
+                    {agent.user_metadata?.business_name ||
+                      "Business name not set"}
                   </Text>
                   <Text style={styles.agentMeta}>{agent.email}</Text>
                 </View>

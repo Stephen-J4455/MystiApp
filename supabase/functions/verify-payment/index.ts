@@ -1,4 +1,4 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+﻿import { createClient } from "npm:@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -100,7 +100,7 @@ Deno.serve(async (req) => {
     }
 
     // Verify payment with Paystack
-    const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
+    const paystackSecret = Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY");
     if (!paystackSecret) {
       console.error("PAYSTACK_SECRET_KEY not configured");
       return new Response(
@@ -220,6 +220,36 @@ Deno.serve(async (req) => {
       offer?.super_agent_id ||
       null;
 
+    // Resolve the Paystack subaccount linked to the super agent (if any)
+    // so the order and settlement can be traced back to where the funds were routed.
+    let resolvedSubaccountCode: string | null = null;
+    if (resolvedSuperAgentId) {
+      try {
+        const { data: subaccountRow } = await supabaseAdmin
+          .from("super_agent_paystack")
+          .select("subaccount_code, is_active")
+          .eq("super_agent_id", resolvedSuperAgentId)
+          .maybeSingle();
+
+        if (subaccountRow?.is_active && subaccountRow.subaccount_code) {
+          resolvedSubaccountCode = subaccountRow.subaccount_code;
+        }
+      } catch (subaccountError) {
+        console.warn(
+          "Could not resolve super-agent subaccount, continuing without it:",
+          subaccountError,
+        );
+      }
+    }
+
+    // Paystack returns the subaccount it charged through on the transaction
+    // object. Prefer that as the source of truth, then fall back to our DB record.
+    const paystackSubaccountCode =
+      verifyData.data?.subaccount?.subaccount_code ||
+      verifyData.data?.subaccount_code ||
+      resolvedSubaccountCode ||
+      null;
+
     const settlement = (() => {
       const gross = Number(orderAmount || 0);
       const adminShareRate = 0.3;
@@ -237,36 +267,99 @@ Deno.serve(async (req) => {
       };
     })();
 
-    const orderData = {
-      user_id: user.id,
-      user_name:
-        user.user_metadata?.full_name || user.email?.split("@")[0] || "Unknown",
-      user_email: user.email,
-      phone: recipient_phone || user.user_metadata?.phone || null,
-      offer_title: orderTitle,
+    const isAgentOrder = Boolean(
+      resolvedSuperAgentId || user.user_metadata?.role === "Agent",
+    );
+
+    const sharedOrderFields = {
       amount: orderAmount,
       network: orderNetwork,
       status: "pending",
       payment_reference: reference,
-      is_self: isSelfPurchase,
-      data_amount: orderTitle,
-      offer_id: parseInt(offer_id),
       paystack_transaction_id: verifyData.data.id.toString(),
       paystack_transaction_status: verifyData.data.status,
       paid_at: new Date(verifyData.data.paid_at).toISOString(),
-      device_token: null,
-      country_code: "GH", // Ghana
       channel: verifyData.data.channel || null,
       bank: verifyData.data.authorization?.bank || null,
     };
 
-    console.log("Creating order with data:", orderData);
+    let order: any = null;
+    let orderError: any = null;
 
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from("orders")
-      .insert(orderData)
-      .select()
-      .single();
+    if (isAgentOrder) {
+      // Sub-agent / super-agent path — use agent_orders so the settlement split
+      // and super-agent chain survive the order lifecycle.
+      const agentOrderData = {
+        agent_id: user.id,
+        offer_id: parseInt(offer_id),
+        offer_title: orderTitle,
+        network: orderNetwork,
+        amount: orderAmount,
+        recipient_phone: recipient_phone || user.user_metadata?.phone || null,
+        recipient_name:
+          user.user_metadata?.full_name || user.email?.split("@")[0] || null,
+        status: "pending",
+        transaction_status: verifyData.data.status,
+        channel: sharedOrderFields.channel,
+        device_token: null,
+        super_agent_id: resolvedSuperAgentId,
+        admin_share: settlement.adminShare,
+        super_agent_share: settlement.superAgentShare,
+        agent_net: settlement.agentNet,
+        settlement_status: "pending",
+        paystack_subaccount_code: paystackSubaccountCode,
+        paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
+        paystack_transaction_status: sharedOrderFields.paystack_transaction_status,
+        paid_at: sharedOrderFields.paid_at,
+        bank: sharedOrderFields.bank,
+      };
+
+      console.log("Creating agent_order with data:", agentOrderData);
+
+      const { data, error } = await supabaseAdmin
+        .from("agent_orders")
+        .insert(agentOrderData)
+        .select()
+        .single();
+
+      order = data;
+      orderError = error;
+    } else {
+      const orderData = {
+        user_id: user.id,
+        user_name:
+          user.user_metadata?.full_name || user.email?.split("@")[0] ||
+          "Unknown",
+        user_email: user.email,
+        phone: recipient_phone || user.user_metadata?.phone || null,
+        offer_title: orderTitle,
+        amount: orderAmount,
+        network: orderNetwork,
+        status: "pending",
+        payment_reference: reference,
+        is_self: isSelfPurchase,
+        data_amount: orderTitle,
+        offer_id: parseInt(offer_id),
+        paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
+        paystack_transaction_status: sharedOrderFields.paystack_transaction_status,
+        paid_at: sharedOrderFields.paid_at,
+        device_token: null,
+        country_code: "GH", // Ghana
+        channel: sharedOrderFields.channel,
+        bank: sharedOrderFields.bank,
+      };
+
+      console.log("Creating order with data:", orderData);
+
+      const { data, error } = await supabaseAdmin
+        .from("orders")
+        .insert(orderData)
+        .select()
+        .single();
+
+      order = data;
+      orderError = error;
+    }
 
     if (orderError) {
       console.error("Order creation failed:", orderError);
@@ -283,27 +376,59 @@ Deno.serve(async (req) => {
     }
 
     // Optional: record settlement against the super-agent chain if the extended tables exist.
+    // Only meaningful when the order is in agent_orders (i.e. when isAgentOrder is true).
     try {
-      if (resolvedSuperAgentId) {
+      if (isAgentOrder && resolvedSuperAgentId) {
+        const settlementInsert: Record<string, unknown> = {
+          agent_order_id: order.id,
+          agent_id: user.id,
+          super_agent_id: resolvedSuperAgentId,
+          admin_id: null,
+          gross_amount: orderAmount,
+          super_agent_share: settlement.superAgentShare,
+          admin_share: settlement.adminShare,
+          agent_net: settlement.agentNet,
+          status: "pending",
+        };
+
+        if (paystackSubaccountCode) {
+          // If the schema has been extended to record subaccount on the
+          // settlement row it will be persisted; otherwise the column simply
+          // doesn't exist and the insert succeeds without it.
+          settlementInsert.paystack_subaccount_code = paystackSubaccountCode;
+        }
+
         const { error: settlementError } = await supabaseAdmin
           .from("agent_payment_settlements")
-          .insert({
-            agent_order_id: order.id,
-            agent_id: user.id,
-            super_agent_id: resolvedSuperAgentId,
-            admin_id: null,
-            gross_amount: orderAmount,
-            super_agent_share: settlement.superAgentShare,
-            admin_share: settlement.adminShare,
-            agent_net: settlement.agentNet,
-            status: "pending",
-          });
+          .insert(settlementInsert);
 
         if (settlementError) {
-          console.warn(
-            "Super-agent settlement table is unavailable or not migrated yet:",
-            settlementError.message,
-          );
+          // If the only issue is an unknown paystack_subaccount_code column,
+          // retry without it so a fresh database without migration 004 still works.
+          if (
+            settlementError.code === "42703" &&
+            /paystack_subaccount_code/.test(settlementError.message || "")
+          ) {
+            delete settlementInsert.paystack_subaccount_code;
+            const { error: retryError } = await supabaseAdmin
+              .from("agent_payment_settlements")
+              .insert(settlementInsert);
+            if (retryError) {
+              console.warn(
+                "Super-agent settlement insert (without subaccount) failed:",
+                retryError.message,
+              );
+            } else {
+              console.log(
+                "Settlement row created (without subaccount column)",
+              );
+            }
+          } else {
+            console.warn(
+              "Super-agent settlement table is unavailable or not migrated yet:",
+              settlementError.message,
+            );
+          }
         } else {
           console.log(
             "Settlement row created successfully for super-agent split",
@@ -365,6 +490,9 @@ Deno.serve(async (req) => {
       JSON.stringify({
         success: true,
         order: order,
+        is_agent_order: isAgentOrder,
+        super_agent_id: resolvedSuperAgentId,
+        paystack_subaccount_code: paystackSubaccountCode,
         message: "Payment verified and order created successfully",
       }),
       {
@@ -386,3 +514,5 @@ Deno.serve(async (req) => {
     );
   }
 });
+
+

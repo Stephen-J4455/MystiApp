@@ -1,3 +1,3 @@
-// Configuration file for external services
-export const PAYSTACK_PUBLIC_KEY =
-  "pk_live_aa97a7f0f4c0e512607d0c2e0f5a53a629614273"; // Replace with your actual Paystack public key
+// Paystack public key + helpers — driven by src/lib/env.js so the bundle
+// automatically picks up test keys for non-production builds.
+export { PAYSTACK_PUBLIC_KEY, PAYSTACK_LIVE, PAYSTACK_LABEL, APP_ENV } from "./env";

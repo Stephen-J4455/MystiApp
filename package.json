@@ -8,7 +8,22 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "build": "expo export --platform web",
-    "deploy": "gh-pages -d dist"
+    "deploy": "gh-pages -d dist",
+    "deploy:test": "pwsh supabase/scripts/deploy.ps1 -Env test",
+    "deploy:prod": "pwsh supabase/scripts/deploy.ps1 -Env production",
+    "deploy:test:bash": "bash supabase/scripts/deploy.sh test",
+    "deploy:prod:bash": "bash supabase/scripts/deploy.sh production",
+    "functions:deploy:test": "pwsh supabase/scripts/deploy.ps1 -Env test -SkipMigrations",
+    "functions:deploy:prod": "pwsh supabase/scripts/deploy.ps1 -Env production -SkipMigrations",
+    "db:push:test": "pwsh supabase/scripts/deploy.ps1 -Env test -SkipFunctions",
+    "db:push:prod": "pwsh supabase/scripts/deploy.ps1 -Env production -SkipFunctions",
+    "secrets:set:test": "pwsh supabase/scripts/set-secrets.ps1 -Env test",
+    "secrets:set:prod": "pwsh supabase/scripts/set-secrets.ps1 -Env production",
+    "functions:test:test": "pwsh supabase/scripts/test-functions.ps1 -Env test",
+    "functions:test:prod": "pwsh supabase/scripts/test-functions.ps1 -Env production",
+    "env:dev": "cross-env EXPO_PUBLIC_APP_ENV=development expo start",
+    "env:test": "cross-env EXPO_PUBLIC_APP_ENV=test expo start",
+    "env:prod": "cross-env EXPO_PUBLIC_APP_ENV=production expo start"
   },
   "dependencies": {
     "@expo/cli": "^54.0.16",
@@ -20,7 +35,7 @@
     "expo": "~54.0.31",
     "expo-constants": "~18.0.13",
     "expo-device": "~8.0.10",
-    "expo-font": "^14.0.9",
+    "expo-font": "~14.0.9",
     "expo-linking": "~8.0.11",
     "expo-notifications": "~0.32.16",
     "expo-status-bar": "~3.0.9",
@@ -38,7 +53,9 @@
   "private": true,
   "devDependencies": {
     "@types/react": "~19.1.10",
+    "cross-env": "^7.0.3",
     "gh-pages": "^6.3.0",
+    "supabase": "^2.117.0",
     "typescript": "~5.9.3"
   }
 }

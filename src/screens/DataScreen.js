@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useRef,
+} from "react";
 import {
   View,
   Text,
@@ -17,7 +23,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 import { WebView } from "react-native-webview";
-import { PAYSTACK_PUBLIC_KEY } from "../lib/config";
+import { PAYSTACK_PUBLIC_KEY, getEdgeFunctionName } from "../lib/env";
 import { Modal } from "react-native";
 import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
@@ -34,6 +40,8 @@ export default function DataScreen({ navigation, route }) {
   const [userPhone, setUserPhone] = useState("");
   const [purchaseType, setPurchaseType] = useState("self"); // 'self' or 'others'
   const [isAgent, setIsAgent] = useState(false);
+  const [resolvedSubaccountCode, setResolvedSubaccountCode] = useState(null);
+  const [superAgentId, setSuperAgentId] = useState(null);
   const [agentChecked, setAgentChecked] = useState(false);
   const [agentBalance, setAgentBalance] = useState(0);
   const { showError, showSuccess } = useNotification();
@@ -55,7 +63,7 @@ export default function DataScreen({ navigation, route }) {
         }
 
         const { data, error } = await supabase.functions.invoke(
-          "verify-payment",
+          getEdgeFunctionName("verify-payment"),
           {
             body: {
               reference: response.reference,
@@ -67,15 +75,17 @@ export default function DataScreen({ navigation, route }) {
                 purchaseType === "self"
                   ? userPhone
                   : recipientPhone.trim().replace(/\s+/g, ""),
+              super_agent_id: superAgentId,
+              paystack_subaccount_code: resolvedSubaccountCode,
             },
-          }
+          },
         );
 
         if (error) {
           console.error("Edge function error:", error);
           showError(
             "Payment Verification Failed",
-            "Please contact support if payment was deducted"
+            "Please contact support if payment was deducted",
           );
           return;
         }
@@ -83,7 +93,7 @@ export default function DataScreen({ navigation, route }) {
         if (data.success) {
           showSuccess(
             "Purchase Successful!",
-            `Your ${selectedBundle.name} data bundle has been purchased successfully!`
+            `Your ${selectedBundle.name} data bundle has been purchased successfully!`,
           );
           navigation.navigate("Receipt", {
             transaction: {
@@ -111,14 +121,14 @@ export default function DataScreen({ navigation, route }) {
         } else {
           showError(
             "Payment Failed",
-            data.message || "Payment verification failed"
+            data.message || "Payment verification failed",
           );
         }
       } catch (error) {
         console.error("Payment verification error:", error);
         showError(
           "Payment Verification Failed",
-          "Please contact support if payment was deducted"
+          "Please contact support if payment was deducted",
         );
       }
     },
@@ -131,7 +141,7 @@ export default function DataScreen({ navigation, route }) {
       navigation,
       showError,
       showSuccess,
-    ]
+    ],
   );
 
   const handlePaymentClose = useCallback(() => {
@@ -148,10 +158,11 @@ export default function DataScreen({ navigation, route }) {
       reference: `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       email: userEmail,
       amount: Math.floor(
-        parseFloat(selectedBundle.price.replace("Ghc ", "")) * 100
+        parseFloat(selectedBundle.price.replace("Ghc ", "")) * 100,
       ),
       currency: "GHS",
       publicKey: PAYSTACK_PUBLIC_KEY,
+      subaccount: resolvedSubaccountCode || undefined,
       metadata: {
         offer_id: selectedBundle.id,
         offer_title: selectedBundle.name,
@@ -161,6 +172,8 @@ export default function DataScreen({ navigation, route }) {
           purchaseType === "self"
             ? userPhone
             : recipientPhone.trim().replace(/\s+/g, ""),
+        super_agent_id: superAgentId || null,
+        paystack_subaccount_code: resolvedSubaccountCode || null,
       },
       onSuccess: handlePaymentSuccess,
       onClose: handlePaymentClose,
@@ -172,6 +185,8 @@ export default function DataScreen({ navigation, route }) {
     purchaseType,
     userPhone,
     recipientPhone,
+    resolvedSubaccountCode,
+    superAgentId,
     handlePaymentSuccess,
     handlePaymentClose,
   ]);
@@ -208,7 +223,7 @@ export default function DataScreen({ navigation, route }) {
           duration: 800,
           useNativeDriver: true,
         }),
-      ])
+      ]),
     );
     animation.start();
     return () => animation.stop();
@@ -223,6 +238,12 @@ export default function DataScreen({ navigation, route }) {
       if (user && user.email) {
         setUserEmail(user.email);
         setUserPhone(user.user_metadata?.phone || "");
+
+        const assignedSuperAgentId =
+          user.user_metadata?.super_agent_id ||
+          user.user_metadata?.superAgentId ||
+          null;
+        setSuperAgentId(assignedSuperAgentId);
 
         // Check if user is an agent
         try {
@@ -240,9 +261,30 @@ export default function DataScreen({ navigation, route }) {
         } catch (error) {
           console.error("Error checking agent status:", error);
           setIsAgent(false);
-        } finally {
-          setAgentChecked(true);
         }
+
+        // If this user is a sub-agent of a super agent, ask the edge
+        // function for the super-agent's Paystack subaccount so the
+        // purchase is routed through it.
+        if (assignedSuperAgentId) {
+          try {
+            const { data: subaccountResponse } = await supabase.functions.invoke(
+              getEdgeFunctionName("super-agent-user-management"),
+              { body: { action: "getPaystackSubaccount" } },
+            );
+            const record = subaccountResponse?.subaccount || null;
+            if (record?.is_active && record.subaccount_code) {
+              setResolvedSubaccountCode(record.subaccount_code);
+            }
+          } catch (subaccountError) {
+            console.warn(
+              "Could not resolve Paystack subaccount for data purchase:",
+              subaccountError,
+            );
+          }
+        }
+
+        setAgentChecked(true);
       } else {
         // No user logged in, treat as regular user
         setIsAgent(false);
@@ -258,45 +300,121 @@ export default function DataScreen({ navigation, route }) {
   const fetchOffers = async () => {
     try {
       setLoading(true);
-      let data, error;
 
       if (isAgent) {
-        // Fetch from agent_offers for agents
-        const result = await supabase
-          .from("agent_offers")
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          setBundles([]);
+          setLoading(false);
+          return;
+        }
+
+        const { data: assignments, error: assignmentsError } = await supabase
+          .from("super_agent_assignments")
           .select("*")
-          .eq("network", network)
-          .order("price", { ascending: true });
-        data = result.data;
-        error = result.error;
-      } else {
-        // Fetch from regular offers for regular users
-        const result = await supabase
-          .from("offers")
+          .eq("agent_id", user.id)
+          .eq("is_active", true)
+          .order("assigned_at", { ascending: false });
+
+        if (assignmentsError) {
+          console.error("Error fetching assigned offers:", assignmentsError);
+          showError("Error", "Failed to load your assigned data bundles");
+          setBundles([]);
+          setLoading(false);
+          return;
+        }
+
+        if (!assignments || assignments.length === 0) {
+          setBundles([]);
+          setLoading(false);
+          return;
+        }
+
+        const offerIds = [
+          ...new Set(
+            assignments
+              .map((assignment) => assignment.offer_id)
+              .filter((offerId) => offerId !== null && offerId !== undefined),
+          ),
+        ];
+
+        const { data: offers, error: offersError } = await supabase
+          .from("super_agent_offers")
           .select("*")
+          .in("id", offerIds)
           .eq("network", network)
+          .eq("is_active", true)
           .order("price", { ascending: true });
-        data = result.data;
-        error = result.error;
+
+        if (offersError) {
+          console.error(
+            "Error fetching assigned super-agent offers:",
+            offersError,
+          );
+          showError("Error", "Failed to load your assigned data bundles");
+          setBundles([]);
+          setLoading(false);
+          return;
+        }
+
+        const assignedOfferIds = new Set(
+          (offers || []).map((offer) => offer.id),
+        );
+        const filteredAssignments = (assignments || []).filter((assignment) =>
+          assignedOfferIds.has(assignment.offer_id),
+        );
+
+        const mappedBundles = (offers || []).map((offer) => {
+          const matchedAssignment = filteredAssignments.find(
+            (assignment) => Number(assignment.offer_id) === Number(offer.id),
+          );
+
+          return {
+            id: offer.id,
+            name: offer.title,
+            price: `Ghc ${parseFloat(offer.price).toFixed(2)}`,
+            validity:
+              matchedAssignment?.tier_name ||
+              offer.tier_name ||
+              "Assigned tier",
+            noExpire: true,
+          };
+        });
+
+        setBundles(mappedBundles);
+        setLoading(false);
+        return;
       }
+
+      const { data, error } = await supabase
+        .from("offers")
+        .select("*")
+        .eq("network", network)
+        .order("price", { ascending: true });
 
       if (error) {
         console.error("Error fetching offers:", error);
         showError("Error", "Failed to load data bundles");
-      } else {
-        // Map offers data to expected format
-        const mappedBundles = data.map((offer) => ({
-          id: offer.id,
-          name: offer.title,
-          price: `Ghc ${parseFloat(offer.price).toFixed(2)}`,
-          validity: offer.description || "30 Days", // Default validity if not provided
-          noExpire: true, // Show No Expire badge for all bundles
-        }));
-        setBundles(mappedBundles);
+        setBundles([]);
+        return;
       }
+
+      const mappedBundles = (data || []).map((offer) => ({
+        id: offer.id,
+        name: offer.title,
+        price: `Ghc ${parseFloat(offer.price).toFixed(2)}`,
+        validity: offer.description || "30 Days",
+        noExpire: true,
+      }));
+      setBundles(mappedBundles);
     } catch (error) {
       console.error("Error:", error);
       showError("Error", "Failed to load data bundles");
+      setBundles([]);
     } finally {
       setLoading(false);
     }
@@ -319,7 +437,7 @@ export default function DataScreen({ navigation, route }) {
       if (!userPhone.trim()) {
         showError(
           "Phone Number Required",
-          "Please update your profile with a phone number to purchase for yourself"
+          "Please update your profile with a phone number to purchase for yourself",
         );
         return;
       }
@@ -358,7 +476,7 @@ export default function DataScreen({ navigation, route }) {
       if (!recipientPhone.trim()) {
         showError(
           "Phone Number Required",
-          "Please enter the recipient's phone number"
+          "Please enter the recipient's phone number",
         );
         return;
       }
@@ -370,7 +488,7 @@ export default function DataScreen({ navigation, route }) {
       if (!phoneRegex.test(cleanPhone)) {
         showError(
           "Invalid Phone Number",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)"
+          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
         );
         return;
       }
@@ -409,7 +527,7 @@ export default function DataScreen({ navigation, route }) {
       if (!recipientName.trim()) {
         showError(
           "Recipient Name Required",
-          "Please enter the recipient's name"
+          "Please enter the recipient's name",
         );
         return;
       }
@@ -417,7 +535,7 @@ export default function DataScreen({ navigation, route }) {
       if (!recipientPhone.trim()) {
         showError(
           "Phone Number Required",
-          "Please enter the recipient's phone number"
+          "Please enter the recipient's phone number",
         );
         return;
       }
@@ -429,7 +547,7 @@ export default function DataScreen({ navigation, route }) {
       if (!phoneRegex.test(cleanPhone)) {
         showError(
           "Invalid Phone Number",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)"
+          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
         );
         return;
       }
@@ -458,8 +576,9 @@ export default function DataScreen({ navigation, route }) {
       if (!walletData || walletData.balance < price) {
         showError(
           "Insufficient Balance",
-          `Your wallet balance (GHS ${walletData?.balance || 0
-          }) is not enough for this purchase (GHS ${price})`
+          `Your wallet balance (GHS ${
+            walletData?.balance || 0
+          }) is not enough for this purchase (GHS ${price})`,
         );
         return;
       }
@@ -515,7 +634,8 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
 
-      if (true) { // Proceed to send notification via Edge Function directly
+      if (true) {
+        // Proceed to send notification via Edge Function directly
         // Send push notification to agent
         try {
           const { error: agentNotifyError } = await supabase.functions.invoke(
@@ -527,11 +647,14 @@ export default function DataScreen({ navigation, route }) {
                 message: `${bundle.name} data bundle purchased for ${recipientName.trim()}`,
                 type: "agent_order",
               },
-            }
+            },
           );
 
           if (agentNotifyError) {
-            console.error("Failed to send agent notification:", agentNotifyError);
+            console.error(
+              "Failed to send agent notification:",
+              agentNotifyError,
+            );
           } else {
             console.log("Agent notification sent successfully");
           }
@@ -548,14 +671,17 @@ export default function DataScreen({ navigation, route }) {
             });
             console.log("Admin notification for agent order sent successfully");
           } catch (adminPushError) {
-            console.error("Error notifying admins about agent order:", adminPushError);
+            console.error(
+              "Error notifying admins about agent order:",
+              adminPushError,
+            );
           }
         } catch (pushError) {
           console.error("Error sending agent push notification:", pushError);
         }
       }
 
-      // Note: Admin notifications for agent orders should be handled via database 
+      // Note: Admin notifications for agent orders should be handled via database
       // triggers or a separate edge function to avoid permission issues
 
       // Success - navigate to receipt screen
@@ -584,7 +710,7 @@ export default function DataScreen({ navigation, route }) {
       // Show success message
       showSuccess(
         "Purchase Successful!",
-        `Data bundle purchased successfully for ${recipientName.trim()}!`
+        `Data bundle purchased successfully for ${recipientName.trim()}!`,
       );
     } catch (error) {
       console.error("Agent purchase error:", error);
@@ -593,7 +719,7 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
-  const generatePaystackHTML = (amount, email, reference) => {
+  const generatePaystackHTML = (amount, email, reference, subaccountCode) => {
     return `
       <!DOCTYPE html>
       <html>
@@ -747,7 +873,7 @@ export default function DataScreen({ navigation, route }) {
  
         <script>
           document.getElementById('paystack-button').onclick = function() {
-            var handler = PaystackPop.setup({
+            var setupOptions = {
               key: '${PAYSTACK_PUBLIC_KEY}',
               email: '${email}',
               amount: ${amount * 100},
@@ -764,7 +890,9 @@ export default function DataScreen({ navigation, route }) {
                   type: 'cancel'
                 }));
               }
-            });
+            };
+            ${subaccountCode ? "setupOptions.subaccount = '" + subaccountCode + "';" : ""}
+            var handler = PaystackPop.setup(setupOptions);
             handler.openIframe();
           };
         </script>
@@ -837,10 +965,7 @@ export default function DataScreen({ navigation, route }) {
         </View>
       </TouchableOpacity>
 
-      <ScrollView
-        style={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
         <View style={styles.networkHeader}>
           {getNetworkImage(displayNetwork) ? (
             <ImageBackground
@@ -904,13 +1029,15 @@ export default function DataScreen({ navigation, route }) {
                 <Ionicons
                   name="person"
                   size={18}
-                  color={purchaseType === "self" ? colors.white : colors.primary}
+                  color={
+                    purchaseType === "self" ? colors.white : colors.primary
+                  }
                 />
                 <Text
                   style={[
                     styles.purchaseTypeButtonText,
                     purchaseType === "self" &&
-                    styles.purchaseTypeButtonTextActive,
+                      styles.purchaseTypeButtonTextActive,
                   ]}
                 >
                   For Myself
@@ -926,13 +1053,15 @@ export default function DataScreen({ navigation, route }) {
                 <Ionicons
                   name="people"
                   size={18}
-                  color={purchaseType === "others" ? colors.white : colors.primary}
+                  color={
+                    purchaseType === "others" ? colors.white : colors.primary
+                  }
                 />
                 <Text
                   style={[
                     styles.purchaseTypeButtonText,
                     purchaseType === "others" &&
-                    styles.purchaseTypeButtonTextActive,
+                      styles.purchaseTypeButtonTextActive,
                   ]}
                 >
                   For Others
@@ -1169,7 +1298,7 @@ export default function DataScreen({ navigation, route }) {
                   >
                     GHS{" "}
                     {parseFloat(
-                      selectedBundle.price.replace("Ghc ", "")
+                      selectedBundle.price.replace("Ghc ", ""),
                     ).toFixed(2)}
                   </Text>
                 </View>
@@ -1200,14 +1329,14 @@ export default function DataScreen({ navigation, route }) {
                         console.error("Paystack payment not initialized");
                         showError(
                           "Payment Error",
-                          "Payment system not ready. Please wait a moment and try again."
+                          "Payment system not ready. Please wait a moment and try again.",
                         );
                       }
                     } catch (error) {
                       console.error("Payment initialization error:", error);
                       showError(
                         "Payment Error",
-                        "Failed to initialize payment. Please try again."
+                        "Failed to initialize payment. Please try again.",
                       );
                     } finally {
                       // Reset loading after a short delay to allow Paystack to open
@@ -1246,7 +1375,8 @@ export default function DataScreen({ navigation, route }) {
                 html: generatePaystackHTML(
                   parseFloat(selectedBundle.price.replace("Ghc ", "")),
                   userEmail,
-                  `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+                  `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                  resolvedSubaccountCode,
                 ),
               }}
               style={{ flex: 1 }}
@@ -1273,29 +1403,31 @@ export default function DataScreen({ navigation, route }) {
 
                     // Call Supabase edge function to verify payment and create order
                     const { data, error } = await supabase.functions.invoke(
-                      "verify-payment",
+                      getEdgeFunctionName("verify-payment"),
                       {
                         body: {
                           reference: message.data.reference,
                           user_id: user.id,
                           offer_id: selectedBundle.id,
                           amount: parseFloat(
-                            selectedBundle.price.replace("Ghc ", "")
+                            selectedBundle.price.replace("Ghc ", ""),
                           ),
                           network: network,
                           recipient_phone:
                             purchaseType === "self"
                               ? userPhone
                               : recipientPhone.trim().replace(/\s+/g, ""), // Clean phone number
+                          super_agent_id: superAgentId,
+                          paystack_subaccount_code: resolvedSubaccountCode,
                         },
-                      }
+                      },
                     );
 
                     if (error) {
                       console.error("Edge function error:", error);
                       showError(
                         "Payment Verification Failed",
-                        "Please contact support if payment was deducted"
+                        "Please contact support if payment was deducted",
                       );
                       return;
                     }
@@ -1303,7 +1435,7 @@ export default function DataScreen({ navigation, route }) {
                     if (data.success) {
                       showSuccess(
                         "Purchase Successful!",
-                        `Your ${selectedBundle.name} data bundle has been purchased successfully!`
+                        `Your ${selectedBundle.name} data bundle has been purchased successfully!`,
                       );
                       // Navigate to receipt screen
                       navigation.navigate("Receipt", {
@@ -1332,21 +1464,21 @@ export default function DataScreen({ navigation, route }) {
                     } else {
                       showError(
                         "Payment Failed",
-                        data.message || "Payment verification failed"
+                        data.message || "Payment verification failed",
                       );
                     }
                   } catch (error) {
                     console.error("Payment verification error:", error);
                     showError(
                       "Payment Verification Failed",
-                      "Please contact support if payment was deducted"
+                      "Please contact support if payment was deducted",
                     );
                   }
                 } else if (message.type === "cancel") {
                   setPaystackModalVisible(false);
                   showError(
                     "Payment Cancelled",
-                    "Payment was cancelled by user"
+                    "Payment was cancelled by user",
                   );
                 }
               }}
@@ -1362,7 +1494,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.white,
-
   },
   floatingBackButton: {
     position: "absolute",
@@ -1442,7 +1573,6 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingTop: 25,
-
   },
   networkHeader: {
     margin: 20,

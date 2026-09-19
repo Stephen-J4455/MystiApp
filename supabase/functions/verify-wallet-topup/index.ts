@@ -1,4 +1,4 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+﻿import { createClient } from "npm:@supabase/supabase-js@2";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -88,7 +88,7 @@ Deno.serve(async (req) => {
     }
 
     // Verify payment with Paystack
-    const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
+    const paystackSecret = Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY");
     if (!paystackSecret) {
       console.error("PAYSTACK_SECRET_KEY not configured");
       return new Response(
@@ -170,7 +170,7 @@ Deno.serve(async (req) => {
     }
 
     // Update wallet_topups
-    const updateData = {
+    const updateData: Record<string, unknown> = {
       status: "success",
       paystack_transaction_id: verifyData.data.id.toString(),
       paystack_transaction_status: verifyData.data.status,
@@ -179,23 +179,84 @@ Deno.serve(async (req) => {
       bank: verifyData.data.authorization?.bank || null,
     };
 
+    // Resolve the super agent for the current agent (if any) and capture the
+    // Paystack subaccount the topup was charged through so we can reconcile
+    // wallet funding against the super-agent's settlement later on.
+    let resolvedSuperAgentId: string | null = user.user_metadata
+      ?.super_agent_id || null;
+    let resolvedSubaccountCode: string | null =
+      verifyData.data?.subaccount?.subaccount_code ||
+      verifyData.data?.subaccount_code ||
+      null;
+
+    if (resolvedSuperAgentId && !resolvedSubaccountCode) {
+      try {
+        const { data: subaccountRow } = await supabaseAdmin
+          .from("super_agent_paystack")
+          .select("subaccount_code, is_active")
+          .eq("super_agent_id", resolvedSuperAgentId)
+          .maybeSingle();
+        if (subaccountRow?.is_active && subaccountRow.subaccount_code) {
+          resolvedSubaccountCode = subaccountRow.subaccount_code;
+        }
+      } catch (subaccountError) {
+        console.warn(
+          "Could not resolve super-agent subaccount for wallet topup:",
+          subaccountError,
+        );
+      }
+    }
+
+    if (resolvedSubaccountCode) {
+      updateData.paystack_subaccount_code = resolvedSubaccountCode;
+    }
+
     const { error: updateError } = await supabaseAdmin
       .from("wallet_topups")
       .update(updateData)
       .eq("reference", reference);
 
     if (updateError) {
-      console.error("Failed to update wallet_topups:", updateError);
-      return new Response(
-        JSON.stringify({
-          error: "Failed to update wallet topup",
-          details: updateError,
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
+      // Tolerate databases that haven't run migration 004 (no
+      // paystack_subaccount_code column) by retrying without that field.
+      if (
+        updateError.code === "42703" &&
+        /paystack_subaccount_code/.test(updateError.message || "")
+      ) {
+        delete updateData.paystack_subaccount_code;
+        const { error: retryError } = await supabaseAdmin
+          .from("wallet_topups")
+          .update(updateData)
+          .eq("reference", reference);
+        if (retryError) {
+          console.error(
+            "Failed to update wallet_topups (without subaccount column):",
+            retryError,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "Failed to update wallet topup",
+              details: retryError,
+            }),
+            {
+              status: 500,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+      } else {
+        console.error("Failed to update wallet_topups:", updateError);
+        return new Response(
+          JSON.stringify({
+            error: "Failed to update wallet topup",
+            details: updateError,
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
     }
 
     // Get or create agent_wallet
@@ -325,3 +386,5 @@ Deno.serve(async (req) => {
     );
   }
 });
+
+
