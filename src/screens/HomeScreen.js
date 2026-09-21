@@ -847,6 +847,19 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
+                    navigation.navigate("SuperAgentPaystack");
+                  }}
+                >
+                  <Ionicons name="card" size={18} color={colors.primary} />
+                  <Text style={styles.superAgentMenuText}>
+                    Paystack Sub-Account
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.superAgentMenuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
                     navigation.navigate("Profile");
                   }}
                 >

@@ -83,19 +83,20 @@ Deno.serve(async (req) => {
 
     const userRole = normalizeRole(user);
     const isAllowedAdmin = userRole === "Admin" || userRole === "SuperAgent";
-    if (!isAllowedAdmin) {
-      return new Response(JSON.stringify({ error: "User not allowed" }), {
-        status: 403,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
 
     const body = await req.json().catch(() => ({}));
     const { action, superAgentId, userData } = body;
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
+    // --- listUsers: only Admin or SuperAgent may list users ---
     if (action === "listUsers") {
+      if (!isAllowedAdmin) {
+        return new Response(
+          JSON.stringify({ error: "Only admins and super-agents can list users" }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
       const { data: usersData, error: listError } =
         await supabaseAdmin.auth.admin.listUsers();
 
@@ -449,20 +450,37 @@ Deno.serve(async (req) => {
     }
 
     if (action === "getPaystackSubaccount") {
-      if (userRole !== "SuperAgent") {
+      // Allow SuperAgents to get their own sub-account, OR
+      // Allow Sub-Agents to get their assigned SuperAgent's sub-account.
+      const targetSuperAgentId = user.user_metadata?.super_agent_id || null;
+      const effectiveAgentId = userRole === "SuperAgent" ? user.id : targetSuperAgentId;
+
+      if (!effectiveAgentId) {
         return new Response(
-          JSON.stringify({ error: "Only super agents can read their subaccount" }),
-          {
-            status: 403,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
+          JSON.stringify({ error: "No super_agent_id found in user metadata" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
         );
+      }
+
+      if (userRole !== "SuperAgent") {
+        const isMember = superAgentId
+          ? String(superAgentId) === String(user.id)
+          : true;
+        if (!isMember && !targetSuperAgentId) {
+          return new Response(
+            JSON.stringify({ error: "Must be a super-agent or have a super_agent_id assigned" }),
+            {
+              status: 403,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
       }
 
       const { data, error } = await supabaseAdmin
         .from("super_agent_paystack")
         .select("*")
-        .eq("super_agent_id", user.id)
+        .eq("super_agent_id", effectiveAgentId)
         .maybeSingle();
 
       if (error) {

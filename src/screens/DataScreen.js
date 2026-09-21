@@ -23,10 +23,11 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 import { WebView } from "react-native-webview";
-import { PAYSTACK_PUBLIC_KEY, getEdgeFunctionName } from "../lib/env";
+import { getEdgeFunctionName } from "../lib/env";
 import { Modal } from "react-native";
 import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
+import { getPaystackPublicKey } from "../lib/supabase";
 
 export default function DataScreen({ navigation, route }) {
   const { network } = route.params;
@@ -150,6 +151,25 @@ export default function DataScreen({ navigation, route }) {
     showError("Payment Cancelled", "Payment was cancelled by user");
   }, [showError]);
 
+  const [paystackPublicKey, setPaystackPublicKey] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    const loadPaystackPublicKey = async () => {
+      const key = await getPaystackPublicKey();
+      if (active) {
+        setPaystackPublicKey(key);
+      }
+    };
+
+    loadPaystackPublicKey();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Paystack configuration
   const paystackConfig = useMemo(() => {
     if (!selectedBundle || !userEmail) return null;
@@ -161,7 +181,7 @@ export default function DataScreen({ navigation, route }) {
         parseFloat(selectedBundle.price.replace("Ghc ", "")) * 100,
       ),
       currency: "GHS",
-      publicKey: PAYSTACK_PUBLIC_KEY,
+      publicKey: paystackPublicKey,
       subaccount: resolvedSubaccountCode || undefined,
       metadata: {
         offer_id: selectedBundle.id,
@@ -187,6 +207,7 @@ export default function DataScreen({ navigation, route }) {
     recipientPhone,
     resolvedSubaccountCode,
     superAgentId,
+    paystackPublicKey,
     handlePaymentSuccess,
     handlePaymentClose,
   ]);
@@ -268,10 +289,11 @@ export default function DataScreen({ navigation, route }) {
         // purchase is routed through it.
         if (assignedSuperAgentId) {
           try {
-            const { data: subaccountResponse } = await supabase.functions.invoke(
-              getEdgeFunctionName("super-agent-user-management"),
-              { body: { action: "getPaystackSubaccount" } },
-            );
+            const { data: subaccountResponse } =
+              await supabase.functions.invoke(
+                getEdgeFunctionName("super-agent-user-management"),
+                { body: { action: "getPaystackSubaccount" } },
+              );
             const record = subaccountResponse?.subaccount || null;
             if (record?.is_active && record.subaccount_code) {
               setResolvedSubaccountCode(record.subaccount_code);
@@ -334,25 +356,15 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
 
-        const offerIds = [
-          ...new Set(
-            assignments
-              .map((assignment) => assignment.offer_id)
-              .filter((offerId) => offerId !== null && offerId !== undefined),
-          ),
-        ];
-
-        const { data: offers, error: offersError } = await supabase
-          .from("super_agent_offers")
-          .select("*")
-          .in("id", offerIds)
-          .eq("network", network)
-          .eq("is_active", true)
-          .order("price", { ascending: true });
+        // Load packages from Jehuca API via edge function instead of DB
+        const { data: offersData, error: offersError } = await supabase.functions.invoke(
+          getEdgeFunctionName("get-packages"),
+          {},
+        );
 
         if (offersError) {
           console.error(
-            "Error fetching assigned super-agent offers:",
+            "Error fetching offers from API:",
             offersError,
           );
           showError("Error", "Failed to load your assigned data bundles");
@@ -361,54 +373,51 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
 
-        const assignedOfferIds = new Set(
-          (offers || []).map((offer) => offer.id),
-        );
-        const filteredAssignments = (assignments || []).filter((assignment) =>
-          assignedOfferIds.has(assignment.offer_id),
+        const offers = offersData?.payload || offersData || [];
+
+        const filteredOffers = offers.filter(
+          (pkg) => pkg.network.toUpperCase() === network.toUpperCase(),
         );
 
-        const mappedBundles = (offers || []).map((offer) => {
-          const matchedAssignment = filteredAssignments.find(
-            (assignment) => Number(assignment.offer_id) === Number(offer.id),
-          );
-
-          return {
-            id: offer.id,
-            name: offer.title,
-            price: `Ghc ${parseFloat(offer.price).toFixed(2)}`,
-            validity:
-              matchedAssignment?.tier_name ||
-              offer.tier_name ||
-              "Assigned tier",
-            noExpire: true,
-          };
-        });
+        const mappedBundles = filteredOffers.map((pkg) => ({
+          id: pkg.id,
+          network: pkg.network,
+          type: pkg.type,
+          name: `${pkg.network} — ${pkg.type}`,
+          price: `Ghc ${(pkg.price / 100).toFixed(2)}`,
+          dataSize: `${pkg.size} GB`,
+        }));
 
         setBundles(mappedBundles);
         setLoading(false);
         return;
       }
 
-      const { data, error } = await supabase
-        .from("offers")
-        .select("*")
-        .eq("network", network)
-        .order("price", { ascending: true });
+      const { data: offersData, error: offersError } = await supabase.functions.invoke(
+        getEdgeFunctionName("get-packages"),
+        {},
+      );
 
-      if (error) {
-        console.error("Error fetching offers:", error);
+      if (offersError) {
+        console.error("Error fetching offers from API:", offersError);
         showError("Error", "Failed to load data bundles");
         setBundles([]);
         return;
       }
 
-      const mappedBundles = (data || []).map((offer) => ({
-        id: offer.id,
-        name: offer.title,
-        price: `Ghc ${parseFloat(offer.price).toFixed(2)}`,
-        validity: offer.description || "30 Days",
-        noExpire: true,
+      const offers = offersData?.payload || offersData || [];
+
+      const filteredOffers = offers.filter(
+        (pkg) => pkg.network.toUpperCase() === network.toUpperCase(),
+      );
+
+      const mappedBundles = filteredOffers.map((pkg) => ({
+        id: pkg.id,
+        network: pkg.network,
+        type: pkg.type,
+        name: `${pkg.network} — ${pkg.type}`,
+        price: `Ghc ${(pkg.price / 100).toFixed(2)}`,
+        dataSize: `${pkg.size} GB`,
       }));
       setBundles(mappedBundles);
     } catch (error) {
@@ -419,6 +428,18 @@ export default function DataScreen({ navigation, route }) {
       setLoading(false);
     }
   };
+
+  const bundlesByNetwork = useMemo(() => {
+    const grouped = {};
+    bundles.forEach((bundle) => {
+      const networkName = bundle.name.split(" — ")[0]?.trim() || "Other";
+      if (!grouped[networkName]) {
+        grouped[networkName] = [];
+      }
+      grouped[networkName].push(bundle);
+    });
+    return grouped;
+  }, [bundles]);
 
   const handlePurchaseForSelf = async (bundle) => {
     try {
@@ -719,7 +740,11 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
-  const generatePaystackHTML = (amount, email, reference, subaccountCode) => {
+  const generatePaystackHTML = (amount, email, reference, subaccountCode, paystackPublicKey) => {
+    const safeKey = paystackPublicKey ? String(paystackPublicKey).replace(/\\/g, "\\\\").replace(/'/g, "\\'") : "";
+    const safeEmail = String(email || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const safeRef = String(reference || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    const safeSub = subaccountCode ? String(subaccountCode).replace(/\\/g, "\\\\").replace(/'/g, "\\'") : "";
     return `
       <!DOCTYPE html>
       <html>
@@ -874,11 +899,11 @@ export default function DataScreen({ navigation, route }) {
         <script>
           document.getElementById('paystack-button').onclick = function() {
             var setupOptions = {
-              key: '${PAYSTACK_PUBLIC_KEY}',
-              email: '${email}',
+              key: '${safeKey}',
+              email: '${safeEmail}',
               amount: ${amount * 100},
               currency: 'GHS',
-              ref: '${reference}',
+              ref: '${safeRef}',
               callback: function(response) {
                 window.ReactNativeWebView.postMessage(JSON.stringify({
                   type: 'success',
@@ -891,7 +916,7 @@ export default function DataScreen({ navigation, route }) {
                 }));
               }
             };
-            ${subaccountCode ? "setupOptions.subaccount = '" + subaccountCode + "';" : ""}
+            ${safeSub ? "setupOptions.subaccount = '" + safeSub + "';" : ""}
             var handler = PaystackPop.setup(setupOptions);
             handler.openIframe();
           };
@@ -1141,65 +1166,55 @@ export default function DataScreen({ navigation, route }) {
               </Text>
             </View>
           ) : (
-            bundles.map((bundle) => (
-              <TouchableOpacity
-                key={bundle.id}
-                style={[
-                  styles.bundleCard,
-                  bundle.popular && styles.popularBundle,
-                ]}
-                onPress={() => {
-                  if (isAgent) {
-                    handleAgentPurchase(bundle);
-                  } else if (purchaseType === "self") {
-                    handlePurchaseForSelf(bundle);
-                  } else {
-                    handlePurchaseForOthers(bundle);
-                  }
-                }}
-              >
-                {bundle.image_url ? (
-                  <ImageBackground
-                    source={{ uri: bundle.image_url }}
-                    resizeMode="cover"
-                    style={StyleSheet.absoluteFillObject}
+            Object.entries(bundlesByNetwork).map(([networkName, networkBundles]) => (
+              <View key={networkName} style={{ marginBottom: 20 }}>
+                <View style={styles.networkSectionHeader}>
+                  <Text style={styles.networkSectionTitle}>{networkName} Network</Text>
+                  <Text style={styles.networkSectionSubtitle}>
+                    {networkBundles.length} {networkBundles.length === 1 ? "bundle" : "bundles"} available
+                  </Text>
+                </View>
+                {networkBundles.map((bundle) => (
+                  <TouchableOpacity
+                    key={bundle.id}
+                    style={styles.bundleCard}
+                    onPress={() => {
+                      if (isAgent) {
+                        handleAgentPurchase(bundle);
+                      } else if (purchaseType === "self") {
+                        handlePurchaseForSelf(bundle);
+                      } else {
+                        handlePurchaseForOthers(bundle);
+                      }
+                    }}
                   >
-                    <View style={styles.networkOverlay}>
+                    <View style={styles.bundleCardContent}>
                       <View style={styles.bundleInfo}>
                         <View style={styles.bundleHeader}>
-                          <Text style={styles.bundleName}>{bundle.name}</Text>
-                          <View style={styles.noExpireBadge}>
-                            <Text style={styles.noExpireText}>No Expire</Text>
+                          <View style={styles.networkBadge}>
+                            <Text style={styles.networkBadgeText}>{bundle.network}</Text>
+                          </View>
+                          <Text style={styles.bundleType}>{bundle.type}</Text>
+                        </View>
+                        <View style={styles.bundleDetailsRow}>
+                          <View style={styles.bundleDetail}>
+                            <Text style={styles.bundleDetailLabel}>Data</Text>
+                            <Text style={styles.bundleDetailValue}>{bundle.dataSize}</Text>
+                          </View>
+                          <View style={styles.bundleDetail}>
+                            <Text style={styles.bundleDetailLabel}>Bundle</Text>
+                            <Text style={styles.bundleDetailValue}>{bundle.type}</Text>
                           </View>
                         </View>
-                        <Text style={styles.bundleValidity}>
-                          Valid for {bundle.validity}
-                        </Text>
                       </View>
                       <View style={styles.bundlePriceContainer}>
                         <Text style={styles.bundlePrice}>{bundle.price}</Text>
+                        <Text style={styles.bundlePriceLabel}>Price</Text>
                       </View>
                     </View>
-                  </ImageBackground>
-                ) : (
-                  <View style={styles.bundleCardContent}>
-                    <View style={styles.bundleInfo}>
-                      <View style={styles.bundleHeader}>
-                        <Text style={styles.bundleName}>{bundle.name}</Text>
-                        <View style={styles.noExpireBadge}>
-                          <Text style={styles.noExpireText}>No Expire</Text>
-                        </View>
-                      </View>
-                      <Text style={styles.bundleValidity}>
-                        Valid for {bundle.validity}
-                      </Text>
-                    </View>
-                    <View style={styles.bundlePriceContainer}>
-                      <Text style={styles.bundlePrice}>{bundle.price}</Text>
-                    </View>
-                  </View>
-                )}
-              </TouchableOpacity>
+                  </TouchableOpacity>
+                ))}
+              </View>
             ))
           )}
         </View>
@@ -1377,6 +1392,7 @@ export default function DataScreen({ navigation, route }) {
                   userEmail,
                   `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                   resolvedSubaccountCode,
+                  paystackPublicKey,
                 ),
               }}
               style={{ flex: 1 }}
@@ -1689,39 +1705,59 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 8,
   },
-  bundleName: {
+  bundleType: {
     fontSize: 18,
     fontWeight: "700",
     color: colors.dark,
   },
+  networkBadge: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  networkBadgeText: {
+    color: colors.white,
+    fontSize: 11,
+    fontWeight: "bold",
+  },
+  bundleDetailsRow: {
+    flexDirection: "row",
+    marginTop: 8,
+    gap: 16,
+  },
+  bundleDetail: {
+    alignItems: "flex-start",
+  },
+  bundleDetailLabel: {
+    fontSize: 11,
+    color: colors.dark,
+    opacity: 0.5,
+    marginBottom: 2,
+  },
+  bundleDetailValue: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: colors.dark,
+  },
   bundlePriceContainer: {
     backgroundColor: colors.light,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 12,
     alignItems: "flex-end",
   },
   bundlePrice: {
-    fontSize: 18,
+    fontSize: 22,
     fontWeight: "800",
     color: colors.primary,
   },
-  bundleValidity: {
-    fontSize: 13,
+  bundlePriceLabel: {
+    fontSize: 11,
     color: colors.dark,
-    opacity: 0.6,
-  },
-  noExpireBadge: {
-    backgroundColor: colors.success,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-    marginLeft: 10,
-  },
-  noExpireText: {
-    color: colors.white,
-    fontSize: 9,
-    fontWeight: "bold",
+    opacity: 0.5,
+    marginTop: 2,
   },
   purchaseTypeContainer: {
     backgroundColor: colors.white,
@@ -1889,6 +1925,33 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingVertical: 80,
+  },
+  networkSectionHeader: {
+    backgroundColor: colors.white,
+    marginHorizontal: 20,
+    marginBottom: 12,
+    marginTop: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderRadius: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    elevation: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  networkSectionTitle: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: colors.dark,
+  },
+  networkSectionSubtitle: {
+    fontSize: 13,
+    color: colors.dark,
+    opacity: 0.5,
   },
   emptyTitle: {
     fontSize: 20,

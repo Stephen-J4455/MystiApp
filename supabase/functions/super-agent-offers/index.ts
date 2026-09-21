@@ -95,7 +95,7 @@ Deno.serve(async (req) => {
     }
 
     const userRole = normalizeRole(user);
-    if (userRole !== "SuperAgent") {
+    if (userRole !== "SuperAgent" && userRole !== "Admin") {
       return new Response(JSON.stringify({ error: "User not allowed" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -109,24 +109,53 @@ Deno.serve(async (req) => {
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
     if (action === "listOffers") {
-      const { data, error } = await supabaseAdmin
-        .from("super_agent_offers")
-        .select("*")
-        .eq("super_agent_id", targetSuperAgentId)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        if (isMissingDatabaseObject(error)) {
-          return new Response(JSON.stringify({ offers: [] }), {
-            status: 200,
+      // Load packages from Jehuca API instead of database
+      const apiKey = Deno.env.get("JEHUCA_API_KEY");
+      if (!apiKey) {
+        return new Response(
+          JSON.stringify({
+            offers: [],
+            error: "Jehuca API key not configured on server",
+          }),
+          {
+            status: 500,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-
-        throw error;
+          },
+        );
       }
 
-      return new Response(JSON.stringify({ offers: data || [] }), {
+      const baseUrl = "https://backend.jehucale-business.com/api/packages";
+      const queryParts: string[] = [];
+      const networkFilter = String(offer?.network || body?.network || "").trim();
+      const typeFilter = String(offer?.type || body?.type || "").trim();
+      if (networkFilter) {
+        queryParts.push(`network=${encodeURIComponent(networkFilter)}`);
+      }
+      if (typeFilter) {
+        queryParts.push(`type=${encodeURIComponent(typeFilter)}`);
+      }
+      const requestUrl = queryParts.length
+        ? `${baseUrl}?${queryParts.join("&")}`
+        : baseUrl;
+
+      console.log(
+        "Fetching offers from Jehuca API:",
+        requestUrl,
+        "for super agent:",
+        targetSuperAgentId,
+      );
+
+      const response = await fetch(requestUrl, {
+        method: "GET",
+        headers: {
+          "X-API-Key": apiKey,
+        },
+      });
+
+      const apiData = await response.json();
+      const offers = apiData.payload || [];
+
+      return new Response(JSON.stringify({ offers }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -521,6 +550,356 @@ Deno.serve(async (req) => {
       }
 
       return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "listSuperAgentOffers") {
+      // List the super agent's own offers stored in the database
+      // (optionally filtered by tier name). This complements listOffers,
+      // which returns the upstream Jehuca package catalog instead.
+      const tierNameFilter = String(body?.tierName || "").trim();
+
+      let query = supabaseAdmin
+        .from("super_agent_offers")
+        .select("*")
+        .eq("super_agent_id", targetSuperAgentId)
+        .order("created_at", { ascending: false });
+
+      if (tierNameFilter) {
+        query = query.eq("tier_name", tierNameFilter);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        if (isMissingDatabaseObject(error)) {
+          return new Response(
+            JSON.stringify({
+              offers: [],
+              error:
+                "The super_agent_offers table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw error;
+      }
+
+      return new Response(JSON.stringify({ offers: data || [] }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "upsertTierOffer") {
+      const network = String(offer?.network || "").trim();
+      const dataValue = String(
+        offer?.data_value || offer?.dataValue || "",
+      ).trim();
+      const tierName = String(
+        offer?.tier_name || offer?.default_tier_name || "",
+      ).trim();
+      const price = Number(offer?.price || 0);
+      const title = String(offer?.title || "").trim();
+      const description = String(offer?.description || "").trim();
+
+      if (!network || !dataValue) {
+        return new Response(
+          JSON.stringify({ error: "Network and data value are required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (!Number.isFinite(price) || price <= 0) {
+        return new Response(
+          JSON.stringify({ error: "Price must be greater than 0" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      let existingQuery = supabaseAdmin
+        .from("super_agent_offers")
+        .select("id")
+        .eq("super_agent_id", targetSuperAgentId)
+        .eq("network", network)
+        .eq("data_value", dataValue)
+        .limit(1);
+
+      if (tierName) {
+        existingQuery = existingQuery.eq("tier_name", tierName);
+      } else {
+        existingQuery = existingQuery.is("tier_name", null);
+      }
+
+      const { data: existingRows, error: existingError } = await existingQuery;
+
+      if (existingError) {
+        if (isMissingDatabaseObject(existingError)) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "The super_agent_offers table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw existingError;
+      }
+
+      const existing = existingRows?.[0] || null;
+
+      if (existing) {
+        const tierUpdatePayload: Record<string, unknown> = {
+          price,
+          tier_name: tierName || null,
+          is_active: true,
+          updated_at: new Date().toISOString(),
+        };
+        if (title) tierUpdatePayload.title = title;
+        tierUpdatePayload.description = description || null;
+
+        const { data, error } = await supabaseAdmin
+          .from("super_agent_offers")
+          .update(tierUpdatePayload)
+          .eq("id", existing.id)
+          .eq("super_agent_id", targetSuperAgentId)
+          .select();
+
+        if (error) {
+          if (isMissingDatabaseObject(error)) {
+            return new Response(
+              JSON.stringify({
+                error:
+                  "The super_agent_offers table is not available yet. Run the staged migration first.",
+                migration_required: true,
+              }),
+              {
+                status: 200,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              },
+            );
+          }
+          throw error;
+        }
+
+        return new Response(JSON.stringify({ offer: data?.[0] || null }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const tierInsertPayload: Record<string, unknown> = {
+        super_agent_id: targetSuperAgentId,
+        title: title || `${network} — ${dataValue}`,
+        network,
+        data_value: dataValue,
+        price,
+        description: description || null,
+        tier_name: tierName || null,
+        is_active: true,
+      };
+
+      // Only attach the default tier column when supplied so the function
+      // stays compatible with databases that haven't run the tier migrations.
+      if (tierName) tierInsertPayload.default_tier_name = tierName;
+
+      const { data: inserted, error: insertError } = await supabaseAdmin
+        .from("super_agent_offers")
+        .insert(tierInsertPayload)
+        .select();
+
+      if (insertError) {
+        if (isMissingDatabaseObject(insertError)) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "The super_agent_offers table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw insertError;
+      }
+
+      return new Response(JSON.stringify({ offer: inserted?.[0] || null }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "setPackageBasePrice") {
+      if (userRole !== "Admin") {
+        return new Response(JSON.stringify({ error: "Admin access required" }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const network = String(body?.network || "").trim();
+      const type = String(body?.type || "").trim();
+      const basePrice = Number(body?.basePrice || body?.base_price || 0);
+
+      if (!network || !type) {
+        return new Response(
+          JSON.stringify({ error: "Network and type are required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      if (!Number.isFinite(basePrice) || basePrice < 0) {
+        return new Response(
+          JSON.stringify({ error: "Valid base price is required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("package_pricing")
+        .upsert(
+          {
+            network,
+            type,
+            base_price: basePrice,
+            created_by: user.id,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "package_pricing_network_type_unique" },
+        )
+        .select();
+
+      if (error) {
+        if (isMissingDatabaseObject(error)) {
+          return new Response(
+            JSON.stringify({
+              error:
+                "The package_pricing table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw error;
+      }
+
+      return new Response(JSON.stringify({ pricing: data?.[0] || null }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "getPackageBasePrices") {
+      const networkFilter = String(body?.network || "").trim();
+
+      let query = supabaseAdmin
+        .from("package_pricing")
+        .select("*")
+        .eq("is_active", true)
+        .order("network", { ascending: true });
+
+      if (networkFilter) {
+        query = query.eq("network", networkFilter);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        if (isMissingDatabaseObject(error)) {
+          return new Response(
+            JSON.stringify({
+              pricing: [],
+              error:
+                "The package_pricing table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw error;
+      }
+
+      return new Response(JSON.stringify({ pricing: data || [] }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (action === "getPackageBasePrice") {
+      const network = String(body?.network || "").trim();
+      const type = String(body?.type || "").trim();
+
+      if (!network || !type) {
+        return new Response(
+          JSON.stringify({ error: "Network and type are required" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data, error } = await supabaseAdmin
+        .from("package_pricing")
+        .select("*")
+        .eq("network", network)
+        .eq("type", type)
+        .eq("is_active", true)
+        .single();
+
+      if (error) {
+        if (isMissingDatabaseObject(error)) {
+          return new Response(
+            JSON.stringify({
+              pricing: null,
+              error:
+                "The package_pricing table is not available yet. Run the staged migration first.",
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        // No row found
+        return new Response(JSON.stringify({ pricing: null }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      return new Response(JSON.stringify({ pricing: data }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

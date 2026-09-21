@@ -60,8 +60,15 @@ Deno.serve(async (req) => {
     dbError = (err as Error).message;
   }
 
-  const paystackConfigured = Boolean(Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY"));
+  const paystackConfigured = Boolean(
+    Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+    Deno.env.get("PAYSTACK_SECRET_KEY"),
+  );
   const fcmConfigured = Boolean(Deno.env.get("FCM_SERVICE_ACCOUNT_JSON"));
+  const paystackPublicKey =
+    Deno.env.get("TEST_PAYSTACK_PUBLIC_KEY") ||
+    Deno.env.get("PAYSTACK_PUBLIC_KEY") ||
+    null;
 
   const payload = {
     ok: dbOk && paystackConfigured,
@@ -70,6 +77,7 @@ Deno.serve(async (req) => {
     version: Deno.env.get("FUNCTION_VERSION") || null,
     deployedAt: info.nowIso,
     responseTimeMs: Date.now() - startedAt,
+    paystackPublicKey,
     checks: {
       database: {
         ok: dbOk,
@@ -78,7 +86,11 @@ Deno.serve(async (req) => {
       paystack: {
         configured: paystackConfigured,
         live: paystackConfigured
-          ? (Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY") || "").startsWith("sk_live_")
+          ? (
+              Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+              Deno.env.get("PAYSTACK_SECRET_KEY") ||
+              ""
+            ).startsWith("sk_live_")
           : false,
       },
       fcm: {
@@ -99,7 +111,3 @@ Deno.serve(async (req) => {
     },
   });
 });
-
-
-
-

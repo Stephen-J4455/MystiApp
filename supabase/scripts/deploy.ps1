@@ -105,7 +105,12 @@ try {
             "super-agent-tier-management${suffix}",
             "super-agent-user-management${suffix}",
             "verify-payment${suffix}",
-            "verify-wallet-topup${suffix}"
+            "verify-wallet-topup${suffix}",
+            "get-packages${suffix}",
+            "make-orders${suffix}",
+            "get-orders${suffix}",
+            "check-balance${suffix}",
+            "get-order-status${suffix}"
         )
         foreach ($fn in $functions) {
             Invoke-Step "Deploying edge function: $fn" "supabase functions deploy $fn --project-ref $projectId"

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import { Platform } from "react-native";
-import { PAYSTACK_PUBLIC_KEY } from "../lib/config";
 
 export const usePaystackPayment = (config) => {
   const [isLoaded, setIsLoaded] = useState(false);
@@ -76,7 +75,7 @@ export const usePaystackPayment = (config) => {
         "Web payment initialization - isLoaded:",
         isLoaded,
         "PaystackPop exists:",
-        !!window.PaystackPop
+        !!window.PaystackPop,
       );
 
       if (!isLoaded) {
@@ -106,7 +105,7 @@ export const usePaystackPayment = (config) => {
 
       try {
         console.log("Setting up Paystack payment with config:", {
-          key: config.publicKey || PAYSTACK_PUBLIC_KEY,
+          key: config.publicKey || "",
           email: config.email,
           amount: config.amount,
           currency: config.currency || "GHS",
@@ -115,7 +114,7 @@ export const usePaystackPayment = (config) => {
         });
 
         const setupOptions = {
-          key: config.publicKey || PAYSTACK_PUBLIC_KEY,
+          key: config.publicKey || "",
           email: config.email,
           amount: config.amount,
           currency: config.currency || "GHS",

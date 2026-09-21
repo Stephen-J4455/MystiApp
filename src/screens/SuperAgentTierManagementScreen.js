@@ -1,1 +1,874 @@
-﻿import React, { useEffect, useMemo, useState } from "react";import {  ActivityIndicator,  ScrollView,  StyleSheet,  Text,  TextInput,  TouchableOpacity,  View,} from "react-native";import { SafeAreaView } from "react-native-safe-area-context";import { Ionicons } from "@expo/vector-icons";import { supabase } from "../lib/supabase";import { useNotification } from "../contexts/NotificationContext";import { isSuperAgent } from "../lib/superAgent";import colors from "../components/theme";import { getEdgeFunctionName } from "../lib/env";export default function SuperAgentTierManagementScreen({ navigation }) {  const [loading, setLoading] = useState(true);  const [saving, setSaving] = useState(false);  const [currentUser, setCurrentUser] = useState(null);  const [tiers, setTiers] = useState([]);  const [tierName, setTierName] = useState("");  const [tierDescription, setTierDescription] = useState("");  const { showError, showSuccess } = useNotification();  useEffect(() => {    loadData();  }, []);  const loadData = async () => {    try {      const {        data: { user },        error: userError,      } = await supabase.auth.getUser();      if (userError || !user) {        navigation.replace("Login");        return;      }      if (!isSuperAgent(user)) {        navigation.replace("Home");        return;      }      setCurrentUser(user);      await fetchTiers(user.id);    } catch (error) {      console.error("Error loading tier data:", error);      showError("Error", "Unable to load tier management right now.");    } finally {      setLoading(false);    }  };  const fetchTiers = async (superAgentId) => {    try {      const { data, error } = await supabase.functions.invoke(        getEdgeFunctionName("super-agent-tier-management"),        {          body: {            action: "listTiers",            superAgentId,          },        },      );      if (error) throw error;      const nextTiers = (data?.tiers || []).map((tier) => ({        name: tier.name || "Standard",        description: tier.description || "No tier description added yet.",      }));      setTiers(        nextTiers.length          ? nextTiers          : [{ name: "Standard", description: "Default tier" }],      );    } catch (error) {      console.error("Error fetching tiers:", error);      showError("Error", "Unable to load your tiers right now.");    }  };  const handleCreateTier = async () => {    if (!currentUser) return;    const normalizedTierName = tierName.trim();    const normalizedTierDescription = tierDescription.trim();    if (!normalizedTierName) {      showError("Validation", "Add a tier name before saving.");      return;    }    if (      tiers.some(        (tier) => tier.name.toLowerCase() === normalizedTierName.toLowerCase(),      )    ) {      showError("Validation", "This tier already exists.");      return;    }    try {      setSaving(true);      const nextTier = {        name: normalizedTierName,        description:          normalizedTierDescription || "No tier description added yet.",      };      const { data, error } = await supabase.functions.invoke(        getEdgeFunctionName("super-agent-tier-management"),        {          body: {            action: "createTier",            superAgentId: currentUser.id,            tier: nextTier,          },        },      );      if (error) throw error;      await fetchTiers(currentUser.id);      setTierName("");      setTierDescription("");      showSuccess("Tier saved", `${normalizedTierName} has been added.`);    } catch (error) {      console.error("Error creating tier:", error);      showError(        "Error",        error?.message || "Unable to save the tier right now.",      );    } finally {      setSaving(false);    }  };  if (loading) {    return (      <SafeAreaView style={styles.loadingContainer}>        <ActivityIndicator size="large" color={colors.primary} />        <Text style={styles.loadingText}>Loading tier management...</Text>      </SafeAreaView>    );  }  return (    <SafeAreaView style={styles.container}>      <View style={styles.headerRow}>        <TouchableOpacity          onPress={() => navigation.goBack()}          style={styles.backButton}        >          <Ionicons name="arrow-back" size={22} color={colors.primary} />        </TouchableOpacity>        <Text style={styles.title}>Tier Management</Text>      </View>      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>        <View style={styles.card}>          <Text style={styles.sectionTitle}>Create Tier</Text>          <Text style={styles.label}>Tier Name</Text>          <TextInput            placeholder="e.g. Starter, Premium, Business"            value={tierName}            onChangeText={setTierName}            style={styles.input}          />          <Text style={styles.label}>Tier Description</Text>          <TextInput            placeholder="Describe what this tier includes"            value={tierDescription}            onChangeText={setTierDescription}            style={[styles.input, styles.textArea]}            multiline          />          <TouchableOpacity            style={[styles.primaryButton, saving && styles.disabledButton]}            onPress={handleCreateTier}            disabled={saving}          >            <Text style={styles.primaryButtonText}>              {saving ? "Saving..." : "Create Tier"}            </Text>          </TouchableOpacity>        </View>        <View style={styles.card}>          <Text style={styles.sectionTitle}>Your Tiers</Text>          {tiers.length === 0 ? (            <Text style={styles.emptyStateText}>              No tiers yet. Create your first tier above.            </Text>          ) : (            tiers.map((tier) => (              <View key={tier.name} style={styles.tierItem}>                <Text style={styles.tierName}>{tier.name}</Text>                <Text style={styles.tierDescription}>{tier.description}</Text>              </View>            ))          )}        </View>      </ScrollView>    </SafeAreaView>  );}const styles = StyleSheet.create({  container: {    flex: 1,    backgroundColor: colors.light,  },  loadingContainer: {    flex: 1,    justifyContent: "center",    alignItems: "center",    backgroundColor: colors.light,  },  loadingText: {    marginTop: 12,    fontSize: 16,    color: colors.primary,    fontWeight: "600",  },  headerRow: {    flexDirection: "row",    alignItems: "center",    paddingHorizontal: 18,    paddingTop: 18,    paddingBottom: 8,    gap: 12,  },  backButton: {    width: 40,    height: 40,    borderRadius: 12,    backgroundColor: colors.white,    justifyContent: "center",    alignItems: "center",  },  title: {    fontSize: 24,    fontWeight: "800",    color: colors.primary,  },  scroll: {    flex: 1,    paddingHorizontal: 18,    paddingBottom: 28,  },  card: {    backgroundColor: colors.white,    borderRadius: 18,    padding: 16,    marginBottom: 18,    shadowColor: "#000",    shadowOpacity: 0.04,    shadowRadius: 12,    elevation: 2,  },  sectionTitle: {    fontSize: 18,    fontWeight: "700",    color: colors.primary,    marginBottom: 14,  },  label: {    fontSize: 13,    fontWeight: "600",    color: colors.secondary,    marginBottom: 6,  },  input: {    backgroundColor: colors.light,    borderRadius: 12,    paddingHorizontal: 14,    paddingVertical: 12,    borderWidth: 1,    borderColor: "#dfe7e7",    marginBottom: 12,    color: colors.primary,  },  textArea: {    minHeight: 90,    textAlignVertical: "top",  },  primaryButton: {    backgroundColor: colors.primary,    borderRadius: 12,    paddingVertical: 13,    alignItems: "center",    justifyContent: "center",  },  disabledButton: {    opacity: 0.7,  },  primaryButtonText: {    color: colors.white,    fontWeight: "800",    fontSize: 15,  },  tierItem: {    backgroundColor: colors.light,    borderRadius: 12,    borderWidth: 1,    borderColor: "#dfe7e7",    padding: 12,    marginBottom: 10,  },  tierName: {    fontSize: 16,    fontWeight: "800",    color: colors.primary,    marginBottom: 4,  },  tierDescription: {    fontSize: 12,    color: colors.secondary,    lineHeight: 18,  },  emptyStateText: {    color: colors.secondary,    fontSize: 13,    lineHeight: 18,  },});
+import React, { useEffect, useState, useCallback, useMemo } from "react";
+import {
+  ActivityIndicator,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
+
+import { supabase } from "../lib/supabase";
+import { useNotification } from "../contexts/NotificationContext";
+import { isSuperAgent } from "../lib/superAgent";
+import { getEdgeFunctionName } from "../lib/env";
+import colors from "../components/theme";
+
+const packageKey = (network, type) =>
+  `${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
+
+const offerKey = (tierName, network, type) =>
+  `${String(tierName || "")}::${packageKey(network, type)}`;
+
+const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
+export default function SuperAgentTierManagementScreen({ navigation }) {
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [tiers, setTiers] = useState([]);
+  const [packages, setPackages] = useState([]);
+  const [basePriceMap, setBasePriceMap] = useState({});
+  const [offerMap, setOfferMap] = useState({});
+  const [priceInputs, setPriceInputs] = useState({});
+  const [selectedNetwork, setSelectedNetwork] = useState("all");
+  const [savingTierId, setSavingTierId] = useState(null);
+  const [newTierName, setNewTierName] = useState("");
+  const [newTierDescription, setNewTierDescription] = useState("");
+  const [creatingTier, setCreatingTier] = useState(false);
+  const [confirmDeleteTierId, setConfirmDeleteTierId] = useState(null);
+  const [loadError, setLoadError] = useState(null);
+  const { showError, showSuccess, showInfo } = useNotification();
+
+  const buildMaps = useCallback((tierRows, catalog, pricingRows, offers) => {
+    const basePrices = {};
+    (pricingRows || []).forEach((row) => {
+      basePrices[packageKey(row.network, row.type)] = Number(row.base_price);
+    });
+
+    const offersByKey = {};
+    (offers || []).forEach((offer) => {
+      offersByKey[
+        offerKey(offer.tier_name, offer.network, offer.data_value)
+      ] = offer;
+    });
+
+    const inputs = {};
+    (tierRows || []).forEach((tier) => {
+      (catalog || []).forEach((pkg) => {
+        const key = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+        const existing = offersByKey[
+          offerKey(tier.name, pkg.network, pkg.type)
+        ];
+        inputs[key] = existing ? String(existing.price) : "";
+      });
+    });
+
+    setBasePriceMap(basePrices);
+    setOfferMap(offersByKey);
+    setPriceInputs(inputs);
+  }, []);
+
+  const loadData = useCallback(
+    async ({ showSpinner = true } = {}) => {
+      if (showSpinner) setLoading(true);
+      setLoadError(null);
+
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (userError || !user) {
+          navigation.replace("Login");
+          return;
+        }
+
+        if (!isSuperAgent(user)) {
+          navigation.replace("Home");
+          return;
+        }
+
+        setCurrentUser(user);
+
+        const [tiersResult, packagesResult, pricingResult, offersResult] =
+          await Promise.all([
+            supabase.functions.invoke(
+              getEdgeFunctionName("super-agent-tier-management"),
+              { body: { action: "listTiers" } },
+            ),
+            supabase.functions.invoke(getEdgeFunctionName("get-packages")),
+            supabase.functions.invoke(
+              getEdgeFunctionName("super-agent-offers"),
+              { body: { action: "getPackageBasePrices" } },
+            ),
+            supabase.functions.invoke(
+              getEdgeFunctionName("super-agent-offers"),
+              { body: { action: "listSuperAgentOffers" } },
+            ),
+          ]);
+
+        if (tiersResult.error) {
+          console.error("Error loading tiers:", tiersResult.error);
+        }
+        if (packagesResult.error) {
+          console.error("Error loading packages:", packagesResult.error);
+        }
+        if (pricingResult.error) {
+          console.error("Error loading base prices:", pricingResult.error);
+        }
+        if (offersResult.error) {
+          console.error("Error loading offers:", offersResult.error);
+        }
+
+        const tierRows = tiersResult.data?.tiers || [];
+        const catalog = packagesResult.data?.payload || [];
+        const pricingRows = pricingResult.data?.pricing || [];
+        const myOffers = offersResult.data?.offers || [];
+
+        setTiers(tierRows);
+        setPackages(Array.isArray(catalog) ? catalog : []);
+
+        if (!Array.isArray(catalog) || catalog.length === 0) {
+          setLoadError(
+            "Could not load the data bundle catalog. Pull down to retry.",
+          );
+        }
+
+        buildMaps(tierRows, catalog, pricingRows, myOffers);
+      } catch (error) {
+        console.error("Error loading super agent tier screen:", error);
+        setLoadError("Unable to load tier management right now.");
+        showError("Error", "Unable to load tier management right now.");
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [buildMaps, navigation, showError],
+  );
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    loadData({ showSpinner: false });
+  };
+
+  const networkOptions = useMemo(() => {
+    const networks = [];
+    packages.forEach((pkg) => {
+      const value = String(pkg.network || "").toUpperCase();
+      if (value && !networks.includes(value)) networks.push(value);
+    });
+    return ["all", ...networks];
+  }, [packages]);
+
+  const filteredPackages = useMemo(() => {
+    if (selectedNetwork === "all") return packages;
+    return packages.filter(
+      (pkg) =>
+        String(pkg.network || "").toUpperCase() ===
+        selectedNetwork.toUpperCase(),
+    );
+  }, [packages, selectedNetwork]);
+
+  const tierChangedCount = useCallback(
+    (tier) => {
+      let count = 0;
+      (packages || []).forEach((pkg) => {
+        const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+        const raw = (priceInputs[inputKey] ?? "").toString().trim();
+        if (raw === "") return;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value <= 0) return;
+        const existing =
+          offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+        if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
+          count += 1;
+        }
+      });
+      return count;
+    },
+    [packages, priceInputs, offerMap],
+  );
+
+  const handlePriceChange = (tierId, network, type, text) => {
+    const cleaned = text.replace(/[^0-9.]/g, "");
+    const parts = cleaned.split(".");
+    const normalized =
+      parts.length > 2 ? `${parts[0]}.${parts.slice(1).join("")}` : cleaned;
+    setPriceInputs((prev) => ({
+      ...prev,
+      [`${tierId}::${packageKey(network, type)}`]: normalized,
+    }));
+  };
+
+  const handleSaveTierPrices = async (tier) => {
+    if (savingTierId) return;
+
+    const updates = [];
+    const invalidRows = [];
+
+    (packages || []).forEach((pkg) => {
+      const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+      const raw = (priceInputs[inputKey] ?? "").toString().trim();
+      if (raw === "") return;
+
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value <= 0) {
+        invalidRows.push(`${pkg.network} — ${pkg.type}`);
+        return;
+      }
+
+      const existing = offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+      if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
+        updates.push({ pkg, value });
+      }
+    });
+
+    if (invalidRows.length > 0) {
+      showError(
+        "Invalid prices",
+        `Enter an amount greater than 0 for: ${invalidRows.slice(0, 3).join(", ")}`,
+      );
+      return;
+    }
+
+    if (updates.length === 0) {
+      showInfo(
+        "Nothing to save",
+        `All ${tier.name} tier prices are already up to date.`,
+      );
+      return;
+    }
+
+    try {
+      setSavingTierId(tier.id);
+
+      const results = await Promise.all(
+        updates.map(async ({ pkg, value }) => {
+          const { data, error } = await supabase.functions.invoke(
+            getEdgeFunctionName("super-agent-offers"),
+            {
+              body: {
+                action: "upsertTierOffer",
+                offer: {
+                  network: pkg.network,
+                  data_value: pkg.type,
+                  tier_name: tier.name,
+                  price: value,
+                },
+              },
+            },
+          );
+          return { error: error || data?.error || null };
+        }),
+      );
+
+      const failures = results.filter((result) => result.error);
+      if (failures.length > 0) {
+        throw new Error(failures[0].error);
+      }
+
+      showSuccess(
+        "Tier prices saved",
+        `${updates.length} ${tier.name} price${updates.length === 1 ? "" : "s"} updated for your agents.`,
+      );
+      await loadData({ showSpinner: false });
+    } catch (error) {
+      console.error("Error saving tier prices:", error);
+      showError("Error", "Failed to save tier prices. Please try again.");
+    } finally {
+      setSavingTierId(null);
+    }
+  };
+
+  const handleCreateTier = async () => {
+    const name = newTierName.trim();
+    if (!name) {
+      showError("Validation", "Enter a tier name (e.g. Gold, Silver).");
+      return;
+    }
+
+    try {
+      setCreatingTier(true);
+
+      const { data, error } = await supabase.functions.invoke(
+        getEdgeFunctionName("super-agent-tier-management"),
+        {
+          body: {
+            action: "createTier",
+            tier: {
+              name,
+              description: newTierDescription.trim(),
+            },
+          },
+        },
+      );
+
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      showSuccess("Tier created", `"${name}" is ready for pricing.`);
+      setNewTierName("");
+      setNewTierDescription("");
+      await loadData({ showSpinner: false });
+    } catch (tierError) {
+      console.error("Error creating tier:", tierError);
+      showError(
+        "Error",
+        tierError?.message?.includes("already exists")
+          ? "A tier with this name already exists."
+          : "Unable to create this tier right now.",
+      );
+    } finally {
+      setCreatingTier(false);
+    }
+  };
+
+  const handleDeleteTier = async (tier) => {
+    if (confirmDeleteTierId !== tier.id) {
+      setConfirmDeleteTierId(tier.id);
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        getEdgeFunctionName("super-agent-tier-management"),
+        { body: { action: "deleteTier", tier: { id: tier.id } } },
+      );
+
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      showSuccess("Tier deleted", `"${tier.name}" was removed.`);
+      setConfirmDeleteTierId(null);
+      await loadData({ showSpinner: false });
+    } catch (tierError) {
+      console.error("Error deleting tier:", tierError);
+      showError("Error", "Unable to delete this tier right now.");
+      setConfirmDeleteTierId(null);
+    }
+  };
+
+  const renderPackageRow = (tier, pkg) => {
+    const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+    const basePrice = basePriceMap[packageKey(pkg.network, pkg.type)];
+    const existing = offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+
+    return (
+      <View key={inputKey} style={styles.packageRow}>
+        <View style={styles.packageInfo}>
+          <Text style={styles.packageName}>
+            {String(pkg.network || "").toUpperCase()} —{" "}
+            {String(pkg.type || "").toUpperCase()}
+          </Text>
+          <Text style={styles.packageMeta}>
+            {pkg.size ? `${pkg.size} GB · ` : ""}Base:{" "}
+            {basePrice !== undefined ? formatGhc(basePrice) : "not set"}
+            {existing ? ` · Yours: ${formatGhc(existing.price)}` : ""}
+          </Text>
+        </View>
+        <View style={styles.priceInputWrap}>
+          <Text style={styles.currencyPrefix}>Ghc</Text>
+          <TextInput
+            style={styles.priceInput}
+            value={priceInputs[inputKey] ?? ""}
+            onChangeText={(text) =>
+              handlePriceChange(tier.id, pkg.network, pkg.type, text)
+            }
+            placeholder="0.00"
+            placeholderTextColor="#9AA5AF"
+            keyboardType="decimal-pad"
+          />
+        </View>
+      </View>
+    );
+  };
+
+  const renderTierSection = (tier) => {
+    const changedCount = tierChangedCount(tier);
+    const isSaving = savingTierId === tier.id;
+    const isConfirmingDelete = confirmDeleteTierId === tier.id;
+
+    return (
+      <View key={`tier-${tier.id}`} style={styles.tierCard}>
+        <View style={styles.tierHeader}>
+          <View style={styles.tierTitleWrap}>
+            <Text style={styles.tierName}>{tier.name}</Text>
+            {tier.description ? (
+              <Text style={styles.tierDescription}>{tier.description}</Text>
+            ) : null}
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.deleteTierButton,
+              isConfirmingDelete && styles.deleteTierButtonConfirm,
+            ]}
+            onPress={() => handleDeleteTier(tier)}
+          >
+            <Ionicons
+              name={isConfirmingDelete ? "warning" : "trash-outline"}
+              size={18}
+              color="#fff"
+            />
+            <Text style={styles.deleteTierText}>
+              {isConfirmingDelete ? "Sure?" : ""}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {filteredPackages.length === 0 ? (
+          <Text style={styles.tierEmptyText}>No packages match this filter.</Text>
+        ) : (
+          filteredPackages.map((pkg) => renderPackageRow(tier, pkg))
+        )}
+
+        <TouchableOpacity
+          style={[
+            styles.saveTierButton,
+            (isSaving || changedCount === 0) && styles.saveTierButtonDisabled,
+          ]}
+          onPress={() => handleSaveTierPrices(tier)}
+          disabled={isSaving || changedCount === 0}
+        >
+          {isSaving ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Text style={styles.saveTierText}>
+              Save {tier.name} Prices{changedCount > 0 ? ` (${changedCount})` : ""}
+            </Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={styles.loadingText}>Loading tiers...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.header}>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={styles.backButton}
+        >
+          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+        </TouchableOpacity>
+        <Text style={styles.title}>Tier Management</Text>
+        <TouchableOpacity
+          onPress={handleRefresh}
+          style={styles.refreshButton}
+          disabled={refreshing}
+        >
+          <Ionicons
+            name={refreshing ? "sync" : "sync-outline"}
+            size={20}
+            color={refreshing ? colors.border : colors.primary}
+          />
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.infoCard}>
+          <Ionicons name="information-circle" size={20} color={colors.primary} />
+          <Text style={styles.infoText}>
+            Admin base prices are shown for reference. Enter what your agents
+            pay for each bundle in every tier, then save. Empty fields are
+            skipped.
+          </Text>
+        </View>
+
+        {loadError ? (
+          <View style={styles.errorCard}>
+            <Ionicons name="warning-outline" size={18} color={colors.danger} />
+            <Text style={styles.errorText}>{loadError}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.createCard}>
+          <Text style={styles.createTitle}>Create a Tier</Text>
+          <TextInput
+            style={styles.input}
+            value={newTierName}
+            onChangeText={setNewTierName}
+            placeholder="Tier name (e.g. Gold)"
+            placeholderTextColor="#9AA5AF"
+          />
+          <TextInput
+            style={[styles.input, styles.inputMultiline]}
+            value={newTierDescription}
+            onChangeText={setNewTierDescription}
+            placeholder="Description (optional)"
+            placeholderTextColor="#9AA5AF"
+            multiline
+          />
+          <TouchableOpacity
+            style={[
+              styles.createButton,
+              creatingTier && styles.createButtonDisabled,
+            ]}
+            onPress={handleCreateTier}
+            disabled={creatingTier}
+          >
+            {creatingTier ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <>
+                <Ionicons name="add-circle-outline" size={18} color="#fff" />
+                <Text style={styles.createButtonText}>Add Tier</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+
+        {networkOptions.length > 1 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.networkFilterRow}
+          >
+            {networkOptions.map((option) => (
+              <TouchableOpacity
+                key={option}
+                style={[
+                  styles.networkChip,
+                  selectedNetwork === option && styles.networkChipActive,
+                ]}
+                onPress={() => setSelectedNetwork(option)}
+              >
+                <Text
+                  style={[
+                    styles.networkChipText,
+                    selectedNetwork === option && styles.networkChipTextActive,
+                  ]}
+                >
+                  {option === "all" ? "All Networks" : option}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        ) : null}
+
+        {tiers.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Ionicons name="layers-outline" size={40} color={colors.primary} />
+            <Text style={styles.emptyTitle}>No tiers yet</Text>
+            <Text style={styles.emptyText}>
+              Create your first tier above (e.g. Gold, Silver), then set the
+              price agents pay for each bundle.
+            </Text>
+          </View>
+        ) : (
+          tiers.map((tier) => renderTierSection(tier))
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: { flex: 1, backgroundColor: colors.light },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: colors.light,
+  },
+  loadingText: {
+    marginTop: 12,
+    color: colors.dark,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 12,
+    backgroundColor: colors.white,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.light,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  title: {
+    flex: 1,
+    textAlign: "center",
+    fontSize: 20,
+    fontWeight: "800",
+    color: colors.dark,
+  },
+  refreshButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.light,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  content: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+  infoCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.tint,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+  },
+  infoText: {
+    flex: 1,
+    marginLeft: 10,
+    color: colors.dark,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  errorCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#fdecea",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+  },
+  errorText: {
+    flex: 1,
+    marginLeft: 10,
+    color: colors.danger,
+    fontSize: 13,
+    fontWeight: "500",
+  },
+  createCard: {
+    backgroundColor: colors.white,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 16,
+  },
+  createTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: colors.primary,
+    marginBottom: 10,
+  },
+  input: {
+    backgroundColor: colors.light,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.dark,
+    marginBottom: 10,
+  },
+  inputMultiline: {
+    minHeight: 64,
+    textAlignVertical: "top",
+  },
+  createButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    paddingVertical: 12,
+    borderRadius: 12,
+  },
+  createButtonDisabled: {
+    opacity: 0.6,
+  },
+  createButtonText: {
+    color: "#fff",
+    fontWeight: "700",
+    marginLeft: 6,
+  },
+  networkFilterRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  networkChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginRight: 8,
+  },
+  networkChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  networkChipText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: colors.dark,
+  },
+  networkChipTextActive: {
+    color: "#fff",
+  },
+  tierCard: {
+    backgroundColor: colors.white,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 18,
+  },
+  tierHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    marginBottom: 12,
+  },
+  tierTitleWrap: {
+    flex: 1,
+  },
+  tierName: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: colors.primary,
+  },
+  tierDescription: {
+    fontSize: 12,
+    color: colors.dark,
+    opacity: 0.7,
+    marginTop: 2,
+  },
+  deleteTierButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.border,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  deleteTierButtonConfirm: {
+    backgroundColor: colors.danger,
+  },
+  deleteTierText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+    marginLeft: 4,
+  },
+  packageRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.light,
+    borderRadius: 12,
+    padding: 10,
+    marginBottom: 8,
+  },
+  packageInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  packageName: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: colors.dark,
+  },
+  packageMeta: {
+    fontSize: 11,
+    color: colors.dark,
+    opacity: 0.65,
+    marginTop: 2,
+  },
+  priceInputWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    height: 36,
+    width: 112,
+  },
+  currencyPrefix: {
+    fontSize: 11,
+    color: colors.dark,
+    opacity: 0.6,
+    marginRight: 4,
+    fontWeight: "600",
+  },
+  priceInput: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.dark,
+    paddingVertical: 0,
+    fontWeight: "700",
+  },
+  tierEmptyText: {
+    fontSize: 13,
+    color: colors.dark,
+    opacity: 0.6,
+    textAlign: "center",
+    paddingVertical: 12,
+  },
+  saveTierButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.primary,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginTop: 6,
+  },
+  saveTierButtonDisabled: {
+    backgroundColor: colors.border,
+  },
+  saveTierText: {
+    color: "#fff",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  emptyCard: {
+    backgroundColor: colors.white,
+    borderRadius: 18,
+    padding: 24,
+    alignItems: "center",
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: colors.primary,
+    marginTop: 10,
+  },
+  emptyText: {
+    fontSize: 13,
+    color: colors.dark,
+    opacity: 0.7,
+    textAlign: "center",
+    marginTop: 6,
+    lineHeight: 20,
+  },
+});
