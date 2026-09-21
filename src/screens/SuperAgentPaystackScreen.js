@@ -811,7 +811,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
               )}
               ListEmptyComponent={
                 <View style={styles.modalEmpty}>
-                  <Ionicons name="search-off" size={40} color={colors.border} />
+                  <Ionicons name="close-circle" size={40} color={colors.border} />
                   <Text style={styles.modalEmptyText}>{searchQuery ? "No results found" : "No items available"}</Text>
                 </View>
               }

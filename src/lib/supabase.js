@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
+import { getEdgeFunctionName } from "../lib/env.js";
 
 // Keep the app client keys directly in this file now that the env file has been removed.
 // Replace the placeholders below with the real values from your Supabase project.
@@ -37,7 +38,9 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 export const getPaystackPublicKey = async () => {
   try {
-    const { data, error } = await supabase.functions.invoke("health");
+    const { data, error } = await supabase.functions.invoke(
+      getEdgeFunctionName("health"),
+    );
 
     if (error) {
       console.warn(

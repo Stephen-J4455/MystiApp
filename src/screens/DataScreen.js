@@ -29,6 +29,12 @@ import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { getPaystackPublicKey } from "../lib/supabase";
 
+import {
+  loadSubAgentPackages,
+  formatBundleSizeFromDescriptor,
+  fetchCatalogPackages,
+} from "../services/superAgentService";
+
 export default function DataScreen({ navigation, route }) {
   const { network } = route.params;
   const [selectedBundle, setSelectedBundle] = useState(null);
@@ -45,6 +51,7 @@ export default function DataScreen({ navigation, route }) {
   const [superAgentId, setSuperAgentId] = useState(null);
   const [agentChecked, setAgentChecked] = useState(false);
   const [agentBalance, setAgentBalance] = useState(0);
+  const [agentTier, setAgentTier] = useState(null);
   const { showError, showSuccess } = useNotification();
   const bundleSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
@@ -265,6 +272,11 @@ export default function DataScreen({ navigation, route }) {
           user.user_metadata?.superAgentId ||
           null;
         setSuperAgentId(assignedSuperAgentId);
+        setAgentTier(user.user_metadata?.tier_name || null);
+
+        const isUserRoleAgent =
+          user.user_metadata?.role?.toLowerCase() === "agent" ||
+          Boolean(assignedSuperAgentId);
 
         // Check if user is an agent
         try {
@@ -274,14 +286,15 @@ export default function DataScreen({ navigation, route }) {
             .eq("agent_id", user.id)
             .single();
 
-          const agentStatus = !walletError && wallet !== null;
+          const hasWallet = !walletError && wallet !== null;
+          const agentStatus = hasWallet || isUserRoleAgent;
           setIsAgent(agentStatus);
-          if (agentStatus && wallet) {
+          if (wallet) {
             setAgentBalance(wallet.balance || 0);
           }
         } catch (error) {
           console.error("Error checking agent status:", error);
-          setIsAgent(false);
+          setIsAgent(isUserRoleAgent);
         }
 
         // If this user is a sub-agent of a super agent, ask the edge
@@ -335,50 +348,91 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
 
-        const { data: assignments, error: assignmentsError } = await supabase
-          .from("super_agent_assignments")
-          .select("*")
-          .eq("agent_id", user.id)
-          .eq("is_active", true)
-          .order("assigned_at", { ascending: false });
+        const assignedSuperAgentId =
+          user.user_metadata?.super_agent_id ||
+          user.user_metadata?.superAgentId ||
+          superAgentId ||
+          null;
 
-        if (assignmentsError) {
-          console.error("Error fetching assigned offers:", assignmentsError);
-          showError("Error", "Failed to load your assigned data bundles");
-          setBundles([]);
+        // Sub-agents buy from the packages their super agent published for the
+        // tier they were granted (falling back to the super agent's General prices).
+        if (assignedSuperAgentId) {
+          const agentPackagesResult = await loadSubAgentPackages({
+            user,
+            network,
+          });
+
+          if (
+            agentPackagesResult.error &&
+            (!agentPackagesResult.offers ||
+              agentPackagesResult.offers.length === 0)
+          ) {
+            console.error(
+              "Error fetching super agent packages:",
+              agentPackagesResult.error,
+            );
+            showError("Error", "Failed to load your assigned data bundles");
+            setBundles([]);
+            setLoading(false);
+            return;
+          }
+
+          setAgentTier(agentPackagesResult.agent_tier || null);
+
+          const superAgentOffers = Array.isArray(agentPackagesResult.offers)
+            ? agentPackagesResult.offers
+            : [];
+
+          if (superAgentOffers.length === 0) {
+            setBundles([]);
+            setLoading(false);
+            return;
+          }
+
+          const mappedBundles = superAgentOffers
+            .filter(
+              (agentOffer) =>
+                String(agentOffer.network || "").toUpperCase() ===
+                network.toUpperCase(),
+            )
+            .map((agentOffer) => {
+              const descriptor = String(agentOffer.data_value || "");
+
+              return {
+                id: agentOffer.package_id
+                  ? String(agentOffer.package_id)
+                  : String(agentOffer.id),
+                superAgentOfferId:
+                  agentOffer.superAgentOfferId || agentOffer.id,
+                network: String(agentOffer.network || "").toUpperCase(),
+                type: String(agentOffer.type || descriptor).toUpperCase(),
+                name:
+                  agentOffer.title ||
+                  `${agentOffer.network} — ${descriptor}`,
+                price:
+                  typeof agentOffer.price === "string" &&
+                  agentOffer.price.startsWith("Ghc")
+                    ? agentOffer.price
+                    : `Ghc ${Number(agentOffer.price || 0).toFixed(2)}`,
+                dataSize:
+                  agentOffer.dataSize ||
+                  (agentOffer.size
+                    ? `${agentOffer.size} GB`
+                    : formatBundleSizeFromDescriptor(descriptor)),
+                tierName: agentOffer.tier_name || null,
+              };
+            });
+
+          setBundles(mappedBundles);
           setLoading(false);
           return;
         }
 
-        if (!assignments || assignments.length === 0) {
-          setBundles([]);
-          setLoading(false);
-          return;
-        }
-
-        // Load packages from Jehuca API via edge function instead of DB
-        const { data: offersData, error: offersError } = await supabase.functions.invoke(
-          getEdgeFunctionName("get-packages"),
-          {},
+        // Direct top-level agent without a super agent: load from catalog
+        const catalogOffers = await fetchCatalogPackages();
+        const filteredOffers = (catalogOffers || []).filter(
+          (pkg) => pkg.network?.toUpperCase() === network.toUpperCase(),
         );
-
-        if (offersError) {
-          console.error(
-            "Error fetching offers from API:",
-            offersError,
-          );
-          showError("Error", "Failed to load your assigned data bundles");
-          setBundles([]);
-          setLoading(false);
-          return;
-        }
-
-        const offers = offersData?.payload || offersData || [];
-
-        const filteredOffers = offers.filter(
-          (pkg) => pkg.network.toUpperCase() === network.toUpperCase(),
-        );
-
         const mappedBundles = filteredOffers.map((pkg) => ({
           id: pkg.id,
           network: pkg.network,
@@ -387,28 +441,16 @@ export default function DataScreen({ navigation, route }) {
           price: `Ghc ${(pkg.price / 100).toFixed(2)}`,
           dataSize: `${pkg.size} GB`,
         }));
-
         setBundles(mappedBundles);
         setLoading(false);
         return;
       }
 
-      const { data: offersData, error: offersError } = await supabase.functions.invoke(
-        getEdgeFunctionName("get-packages"),
-        {},
-      );
+      // Regular customer
+      const offers = await fetchCatalogPackages();
 
-      if (offersError) {
-        console.error("Error fetching offers from API:", offersError);
-        showError("Error", "Failed to load data bundles");
-        setBundles([]);
-        return;
-      }
-
-      const offers = offersData?.payload || offersData || [];
-
-      const filteredOffers = offers.filter(
-        (pkg) => pkg.network.toUpperCase() === network.toUpperCase(),
+      const filteredOffers = (offers || []).filter(
+        (pkg) => pkg.network?.toUpperCase() === network.toUpperCase(),
       );
 
       const mappedBundles = filteredOffers.map((pkg) => ({
@@ -631,6 +673,7 @@ export default function DataScreen({ navigation, route }) {
           offer_id: bundle.id,
           offer_title: bundle.name,
           network: network,
+          super_agent_id: superAgentId || null,
           channel: "Agent",
           device_token: cleanPhone,
           recipient_name: recipientName.trim(),
@@ -660,7 +703,7 @@ export default function DataScreen({ navigation, route }) {
         // Send push notification to agent
         try {
           const { error: agentNotifyError } = await supabase.functions.invoke(
-            "send-notification",
+            getEdgeFunctionName("send-notification"),
             {
               body: {
                 userId: user.id,
@@ -682,14 +725,17 @@ export default function DataScreen({ navigation, route }) {
 
           // Notify admins about the new agent order
           try {
-            await supabase.functions.invoke("send-notification", {
-              body: {
-                sendToAdmins: true,
-                title: "New Agent Order Received",
-                message: `Agent ${user.email} purchased ${bundle.name} for ${recipientName.trim()} (${cleanPhone}). Amount: GHS ${price}`,
-                type: "agent_order",
+            await supabase.functions.invoke(
+              getEdgeFunctionName("send-notification"),
+              {
+                body: {
+                  sendToAdmins: true,
+                  title: "New Agent Order Received",
+                  message: `Agent ${user.email} purchased ${bundle.name} for ${recipientName.trim()} (${cleanPhone}). Amount: GHS ${price}`,
+                  type: "agent_order",
+                },
               },
-            });
+            );
             console.log("Admin notification for agent order sent successfully");
           } catch (adminPushError) {
             console.error(
@@ -1037,6 +1083,18 @@ export default function DataScreen({ navigation, route }) {
           )}
         </View>
 
+        {/* Super agent package source - shown to sub-agents only */}
+        {isAgent && (
+          <View style={styles.agentTierBanner}>
+            <Ionicons name="pricetags" size={18} color={colors.primary} />
+            <Text style={styles.agentTierBannerText}>
+              {agentTier
+                ? `Packages for the ${agentTier} tier — prices set by your super agent.`
+                : "Packages and prices set by your super agent."}
+            </Text>
+          </View>
+        )}
+
         {/* Purchase Type Selection - Hidden for Agents */}
         {!isAgent && (
           <View style={styles.purchaseTypeContainer}>
@@ -1162,7 +1220,9 @@ export default function DataScreen({ navigation, route }) {
               <Ionicons name="wifi" size={64} color={colors.tint} />
               <Text style={styles.emptyTitle}>No Data Bundles</Text>
               <Text style={styles.emptyMessage}>
-                No data bundles available for {displayNetwork} at the moment.
+                {isAgent
+                  ? "Your super agent has not published packages for this network in your tier yet."
+                  : `No data bundles available for ${displayNetwork} at the moment.`}
               </Text>
             </View>
           ) : (
@@ -1966,5 +2026,21 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     textAlign: "center",
     paddingHorizontal: 40,
+  },
+  agentTierBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.tint,
+    borderRadius: 14,
+    padding: 14,
+    marginHorizontal: 20,
+    marginBottom: 16,
+  },
+  agentTierBannerText: {
+    flex: 1,
+    marginLeft: 10,
+    color: colors.dark,
+    fontSize: 13,
+    lineHeight: 19,
   },
 });

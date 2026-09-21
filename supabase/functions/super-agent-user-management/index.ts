@@ -22,6 +22,47 @@ const normalizeRole = (user: any) => {
   return role;
 };
 
+const isMissingDatabaseObject = (error: any) => {
+  const code = String(error?.code || "");
+  const message = String(error?.message || "");
+
+  return (
+    code === "42P01" ||
+    code === "42703" ||
+    /does not exist|relation .* does not exist|column .* does not exist|missing column|missing table|relation/i.test(
+      message,
+    )
+  );
+};
+
+// A sub-agent's tier decides which packages they can see and buy. An empty tier
+// means "General only", and the name must exist for this super agent.
+const resolveTierName = async (
+  supabaseAdmin: any,
+  superAgentId: string,
+  rawTier: unknown,
+): Promise<{ tierName: string | null } | { error: string }> => {
+  const tierName = String(rawTier ?? "").trim();
+  if (!tierName) return { tierName: null };
+
+  const { data, error } = await supabaseAdmin
+    .from("super_agent_tiers")
+    .select("name")
+    .eq("super_agent_id", superAgentId)
+    .eq("name", tierName)
+    .maybeSingle();
+
+  if (error) {
+    // Tiers table not migrated yet — keep the name without validation.
+    if (isMissingDatabaseObject(error)) return { tierName };
+    throw error;
+  }
+
+  if (!data) return { error: `Unknown tier: ${tierName}` };
+
+  return { tierName };
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -152,6 +193,20 @@ Deno.serve(async (req) => {
         );
       }
 
+      // The tier decides which of this super agent's packages the sub-agent sees.
+      const tierResult = await resolveTierName(
+        supabaseAdmin,
+        user.id,
+        userData?.tier_name,
+      );
+
+      if ("error" in tierResult) {
+        return new Response(JSON.stringify({ error: tierResult.error }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       const { data: createdUser, error: createError } =
         await supabaseAdmin.auth.admin.createUser({
           email,
@@ -162,6 +217,7 @@ Deno.serve(async (req) => {
             phone: phone || null,
             role: "Agent",
             super_agent_id: user.id,
+            tier_name: tierResult.tierName,
           },
           email_confirm: true,
         });
@@ -225,6 +281,22 @@ Deno.serve(async (req) => {
       }
       if (userData?.phone !== undefined) {
         updatePayload.phone = String(userData.phone).trim() || null;
+      }
+      if (userData?.tier_name !== undefined) {
+        const tierResult = await resolveTierName(
+          supabaseAdmin,
+          user.id,
+          userData.tier_name,
+        );
+
+        if ("error" in tierResult) {
+          return new Response(JSON.stringify({ error: tierResult.error }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        updatePayload.tier_name = tierResult.tierName;
       }
 
       if (Object.keys(updatePayload).length === 0) {

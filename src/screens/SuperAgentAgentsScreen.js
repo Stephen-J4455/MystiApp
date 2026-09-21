@@ -15,6 +15,11 @@ import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import colors from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
+import {
+  updateSubAgentTier,
+  fetchSuperAgentTiers,
+  createSubAgent,
+} from "../services/superAgentService";
 
 const normalizeRole = (user) => {
   const role = (user?.user_metadata?.role || user?.app_metadata?.role || "")
@@ -37,6 +42,8 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const [creatingAgent, setCreatingAgent] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [agents, setAgents] = useState([]);
+  const [tiers, setTiers] = useState([]);
+  const [savingTierAgentId, setSavingTierAgentId] = useState(null);
   const [form, setForm] = useState({
     fullName: "",
     businessName: "",
@@ -44,6 +51,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
     phone: "",
     password: "",
     initialBalance: "",
+    tierName: "",
   });
   const { showError, showSuccess } = useNotification();
 
@@ -70,6 +78,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
       setCurrentUser(user);
       await fetchAgents(user.id);
+      await fetchTiers(user.id);
     } catch (error) {
       console.error("Error loading super-agent agents:", error);
       showError("Error", "Failed to load your sub-agent list.");
@@ -108,10 +117,75 @@ export default function SuperAgentAgentsScreen({ navigation }) {
     }
   };
 
+  const fetchTiers = async (superAgentId) => {
+    try {
+      const activeTiers = await fetchSuperAgentTiers(
+        superAgentId || currentUser?.id,
+      );
+      setTiers(activeTiers);
+    } catch (error) {
+      console.error("Error fetching tiers:", error);
+      setTiers([]);
+    }
+  };
+
+  const handleChangeTier = async (agent, tierName) => {
+    if (!currentUser || savingTierAgentId) return;
+
+    const currentTier = agent?.user_metadata?.tier_name || "";
+    if (currentTier === tierName) return;
+
+    const agentLabel =
+      agent?.user_metadata?.full_name || agent?.email || "This sub-agent";
+
+    try {
+      setSavingTierAgentId(agent.id);
+
+      await updateSubAgentTier({
+        superAgentId: currentUser.id,
+        agentId: agent.id,
+        tierName,
+      });
+
+      // Update local state immediately for instant feedback
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === agent.id
+            ? {
+                ...a,
+                user_metadata: {
+                  ...(a.user_metadata || {}),
+                  tier_name: tierName || null,
+                },
+              }
+            : a,
+        ),
+      );
+
+      showSuccess(
+        "Tier updated",
+        tierName
+          ? `${agentLabel} now sees your ${tierName} packages.`
+          : `${agentLabel} now sees your General packages.`,
+      );
+
+      // Re-fetch in background to stay fully synchronized
+      fetchAgents(currentUser.id).catch(() => {});
+    } catch (error) {
+      console.error("Error updating sub-agent tier:", error);
+      showError(
+        "Error",
+        error?.message || "Unable to update this sub-agent's tier right now.",
+      );
+    } finally {
+      setSavingTierAgentId(null);
+    }
+  };
+
   const handleCreateSubAgent = async () => {
     if (!currentUser) return;
 
-    const { fullName, businessName, email, phone, password, initialBalance } =
+    const { fullName, businessName, email, phone, password, initialBalance, tierName } =
       form;
 
     if (!fullName.trim() || !businessName.trim() || !email.trim()) {
@@ -144,26 +218,16 @@ export default function SuperAgentAgentsScreen({ navigation }) {
     try {
       setCreatingAgent(true);
 
-      const { data: responseData, error: userError } =
-        await supabase.functions.invoke(getEdgeFunctionName("super-agent-user-management"), {
-          body: {
-            action: "createSubAgent",
-            userData: {
-              email: email.trim(),
-              password: password.trim(),
-              full_name: fullName.trim(),
-              business_name: businessName.trim(),
-              phone: phone.trim() || null,
-              initialBalance: balance,
-            },
-          },
-        });
-
-      if (userError) throw userError;
-
-      if (responseData?.error) {
-        throw new Error(responseData.error);
-      }
+      await createSubAgent({
+        superAgentId: currentUser.id,
+        email: email.trim(),
+        password: password.trim(),
+        fullName: fullName.trim(),
+        businessName: businessName.trim(),
+        phone: phone.trim() || null,
+        initialBalance: balance,
+        tierName: tierName.trim() || null,
+      });
 
       setForm({
         fullName: "",
@@ -172,6 +236,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         phone: "",
         password: "",
         initialBalance: "",
+        tierName: "",
       });
 
       await fetchAgents(currentUser.id);
@@ -184,7 +249,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
       if (error.message?.includes("already registered")) {
         showError("Error", "An account with this email already exists.");
       } else {
-        showError("Error", "Unable to create this sub-agent right now.");
+        showError("Error", error?.message || "Unable to create this sub-agent right now.");
       }
     } finally {
       setCreatingAgent(false);
@@ -283,6 +348,48 @@ export default function SuperAgentAgentsScreen({ navigation }) {
             style={styles.input}
           />
 
+          <Text style={styles.label}>Tier Access</Text>
+          <Text style={styles.fieldHint}>
+            Sub-agents see the prices you set for their tier. General fills any
+            bundle your tier does not cover.
+          </Text>
+          <View style={styles.tierChipRow}>
+            <TouchableOpacity
+              style={[styles.tierChip, !form.tierName && styles.tierChipActive]}
+              onPress={() => setForm((prev) => ({ ...prev, tierName: "" }))}
+            >
+              <Text
+                style={[
+                  styles.tierChipText,
+                  !form.tierName && styles.tierChipTextActive,
+                ]}
+              >
+                General
+              </Text>
+            </TouchableOpacity>
+            {tiers.map((tier) => (
+              <TouchableOpacity
+                key={`form-tier-${tier.id}`}
+                style={[
+                  styles.tierChip,
+                  form.tierName === tier.name && styles.tierChipActive,
+                ]}
+                onPress={() =>
+                  setForm((prev) => ({ ...prev, tierName: tier.name }))
+                }
+              >
+                <Text
+                  style={[
+                    styles.tierChipText,
+                    form.tierName === tier.name && styles.tierChipTextActive,
+                  ]}
+                >
+                  {tier.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           <TouchableOpacity
             style={[
               styles.primaryButton,
@@ -300,25 +407,82 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Assigned Agents</Text>
 
+          {tiers.length === 0 ? (
+            <Text style={styles.fieldHint}>
+              Create a tier first (Super Agent → Manage Tiers) to give sub-agents
+              tier pricing. They see your General packages until then.
+            </Text>
+          ) : null}
+
           {agents.length === 0 ? (
             <Text style={styles.emptyStateText}>
               No sub-agents have been created for you yet.
             </Text>
           ) : (
             <View style={styles.agentList}>
-              {agents.map((agent) => (
-                <View key={agent.id} style={styles.agentItem}>
-                  <Text style={styles.agentName}>
-                    {agent.user_metadata?.full_name ||
-                      agent.email?.split("@")[0]}
-                  </Text>
-                  <Text style={styles.agentMeta}>
-                    {agent.user_metadata?.business_name ||
-                      "Business name not set"}
-                  </Text>
-                  <Text style={styles.agentMeta}>{agent.email}</Text>
-                </View>
-              ))}
+              {agents.map((agent) => {
+                const agentTier = agent.user_metadata?.tier_name || "";
+
+                return (
+                  <View key={agent.id} style={styles.agentItem}>
+                    <Text style={styles.agentName}>
+                      {agent.user_metadata?.full_name ||
+                        agent.email?.split("@")[0]}
+                    </Text>
+                    <Text style={styles.agentMeta}>
+                      {agent.user_metadata?.business_name ||
+                        "Business name not set"}
+                    </Text>
+                    <Text style={styles.agentMeta}>{agent.email}</Text>
+
+                    <Text style={styles.agentTierLabel}>
+                      {savingTierAgentId === agent.id
+                        ? "Saving tier..."
+                        : `Tier access: ${agentTier || "General"}`}
+                    </Text>
+                    <View style={styles.tierChipRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.tierChip,
+                          !agentTier && styles.tierChipActive,
+                        ]}
+                        onPress={() => handleChangeTier(agent, "")}
+                        disabled={Boolean(savingTierAgentId)}
+                      >
+                        <Text
+                          style={[
+                            styles.tierChipText,
+                            !agentTier && styles.tierChipTextActive,
+                          ]}
+                        >
+                          General
+                        </Text>
+                      </TouchableOpacity>
+                      {tiers.map((tier) => (
+                        <TouchableOpacity
+                          key={`agent-${agent.id}-tier-${tier.id}`}
+                          style={[
+                            styles.tierChip,
+                            agentTier === tier.name && styles.tierChipActive,
+                          ]}
+                          onPress={() => handleChangeTier(agent, tier.name)}
+                          disabled={Boolean(savingTierAgentId)}
+                        >
+                          <Text
+                            style={[
+                              styles.tierChipText,
+                              agentTier === tier.name &&
+                                styles.tierChipTextActive,
+                            ]}
+                          >
+                            {tier.name}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </View>
+                );
+              })}
             </View>
           )}
         </View>
@@ -425,6 +589,43 @@ const styles = StyleSheet.create({
   },
   agentList: {
     gap: 10,
+  },
+  fieldHint: {
+    color: colors.secondary,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 8,
+  },
+  tierChipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
+  },
+  tierChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.primary,
+  },
+  tierChipActive: {
+    backgroundColor: colors.primary,
+  },
+  tierChipText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: colors.primary,
+  },
+  tierChipTextActive: {
+    color: colors.white,
+  },
+  agentTierLabel: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 8,
   },
   agentItem: {
     backgroundColor: colors.light,

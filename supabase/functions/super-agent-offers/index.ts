@@ -35,6 +35,61 @@ const isMissingDatabaseObject = (error: any) => {
   );
 };
 
+const normalizeKey = (value: unknown) => String(value || "").trim().toUpperCase();
+
+const sizeFromDataValue = (dataValue: unknown) => {
+  const match = String(dataValue || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
+  return match ? Number(match[1]) : null;
+};
+
+// Matches a super-agent offer (e.g. "ISHARE - 1GB") to a Jehuca catalog package
+// so sub-agents still get a package id, size, and bundle type for display.
+const findCatalogPackageForOffer = (catalog: any[], offer: any) => {
+  const network = normalizeKey(offer?.network);
+  const dataValue = normalizeKey(offer?.data_value);
+  if (!dataValue) return null;
+
+  return (
+    catalog.find((pkg: any) => {
+      if (normalizeKey(pkg?.network) !== network) return false;
+      const type = normalizeKey(pkg?.type);
+      const size =
+        pkg?.size !== undefined && pkg?.size !== null && String(pkg.size).trim() !== ""
+          ? `${pkg.size}GB`
+          : "";
+      const descriptor =
+        size && !type.includes(size) ? `${type} - ${size}` : type || size;
+
+      if (descriptor && descriptor === dataValue) return true;
+      if (String(pkg?.id || "").trim().toUpperCase() === dataValue) return true;
+      if (
+        size &&
+        (dataValue === `${type} - ${size}` ||
+          dataValue === `${type} (${size})` ||
+          dataValue === `${type} ${size}` ||
+          dataValue === `${type}-${size}`)
+      ) {
+        return true;
+      }
+
+      return false;
+    }) || null
+  );
+};
+
+const fetchCatalogPackages = async () => {
+  const apiKey = Deno.env.get("JEHUCA_API_KEY");
+  if (!apiKey) return [];
+
+  const response = await fetch(
+    "https://backend.jehucale-business.com/api/packages",
+    { headers: { "X-API-Key": apiKey } },
+  );
+  const data = await response.json();
+
+  return Array.isArray(data?.payload) ? data.payload : [];
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -94,17 +149,25 @@ Deno.serve(async (req) => {
       );
     }
 
+    const body = await req.json().catch(() => ({}));
+    const { action, superAgentId, offer, assignment } = body;
+    const targetSuperAgentId = superAgentId || user.id;
+
     const userRole = normalizeRole(user);
-    if (userRole !== "SuperAgent" && userRole !== "Admin") {
+    // Sub-agents may read the packages their super agent published for their tier.
+    const isAgentPackageRead =
+      userRole === "Agent" && action === "getAgentPackages";
+
+    if (
+      userRole !== "SuperAgent" &&
+      userRole !== "Admin" &&
+      !isAgentPackageRead
+    ) {
       return new Response(JSON.stringify({ error: "User not allowed" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-
-    const body = await req.json().catch(() => ({}));
-    const { action, superAgentId, offer, assignment } = body;
-    const targetSuperAgentId = superAgentId || user.id;
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
@@ -745,6 +808,122 @@ Deno.serve(async (req) => {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    if (action === "getAgentPackages") {
+      // Resolve the sub-agent's super agent and the tier they were granted.
+      const assignedSuperAgentId = String(
+        user.user_metadata?.super_agent_id ||
+          user.user_metadata?.superAgentId ||
+          "",
+      ).trim();
+      const agentTier = String(user.user_metadata?.tier_name || "").trim();
+
+      if (!assignedSuperAgentId) {
+        return new Response(
+          JSON.stringify({
+            offers: [],
+            agent_tier: null,
+            reason: "no_super_agent",
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: offerRows, error: offerError } = await supabaseAdmin
+        .from("super_agent_offers")
+        .select("*")
+        .eq("super_agent_id", assignedSuperAgentId)
+        .eq("is_active", true)
+        .order("network", { ascending: true });
+
+      if (offerError) {
+        if (isMissingDatabaseObject(offerError)) {
+          return new Response(
+            JSON.stringify({
+              offers: [],
+              agent_tier: agentTier || null,
+              migration_required: true,
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw offerError;
+      }
+
+      const publishedOffers = (offerRows || []) as any[];
+      const packageKeyOf = (row: any) =>
+        `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+
+      // Tier prices win; the super agent's untiered (General) offers fill any
+      // bundle the tier does not cover. Bundles priced nowhere stay hidden.
+      const tierOffers = agentTier
+        ? publishedOffers.filter(
+            (row) => normalizeKey(row?.tier_name) === normalizeKey(agentTier),
+          )
+        : [];
+      const coveredKeys = new Set(tierOffers.map(packageKeyOf));
+      const generalOffers = publishedOffers.filter(
+        (row) => String(row?.tier_name || "").trim() === "",
+      );
+
+      const selectedOffers = [...tierOffers];
+      generalOffers.forEach((row) => {
+        const key = packageKeyOf(row);
+        if (coveredKeys.has(key)) return;
+        coveredKeys.add(key);
+        selectedOffers.push(row);
+      });
+
+      let catalog: any[] = [];
+      try {
+        catalog = await fetchCatalogPackages();
+      } catch (catalogError) {
+        console.warn(
+          "Could not load the package catalog for offer enrichment:",
+          catalogError,
+        );
+      }
+
+      const networkFilter = normalizeKey(body?.network);
+
+      const packages = selectedOffers
+        .filter((row) => !networkFilter || normalizeKey(row?.network) === networkFilter)
+        .map((row) => {
+          const catalogPackage = findCatalogPackageForOffer(catalog, row);
+          const size = catalogPackage?.size ?? sizeFromDataValue(row?.data_value);
+          const dataValue = String(row?.data_value || "");
+
+          return {
+            id: Number(row?.id),
+            network: normalizeKey(row?.network),
+            data_value: dataValue,
+            title: row?.title || `${row?.network || ""} — ${dataValue}`.trim(),
+            price: Number(row?.price || 0),
+            tier_name: row?.tier_name || null,
+            package_id: catalogPackage?.id ?? null,
+            type: catalogPackage?.type ?? null,
+            size: size !== null && size !== undefined ? size : null,
+          };
+        });
+
+      return new Response(
+        JSON.stringify({
+          offers: packages,
+          agent_tier: agentTier || null,
+          super_agent_id: assignedSuperAgentId,
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
     }
 
     if (action === "setPackageBasePrice") {

@@ -16,11 +16,81 @@ import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
 import colors from "../components/theme";
+import {
+  upsertTierOffer,
+  updateSuperAgentOffer,
+  deleteSuperAgentOffer,
+  fetchCatalogPackages,
+} from "../services/superAgentService";
+
+const getPackageDescriptor = (pkg) => {
+  if (!pkg) return "";
+  const type = String(pkg.type || "").trim();
+  const size =
+    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+      ? `${pkg.size}GB`
+      : "";
+  if (size && !type.toUpperCase().includes(size.toUpperCase())) {
+    return `${type} - ${size}`;
+  }
+  return type || size || "DEFAULT";
+};
+
+const getPackageKey = (pkg) => {
+  if (!pkg) return "";
+  if (typeof pkg === "string") return pkg;
+  if (pkg.id) return String(pkg.id);
+  const net = String(pkg.network || "").toUpperCase();
+  const desc = getPackageDescriptor(pkg).toUpperCase();
+  return `${net}::${desc}`;
+};
+
+const findPricingRowForPackage = (rows, pkg) => {
+  if (!rows || !pkg) return null;
+  const net = String(pkg.network || "").toUpperCase();
+  const desc = getPackageDescriptor(pkg).toUpperCase();
+  const type = String(pkg.type || "").toUpperCase();
+  const sizeStr =
+    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+      ? `${pkg.size}GB`.toUpperCase()
+      : "";
+
+  return (
+    rows.find((row) => {
+      if (String(row.network || "").toUpperCase() !== net) return false;
+      const rowType = String(row.type || "").trim().toUpperCase();
+      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase()) return true;
+      if (rowType === desc) return true;
+      if (
+        sizeStr &&
+        (rowType === `${type} - ${sizeStr}` ||
+          rowType === `${type} (${sizeStr})` ||
+          rowType === `${type} ${sizeStr}` ||
+          rowType === `${type}-${sizeStr}`)
+      ) {
+        return true;
+      }
+      return false;
+    }) || null
+  );
+};
 
 const packageKey = (network, type) =>
   `${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
+const formatPriceInput = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(2) : "";
+};
+
+// Admin base prices are the default an offer price starts from. A base price of
+// 0 counts as "not set" because offer prices must be greater than 0.
+const usableBasePrice = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
 
 export default function SuperAgentOffersScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -97,7 +167,10 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
         const offerRows = offersResult.data?.offers || [];
         const tierRows = tiersResult.data?.tiers || [];
-        const catalog = packagesResult.data?.payload || [];
+        let catalog = packagesResult.data?.payload || [];
+        if (!Array.isArray(catalog) || catalog.length === 0) {
+          catalog = await fetchCatalogPackages();
+        }
         const pricingRows = pricingResult.data?.pricing || [];
 
         setOffers(offerRows);
@@ -111,8 +184,11 @@ export default function SuperAgentOffersScreen({ navigation }) {
         }
 
         const basePrices = {};
-        (pricingRows || []).forEach((row) => {
-          basePrices[packageKey(row.network, row.type)] = Number(row.base_price);
+        (catalog || []).forEach((pkg) => {
+          const row = findPricingRowForPackage(pricingRows, pkg);
+          if (row) {
+            basePrices[getPackageKey(pkg)] = Number(row.base_price);
+          }
         });
         setBasePriceMap(basePrices);
 
@@ -149,6 +225,13 @@ export default function SuperAgentOffersScreen({ navigation }) {
     loadData();
   }, [loadData]);
 
+  // Default the new-offer price to the admin base price of the chosen bundle.
+  useEffect(() => {
+    if (!formPackageKey) return;
+    const basePrice = usableBasePrice(basePriceMap[formPackageKey]);
+    setFormPrice(basePrice !== null ? formatPriceInput(basePrice) : "");
+  }, [formPackageKey, basePriceMap]);
+
   const handleRefresh = () => {
     setRefreshing(true);
     loadData({ showSpinner: false });
@@ -157,7 +240,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
   const packageMap = useMemo(() => {
     const map = {};
     (packages || []).forEach((pkg) => {
-      map[packageKey(pkg.network, pkg.type)] = pkg;
+      map[getPackageKey(pkg)] = pkg;
     });
     return map;
   }, [packages]);
@@ -228,18 +311,10 @@ export default function SuperAgentOffersScreen({ navigation }) {
     try {
       setSavingOfferId(offer.id);
 
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-offers"),
-        {
-          body: {
-            action: "updateOffer",
-            offer: { id: offer.id, price: value },
-          },
-        },
-      );
-
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      await updateSuperAgentOffer({
+        offerId: offer.id,
+        updates: { price: value },
+      });
 
       showSuccess("Price updated", `${offer.title} now costs ${formatGhc(value)}.`);
       await loadData({ showSpinner: false });
@@ -255,18 +330,10 @@ export default function SuperAgentOffersScreen({ navigation }) {
     try {
       setTogglingOfferId(offer.id);
 
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-offers"),
-        {
-          body: {
-            action: "updateOffer",
-            offer: { id: offer.id, is_active: !offer.is_active },
-          },
-        },
-      );
-
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      await updateSuperAgentOffer({
+        offerId: offer.id,
+        updates: { is_active: !offer.is_active },
+      });
 
       showSuccess(
         !offer.is_active ? "Offer activated" : "Offer paused",
@@ -288,13 +355,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
     }
 
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-offers"),
-        { body: { action: "deleteOffer", offer: { id: offer.id } } },
-      );
-
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      await deleteSuperAgentOffer(offer.id);
 
       showSuccess("Offer deleted", `${offer.title} was removed.`);
       setConfirmDeleteOfferId(null);
@@ -313,36 +374,44 @@ export default function SuperAgentOffersScreen({ navigation }) {
       return;
     }
 
-    const value = Number((formPrice || "").trim());
+    // An empty amount falls back to the admin base price when one is set.
+    const rawPrice = (formPrice || "").trim();
+    const fallbackBasePrice = usableBasePrice(basePriceMap[formPackageKey]);
+    const value =
+      rawPrice !== ""
+        ? Number(rawPrice)
+        : fallbackBasePrice !== null
+          ? fallbackBasePrice
+          : NaN;
+
     if (!Number.isFinite(value) || value <= 0) {
       showError("Validation", "Enter an amount greater than 0.");
       return;
     }
 
+    const desc = getPackageDescriptor(selectedPkg);
+
     try {
       setCreatingOffer(true);
 
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-offers"),
-        {
-          body: {
-            action: "upsertTierOffer",
-            offer: {
-              network: selectedPkg.network,
-              data_value: selectedPkg.type,
-              tier_name: formTierName || null,
-              price: value,
-            },
-          },
-        },
-      );
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      await upsertTierOffer({
+        superAgentId: user?.id,
+        offer: {
+          network: selectedPkg.network,
+          data_value: desc,
+          title: `${selectedPkg.network} — ${desc}`,
+          tier_name: formTierName || null,
+          price: value,
+        },
+      });
 
       showSuccess(
         "Offer saved",
-        `${selectedPkg.network} — ${selectedPkg.type} is priced at ${formatGhc(value)}.`,
+        `${selectedPkg.network} — ${desc} is priced at ${formatGhc(value)}.`,
       );
       setFormPackageKey("");
       setFormPrice("");
@@ -356,8 +425,24 @@ export default function SuperAgentOffersScreen({ navigation }) {
   };
 
   const renderOfferRow = (offer) => {
-    const pkg = packageMap[packageKey(offer.network, offer.data_value)];
-    const basePrice = basePriceMap[packageKey(offer.network, offer.data_value)];
+    const offerNet = String(offer.network || "").toUpperCase();
+    const offerVal = String(offer.data_value || "").trim().toUpperCase();
+
+    const pkg =
+      (packages || []).find((p) => {
+        if (String(p.network || "").toUpperCase() !== offerNet) return false;
+        const desc = getPackageDescriptor(p).toUpperCase();
+        return (
+          desc === offerVal ||
+          String(p.type || "").toUpperCase() === offerVal ||
+          (p.id && String(p.id).toUpperCase() === offerVal)
+        );
+      }) || packageMap[offer.data_value];
+
+    const basePrice = pkg
+      ? basePriceMap[getPackageKey(pkg)]
+      : basePriceMap[offer.data_value];
+
     const isSaving = savingOfferId === offer.id;
     const isToggling = togglingOfferId === offer.id;
     const isConfirmingDelete = confirmDeleteOfferId === offer.id;
@@ -491,9 +576,9 @@ export default function SuperAgentOffersScreen({ navigation }) {
         <View style={styles.infoCard}>
           <Ionicons name="information-circle" size={20} color={colors.primary} />
           <Text style={styles.infoText}>
-            These are the prices your sub-agents pay. Group them by tier or
-            leave them general. Manage tier pricing per bundle in Tier
-            Management.
+            These are the prices your sub-agents pay. New offers start at the
+            admin base price for the bundle — change it to set your own margin.
+            Group offers by tier or leave them general.
           </Text>
         </View>
 
@@ -523,6 +608,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                 onPress={() => {
                   setFormNetwork(option);
                   setFormPackageKey("");
+                  setFormPrice("");
                 }}
               >
                 <Text
@@ -546,7 +632,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                 contentContainerStyle={styles.chipRow}
               >
                 {formPackages.map((pkg) => {
-                  const key = packageKey(pkg.network, pkg.type);
+                  const key = getPackageKey(pkg);
                   return (
                     <TouchableOpacity
                       key={key}
@@ -650,6 +736,14 @@ export default function SuperAgentOffersScreen({ navigation }) {
               )}
             </TouchableOpacity>
           </View>
+
+          {formPackageKey &&
+          usableBasePrice(basePriceMap[formPackageKey]) !== null ? (
+            <Text style={styles.basePriceHint}>
+              Admin base: {formatGhc(basePriceMap[formPackageKey])} — used by
+              default
+            </Text>
+          ) : null}
         </View>
 
         {offerGroups.length === 0 ? (
@@ -828,6 +922,12 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontWeight: "700",
     marginLeft: 6,
+  },
+  basePriceHint: {
+    fontSize: 11,
+    color: colors.dark,
+    opacity: 0.65,
+    marginTop: 6,
   },
   groupCard: {
     backgroundColor: colors.white,

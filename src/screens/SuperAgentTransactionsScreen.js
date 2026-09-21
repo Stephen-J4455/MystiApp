@@ -43,7 +43,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           setTransactions(a);
         }
       } catch(err) { console.error(err); showError("Error", "Failed to load transactions."); }
-      finally { if(mounted) setLoading(false); })();
+      finally { if(mounted) setLoading(false); } })();
     return () => { mounted = false; };
   }, [navigation, showError]);
 

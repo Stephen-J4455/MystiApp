@@ -16,6 +16,62 @@ import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
 import colors from "../components/theme";
+import {
+  upsertTierOffer,
+  fetchCatalogPackages,
+} from "../services/superAgentService";
+
+const getPackageDescriptor = (pkg) => {
+  if (!pkg) return "";
+  const type = String(pkg.type || "").trim();
+  const size =
+    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+      ? `${pkg.size}GB`
+      : "";
+  if (size && !type.toUpperCase().includes(size.toUpperCase())) {
+    return `${type} - ${size}`;
+  }
+  return type || size || "DEFAULT";
+};
+
+const getPackageKey = (pkg) => {
+  if (!pkg) return "";
+  if (typeof pkg === "string") return pkg;
+  if (pkg.id) return String(pkg.id);
+  const net = String(pkg.network || "").toUpperCase();
+  const desc = getPackageDescriptor(pkg).toUpperCase();
+  return `${net}::${desc}`;
+};
+
+const findPricingRowForPackage = (rows, pkg) => {
+  if (!rows || !pkg) return null;
+  const net = String(pkg.network || "").toUpperCase();
+  const desc = getPackageDescriptor(pkg).toUpperCase();
+  const type = String(pkg.type || "").toUpperCase();
+  const sizeStr =
+    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+      ? `${pkg.size}GB`.toUpperCase()
+      : "";
+
+  return (
+    rows.find((row) => {
+      if (String(row.network || "").toUpperCase() !== net) return false;
+      const rowType = String(row.type || "").trim().toUpperCase();
+      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase()) return true;
+      if (rowType === desc) return true;
+      if (
+        sizeStr &&
+        (rowType === `${type} - ${sizeStr}` ||
+          rowType === `${type} (${sizeStr})` ||
+          rowType === `${type} ${sizeStr}` ||
+          rowType === `${type}-${sizeStr}`)
+      ) {
+        return true;
+      }
+      return false;
+    }) || null
+  );
+};
 
 const packageKey = (network, type) =>
   `${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
@@ -24,6 +80,18 @@ const offerKey = (tierName, network, type) =>
   `${String(tierName || "")}::${packageKey(network, type)}`;
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
+const formatPriceInput = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(2) : "";
+};
+
+// Admin base prices are the default a tier price starts from. A base price of
+// 0 counts as "not set" because tier prices must be greater than 0.
+const usableBasePrice = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
 
 export default function SuperAgentTierManagementScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -45,8 +113,11 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
   const buildMaps = useCallback((tierRows, catalog, pricingRows, offers) => {
     const basePrices = {};
-    (pricingRows || []).forEach((row) => {
-      basePrices[packageKey(row.network, row.type)] = Number(row.base_price);
+    (catalog || []).forEach((pkg) => {
+      const row = findPricingRowForPackage(pricingRows, pkg);
+      if (row) {
+        basePrices[getPackageKey(pkg)] = Number(row.base_price);
+      }
     });
 
     const offersByKey = {};
@@ -59,11 +130,19 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     const inputs = {};
     (tierRows || []).forEach((tier) => {
       (catalog || []).forEach((pkg) => {
-        const key = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
-        const existing = offersByKey[
-          offerKey(tier.name, pkg.network, pkg.type)
-        ];
-        inputs[key] = existing ? String(existing.price) : "";
+        const pkgKey = getPackageKey(pkg);
+        const key = `${tier.id}::${pkgKey}`;
+        const desc = getPackageDescriptor(pkg);
+        const existing =
+          offersByKey[offerKey(tier.name, pkg.network, desc)] ||
+          offersByKey[offerKey(tier.name, pkg.network, pkg.type)];
+        // Default to the admin base price until the super agent sets their own.
+        const basePrice = usableBasePrice(basePrices[pkgKey]);
+        inputs[key] = existing
+          ? String(existing.price)
+          : basePrice !== null
+            ? formatPriceInput(basePrice)
+            : "";
       });
     });
 
@@ -125,10 +204,14 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           console.error("Error loading offers:", offersResult.error);
         }
 
-        const tierRows = tiersResult.data?.tiers || [];
-        const catalog = packagesResult.data?.payload || [];
+        let catalog = packagesResult.data?.payload || [];
+        if (!Array.isArray(catalog) || catalog.length === 0) {
+          catalog = await fetchCatalogPackages();
+        }
+
         const pricingRows = pricingResult.data?.pricing || [];
         const myOffers = offersResult.data?.offers || [];
+        const tierRows = tiersResult.data?.tiers || [];
 
         setTiers(tierRows);
         setPackages(Array.isArray(catalog) ? catalog : []);
@@ -183,12 +266,19 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     (tier) => {
       let count = 0;
       (packages || []).forEach((pkg) => {
-        const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+        const pkgKey = getPackageKey(pkg);
+        const inputKey = `${tier.id}::${pkgKey}`;
         const raw = (priceInputs[inputKey] ?? "").toString().trim();
-        if (raw === "") return;
-        const value = Number(raw);
+        // Blank fields fall back to the admin base price when one is set.
+        const basePrice = usableBasePrice(basePriceMap[pkgKey]);
+        const effectiveRaw =
+          raw !== "" ? raw : basePrice !== null ? String(basePrice) : "";
+        if (effectiveRaw === "") return;
+        const value = Number(effectiveRaw);
         if (!Number.isFinite(value) || value <= 0) return;
+        const desc = getPackageDescriptor(pkg);
         const existing =
+          offerMap[offerKey(tier.name, pkg.network, desc)] ||
           offerMap[offerKey(tier.name, pkg.network, pkg.type)];
         if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
           count += 1;
@@ -196,17 +286,17 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
       });
       return count;
     },
-    [packages, priceInputs, offerMap],
+    [packages, priceInputs, offerMap, basePriceMap],
   );
 
-  const handlePriceChange = (tierId, network, type, text) => {
+  const handlePriceChange = (tierId, pkgKey, text) => {
     const cleaned = text.replace(/[^0-9.]/g, "");
     const parts = cleaned.split(".");
     const normalized =
       parts.length > 2 ? `${parts[0]}.${parts.slice(1).join("")}` : cleaned;
     setPriceInputs((prev) => ({
       ...prev,
-      [`${tierId}::${packageKey(network, type)}`]: normalized,
+      [`${tierId}::${pkgKey}`]: normalized,
     }));
   };
 
@@ -217,19 +307,29 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     const invalidRows = [];
 
     (packages || []).forEach((pkg) => {
-      const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
+      const pkgKey = getPackageKey(pkg);
+      const inputKey = `${tier.id}::${pkgKey}`;
       const raw = (priceInputs[inputKey] ?? "").toString().trim();
-      if (raw === "") return;
+      // Blank fields are saved at the admin base price instead of being skipped.
+      const basePrice = usableBasePrice(basePriceMap[pkgKey]);
+      const effectiveRaw =
+        raw !== "" ? raw : basePrice !== null ? String(basePrice) : "";
+      if (effectiveRaw === "") return;
 
-      const value = Number(raw);
+      const value = Number(effectiveRaw);
       if (!Number.isFinite(value) || value <= 0) {
-        invalidRows.push(`${pkg.network} — ${pkg.type}`);
+        invalidRows.push(
+          `${pkg.network} — ${pkg.size ? `${pkg.size} GB` : pkg.type}`,
+        );
         return;
       }
 
-      const existing = offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+      const desc = getPackageDescriptor(pkg);
+      const existing =
+        offerMap[offerKey(tier.name, pkg.network, desc)] ||
+        offerMap[offerKey(tier.name, pkg.network, pkg.type)];
       if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
-        updates.push({ pkg, value });
+        updates.push({ pkg, value, descriptor: desc });
       }
     });
 
@@ -253,22 +353,21 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
       setSavingTierId(tier.id);
 
       const results = await Promise.all(
-        updates.map(async ({ pkg, value }) => {
-          const { data, error } = await supabase.functions.invoke(
-            getEdgeFunctionName("super-agent-offers"),
-            {
-              body: {
-                action: "upsertTierOffer",
-                offer: {
-                  network: pkg.network,
-                  data_value: pkg.type,
-                  tier_name: tier.name,
-                  price: value,
-                },
+        updates.map(async ({ pkg, value, descriptor }) => {
+          try {
+            await upsertTierOffer({
+              superAgentId: currentUser.id,
+              offer: {
+                network: pkg.network,
+                data_value: descriptor,
+                tier_name: tier.name,
+                price: value,
               },
-            },
-          );
-          return { error: error || data?.error || null };
+            });
+            return { error: null };
+          } catch (err) {
+            return { error: err?.message || "Failed to update price" };
+          }
         }),
       );
 
@@ -279,12 +378,15 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
       showSuccess(
         "Tier prices saved",
-        `${updates.length} ${tier.name} price${updates.length === 1 ? "" : "s"} updated for your agents.`,
+        `${updates.length} ${tier.name} tier ${updates.length === 1 ? "price" : "prices"} updated.`,
       );
       await loadData({ showSpinner: false });
-    } catch (error) {
-      console.error("Error saving tier prices:", error);
-      showError("Error", "Failed to save tier prices. Please try again.");
+    } catch (saveError) {
+      console.error("Error saving tier prices:", saveError);
+      showError(
+        "Error",
+        saveError?.message || "Failed to save tier prices. Please try again.",
+      );
     } finally {
       setSavingTierId(null);
     }
@@ -334,6 +436,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   };
 
   const handleDeleteTier = async (tier) => {
+    if (!tier?.id) return;
     if (confirmDeleteTierId !== tier.id) {
       setConfirmDeleteTierId(tier.id);
       return;
@@ -359,16 +462,19 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   };
 
   const renderPackageRow = (tier, pkg) => {
-    const inputKey = `${tier.id}::${packageKey(pkg.network, pkg.type)}`;
-    const basePrice = basePriceMap[packageKey(pkg.network, pkg.type)];
-    const existing = offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+    const pkgKey = getPackageKey(pkg);
+    const inputKey = `${tier.id}::${pkgKey}`;
+    const basePrice = basePriceMap[pkgKey];
+    const desc = getPackageDescriptor(pkg);
+    const existing =
+      offerMap[offerKey(tier.name, pkg.network, desc)] ||
+      offerMap[offerKey(tier.name, pkg.network, pkg.type)];
 
     return (
       <View key={inputKey} style={styles.packageRow}>
         <View style={styles.packageInfo}>
           <Text style={styles.packageName}>
-            {String(pkg.network || "").toUpperCase()} —{" "}
-            {String(pkg.type || "").toUpperCase()}
+            {String(pkg.network || "").toUpperCase()} — {desc}
           </Text>
           <Text style={styles.packageMeta}>
             {pkg.size ? `${pkg.size} GB · ` : ""}Base:{" "}
@@ -382,7 +488,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             style={styles.priceInput}
             value={priceInputs[inputKey] ?? ""}
             onChangeText={(text) =>
-              handlePriceChange(tier.id, pkg.network, pkg.type, text)
+              handlePriceChange(tier.id, pkgKey, text)
             }
             placeholder="0.00"
             placeholderTextColor="#9AA5AF"
@@ -492,9 +598,10 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         <View style={styles.infoCard}>
           <Ionicons name="information-circle" size={20} color={colors.primary} />
           <Text style={styles.infoText}>
-            Admin base prices are shown for reference. Enter what your agents
-            pay for each bundle in every tier, then save. Empty fields are
-            skipped.
+            Every bundle starts at the admin base price. Adjust the amounts to
+            set what your agents pay in this tier, then save. Fields you leave
+            blank keep the admin base price, and bundles with no base price yet
+            are skipped.
           </Text>
         </View>
 

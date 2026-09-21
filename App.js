@@ -12,6 +12,7 @@ import {
   StyleSheet,
 } from "react-native";
 import * as Notifications from "expo-notifications";
+import Constants from "expo-constants";
 import { supabase } from "./src/lib/supabase";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
@@ -323,7 +324,12 @@ export default function App() {
           await savePushToken(token, user.id);
           console.log("Push notifications registered successfully");
         } else {
-          console.log("Push notification registration skipped or failed");
+          const isExpoGo = Constants?.appOwnership === "expo";
+          console.log(
+            isExpoGo
+              ? "Push notification registration skipped: running in Expo Go (push notifications require a standalone build)"
+              : "Push notification registration skipped or failed: check console for details",
+          );
         }
 
         // Setup notification listeners
