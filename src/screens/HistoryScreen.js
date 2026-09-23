@@ -11,6 +11,70 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import colors from "../components/theme";
+import { isSuperAgent } from "../lib/superAgent";
+import { getEdgeFunctionName } from "../lib/env";
+
+const refreshProviderStatuses = async (orders) => {
+  const results = await Promise.all(
+    (orders || []).map(async (order) => {
+      if (!order.jehuca_order_id) return order;
+
+      try {
+        const { data, error } = await supabase.functions.invoke(
+          getEdgeFunctionName("check-order-status"),
+          { body: { orderId: order.jehuca_order_id } },
+        );
+        if (error) {
+          if (
+            getEdgeFunctionName("check-order-status") !== "check-order-status"
+          ) {
+            const fallback = await supabase.functions.invoke(
+              "check-order-status",
+              { body: { orderId: order.jehuca_order_id } },
+            );
+            if (!fallback.error) {
+              return {
+                ...order,
+                jehuca_order_status:
+                  fallback.data?.data?.status || order.jehuca_order_status,
+              };
+            }
+          }
+          return order;
+        }
+        if (data?.success === false) {
+          console.warn(
+            "Jehucal status request failed:",
+            data.error,
+            data.providerStatusCode,
+          );
+          return order;
+        }
+
+        const providerStatus =
+          data?.data?.status ||
+          data?.payload?.status ||
+          data?.order?.status ||
+          data?.status;
+        if (!providerStatus) return order;
+
+        if (providerStatus !== order.jehuca_order_status) {
+          await supabase
+            .from("agent_orders")
+            .update({ jehuca_order_status: providerStatus })
+            .eq("id", order.id);
+        }
+
+        return { ...order, jehuca_order_status: providerStatus };
+      } catch (error) {
+        console.warn("Unable to refresh Jehuca status:", error);
+        return order;
+      }
+    }),
+  );
+
+  return results;
+};
 
 export default function HistoryScreen({ navigation }) {
   const [transactions, setTransactions] = useState([]);
@@ -44,7 +108,7 @@ export default function HistoryScreen({ navigation }) {
           duration: 800,
           useNativeDriver: true,
         }),
-      ])
+      ]),
     );
     animation.start();
     return () => animation.stop();
@@ -76,7 +140,7 @@ export default function HistoryScreen({ navigation }) {
                 console.log("Order updated:", payload);
                 // Refresh transactions when order status changes
                 checkAgentStatus(true);
-              }
+              },
             )
             .subscribe();
 
@@ -102,7 +166,23 @@ export default function HistoryScreen({ navigation }) {
                   console.log("Agent order updated:", payload);
                   // Refresh transactions when agent order status changes
                   checkAgentStatus(true);
-                }
+                },
+              )
+              .subscribe();
+          }
+
+          if (isSuperAgent(user)) {
+            agentOrdersSubscription = supabase
+              .channel("history_super_agent_orders_realtime")
+              .on(
+                "postgres_changes",
+                {
+                  event: "*",
+                  schema: "public",
+                  table: "agent_orders",
+                  filter: `super_agent_id=eq.${user.id}`,
+                },
+                () => checkAgentStatus(true),
               )
               .subscribe();
           }
@@ -151,7 +231,7 @@ export default function HistoryScreen({ navigation }) {
 
   const fetchTransactions = async (
     agentStatus = isAgent,
-    isRefresh = false
+    isRefresh = false,
   ) => {
     try {
       if (!isRefresh) {
@@ -181,7 +261,7 @@ export default function HistoryScreen({ navigation }) {
               orderType: "regular",
               displayName: order.user_name,
               displayPhone: order.phone,
-            })
+            }),
           );
           allTransactions = [...allTransactions, ...normalizedRegularOrders];
         }
@@ -197,7 +277,9 @@ export default function HistoryScreen({ navigation }) {
           if (agentError) {
             console.error("Error fetching agent orders:", agentError);
           } else {
-            const normalizedAgentOrders = (agentOrders || []).map((order) => ({
+            const refreshedAgentOrders =
+              await refreshProviderStatuses(agentOrders);
+            const normalizedAgentOrders = refreshedAgentOrders.map((order) => ({
               ...order,
               orderType: "agent",
               displayName: order.recipient_name,
@@ -207,9 +289,34 @@ export default function HistoryScreen({ navigation }) {
           }
         }
 
+        if (isSuperAgent(user)) {
+          const { data: assignedOrders, error: assignedError } = await supabase
+            .from("agent_orders")
+            .select("*")
+            .eq("super_agent_id", user.id)
+            .order("created_at", { ascending: false });
+
+          if (assignedError) {
+            console.error("Error fetching sub-agent orders:", assignedError);
+          } else {
+            const refreshedAssignedOrders =
+              await refreshProviderStatuses(assignedOrders);
+            const assignedTransactions = refreshedAssignedOrders.map(
+              (order) => ({
+                ...order,
+                orderType: "agent",
+                isSubAgentTransaction: true,
+                displayName: order.recipient_name,
+                displayPhone: order.recipient_phone,
+              }),
+            );
+            allTransactions = [...allTransactions, ...assignedTransactions];
+          }
+        }
+
         // Sort all transactions by created_at
         allTransactions.sort(
-          (a, b) => new Date(b.created_at) - new Date(a.created_at)
+          (a, b) => new Date(b.created_at) - new Date(a.created_at),
         );
 
         setTransactions(allTransactions);
@@ -318,8 +425,7 @@ export default function HistoryScreen({ navigation }) {
             />
             <Text style={styles.emptyTitle}>No Transactions Yet</Text>
             <Text style={styles.emptyMessage}>
-              Your transaction history will appear here once you make
-              purchases
+              Your transaction history will appear here once you make purchases
             </Text>
           </View>
         ) : (
@@ -328,24 +434,30 @@ export default function HistoryScreen({ navigation }) {
               <TouchableOpacity
                 key={transaction.id}
                 style={styles.transactionCard}
-                onPress={() =>
-                  navigation.navigate("Receipt", { transaction })
-                }
+                onPress={() => navigation.navigate("Receipt", { transaction })}
               >
                 <View style={styles.transactionLeft}>
                   <Text style={styles.transactionTitle}>
                     {transaction.orderType === "agent"
-                      ? `Agent Service - ${transaction.displayName || "Customer"
-                      }`
+                      ? `Agent Service - ${
+                          transaction.displayName || "Customer"
+                        }`
                       : transaction.offer_title || "Purchase"}
                   </Text>
                   <Text style={styles.transactionDesc}>
                     {transaction.orderType === "agent"
-                      ? `Phone: ${transaction.displayPhone || "N/A"}`
+                      ? `${transaction.isSubAgentTransaction ? "Sub-agent: " : "Phone: "}${transaction.isSubAgentTransaction ? transaction.agent_id || "N/A" : transaction.displayPhone || "N/A"}`
                       : (transaction.network
-                        ? `${transaction.network.toUpperCase()} - `
-                        : "") + (transaction.data_amount || "Data Bundle")}
+                          ? `${transaction.network.toUpperCase()} - `
+                          : "") + (transaction.data_amount || "Data Bundle")}
                   </Text>
+                  {transaction.isSubAgentTransaction && (
+                    <Text style={styles.transactionDesc}>
+                      Base Ghc {Number(transaction.admin_share || 0).toFixed(2)}{" "}
+                      | Tier Ghc{" "}
+                      {Number(transaction.super_agent_share || 0).toFixed(2)}
+                    </Text>
+                  )}
                   <Text style={styles.transactionDate}>
                     {formatDate(transaction.created_at)}
                   </Text>
@@ -354,12 +466,18 @@ export default function HistoryScreen({ navigation }) {
                   <Text
                     style={[
                       styles.transactionAmount,
-                      transaction.status?.toLowerCase() === "completed" &&
-                      styles.transactionAmountCompleted,
-                      transaction.status?.toLowerCase() === "processing" &&
-                      styles.transactionAmountProcessing,
-                      transaction.status?.toLowerCase() === "pending" &&
-                      styles.transactionAmountPending,
+                      (
+                        transaction.jehuca_order_status || transaction.status
+                      )?.toLowerCase() === "completed" &&
+                        styles.transactionAmountCompleted,
+                      (
+                        transaction.jehuca_order_status || transaction.status
+                      )?.toLowerCase() === "processing" &&
+                        styles.transactionAmountProcessing,
+                      (
+                        transaction.jehuca_order_status || transaction.status
+                      )?.toLowerCase() === "pending" &&
+                        styles.transactionAmountPending,
                     ]}
                   >
                     {transaction.amount ? `Ghc ${transaction.amount}` : "N/A"}
@@ -367,11 +485,17 @@ export default function HistoryScreen({ navigation }) {
                   <View
                     style={[
                       styles.statusBadge,
-                      { backgroundColor: getStatusColor(transaction.status) },
+                      {
+                        backgroundColor: getStatusColor(
+                          transaction.jehuca_order_status || transaction.status,
+                        ),
+                      },
                     ]}
                   >
                     <Text style={styles.statusText}>
-                      {getStatusText(transaction.status)}
+                      {getStatusText(
+                        transaction.jehuca_order_status || transaction.status,
+                      )}
                     </Text>
                   </View>
                 </View>

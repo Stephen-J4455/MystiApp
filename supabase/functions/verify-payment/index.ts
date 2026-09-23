@@ -73,6 +73,9 @@ Deno.serve(async (req) => {
       offer_id,
       recipient_phone,
       amount,
+      base_price,
+      tier_extra,
+      transaction_fee,
       network,
       super_agent_id,
     } = await req.json();
@@ -100,7 +103,12 @@ Deno.serve(async (req) => {
     }
 
     // Verify payment with Paystack
-    const paystackSecret = Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY");
+    const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase().trim();
+    const paystackSecret =
+      appEnv === "production"
+        ? Deno.env.get("PAYSTACK_SECRET_KEY")
+        : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+          Deno.env.get("PAYSTACK_SECRET_KEY");
     if (!paystackSecret) {
       console.error("PAYSTACK_SECRET_KEY not configured");
       return new Response(
@@ -210,7 +218,23 @@ Deno.serve(async (req) => {
       !recipient_phone || recipient_phone === (user.user_metadata?.phone || "");
 
     // Use offer data if available, otherwise use the provided amount and network
-    const orderAmount = offer?.price || amount || verifyData.data.amount / 100;
+    const orderAmount = Number(
+      amount || offer?.price || verifyData.data.amount / 100,
+    );
+    const chargedAmount = Number(verifyData.data.amount || 0) / 100;
+    if (Math.abs(chargedAmount - orderAmount) > 0.01) {
+      return new Response(
+        JSON.stringify({
+          error: "Payment amount does not match the order",
+          expected: orderAmount,
+          received: chargedAmount,
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
     const orderNetwork = offer?.network || network || "Unknown";
     const orderTitle = offer?.title || `${orderNetwork} Data Bundle`;
 
@@ -252,6 +276,34 @@ Deno.serve(async (req) => {
 
     const settlement = (() => {
       const gross = Number(orderAmount || 0);
+      const requestedBase = Number(base_price);
+      const requestedTierExtra = Number(tier_extra);
+      const requestedTransactionFee = Number(transaction_fee);
+      const hasPaymentSplit =
+        Boolean(resolvedSuperAgentId) &&
+        Number.isFinite(requestedBase) &&
+        Number.isFinite(requestedTierExtra) &&
+        requestedBase >= 0 &&
+        requestedTierExtra >= 0 &&
+        requestedTransactionFee >= 0 &&
+        Math.abs(
+          requestedBase + requestedTierExtra + requestedTransactionFee - gross,
+        ) <= 0.01 &&
+        Math.abs(requestedTransactionFee - requestedBase * 0.02) <= 0.01;
+
+      if (hasPaymentSplit) {
+        return {
+          adminShare: Number(
+            (requestedBase + requestedTransactionFee).toFixed(2),
+          ),
+          superAgentShare: Number(requestedTierExtra.toFixed(2)),
+          agentNet: 0,
+          baseAmount: Number(requestedBase.toFixed(2)),
+          agentMarkup: Number(requestedTierExtra.toFixed(2)),
+          transactionFee: Number(requestedTransactionFee.toFixed(2)),
+        };
+      }
+
       const adminShareRate = 0.3;
       const superAgentShareRate = 0.2;
       const adminShare = Number((gross * adminShareRate).toFixed(2));
@@ -264,6 +316,9 @@ Deno.serve(async (req) => {
         adminShare,
         superAgentShare,
         agentNet,
+        baseAmount: Number(gross.toFixed(2)),
+        agentMarkup: 0,
+        transactionFee: 0,
       };
     })();
 
@@ -306,10 +361,15 @@ Deno.serve(async (req) => {
         admin_share: settlement.adminShare,
         super_agent_share: settlement.superAgentShare,
         agent_net: settlement.agentNet,
+        base_amount: settlement.baseAmount,
+        agent_markup: settlement.agentMarkup,
+        transaction_fee: settlement.transactionFee,
+        main_account_amount: settlement.adminShare,
         settlement_status: "pending",
         paystack_subaccount_code: paystackSubaccountCode,
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
-        paystack_transaction_status: sharedOrderFields.paystack_transaction_status,
+        paystack_transaction_status:
+          sharedOrderFields.paystack_transaction_status,
         paid_at: sharedOrderFields.paid_at,
         bank: sharedOrderFields.bank,
       };
@@ -328,7 +388,8 @@ Deno.serve(async (req) => {
       const orderData = {
         user_id: user.id,
         user_name:
-          user.user_metadata?.full_name || user.email?.split("@")[0] ||
+          user.user_metadata?.full_name ||
+          user.email?.split("@")[0] ||
           "Unknown",
         user_email: user.email,
         phone: recipient_phone || user.user_metadata?.phone || null,
@@ -341,7 +402,8 @@ Deno.serve(async (req) => {
         data_amount: orderTitle,
         offer_id: parseInt(offer_id),
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
-        paystack_transaction_status: sharedOrderFields.paystack_transaction_status,
+        paystack_transaction_status:
+          sharedOrderFields.paystack_transaction_status,
         paid_at: sharedOrderFields.paid_at,
         device_token: null,
         country_code: "GH", // Ghana
@@ -419,9 +481,7 @@ Deno.serve(async (req) => {
                 retryError.message,
               );
             } else {
-              console.log(
-                "Settlement row created (without subaccount column)",
-              );
+              console.log("Settlement row created (without subaccount column)");
             }
           } else {
             console.warn(
@@ -439,6 +499,49 @@ Deno.serve(async (req) => {
       console.warn(
         "Settlement creation skipped because extended tables are not available yet:",
         settlementCatchError,
+      );
+    }
+
+    const { error: transactionError } = await supabaseAdmin
+      .from("payment_transactions")
+      .insert({
+        user_id: user.id,
+        order_id: order.id,
+        order_type: isAgentOrder ? "agent" : "regular",
+        payment_reference: reference,
+        paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
+        paystack_transaction_status:
+          sharedOrderFields.paystack_transaction_status,
+        gross_amount: orderAmount,
+        base_amount: isAgentOrder ? settlement.baseAmount : orderAmount,
+        agent_markup: settlement.agentMarkup,
+        transaction_fee: settlement.transactionFee,
+        main_account_amount: isAgentOrder ? settlement.adminShare : orderAmount,
+        super_agent_amount: settlement.superAgentShare,
+        agent_net: settlement.agentNet,
+        super_agent_id: isAgentOrder ? resolvedSuperAgentId : null,
+        settlement_status: isAgentOrder ? "pending" : "settled",
+        network: orderNetwork,
+        offer_title: orderTitle,
+        recipient_phone: recipient_phone || user.user_metadata?.phone || null,
+        channel: sharedOrderFields.channel,
+        bank: sharedOrderFields.bank,
+        paystack_subaccount_code: paystackSubaccountCode,
+      });
+
+    if (transactionError) {
+      console.error(
+        "Payment transaction ledger insert failed:",
+        transactionError,
+      );
+      return new Response(
+        JSON.stringify({
+          error: "Payment recorded but transaction ledger failed",
+        }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
       );
     }
 
@@ -514,5 +617,3 @@ Deno.serve(async (req) => {
     );
   }
 });
-
-

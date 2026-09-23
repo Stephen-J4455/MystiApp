@@ -20,10 +20,7 @@
     "secrets:set:test": "pwsh supabase/scripts/set-secrets.ps1 -Env test",
     "secrets:set:prod": "pwsh supabase/scripts/set-secrets.ps1 -Env production",
     "functions:test:test": "pwsh supabase/scripts/test-functions.ps1 -Env test",
-    "functions:test:prod": "pwsh supabase/scripts/test-functions.ps1 -Env production",
-    "env:dev": "cross-env EXPO_PUBLIC_APP_ENV=development expo start",
-    "env:test": "cross-env EXPO_PUBLIC_APP_ENV=test expo start",
-    "env:prod": "cross-env EXPO_PUBLIC_APP_ENV=production expo start"
+    "functions:test:prod": "pwsh supabase/scripts/test-functions.ps1 -Env production"
   },
   "dependencies": {
     "@expo/cli": "^54.0.16",

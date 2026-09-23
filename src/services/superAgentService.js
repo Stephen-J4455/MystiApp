@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { supabase, SUPABASE_URL } from "../lib/supabase.js";
-import { getEdgeFunctionName } from "../lib/env.js";
+import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
 
 const SERVICE_ROLE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmZmd6bmtubG1xeHRpa2t5aHd1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Njk3MTQ3MSwiZXhwIjoyMDYyNTQ3NDcxfQ.GlKnfveTDERNeMVyTPuHlI6ssMCj9G1X1KQnOe9YlYU";
@@ -187,6 +187,11 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
         const size =
           catalogPackage?.size ?? sizeFromDataValue(descriptor);
 
+        const tierPrice = Number(row?.price || 0);
+        const basePrice = catalogPackage?.price
+          ? catalogPackage.price / 100
+          : tierPrice;
+
         return {
           id: catalogPackage?.id ? String(catalogPackage.id) : String(row.id),
           superAgentOfferId: row.id,
@@ -198,7 +203,9 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
             row?.title || `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
           name:
             row?.title || `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
-          price: Number(row?.price || 0),
+          price: tierPrice,
+          base_price: basePrice,
+          tier_extra: Math.max(0, tierPrice - basePrice),
           tier_name: row?.tier_name || null,
           size: size !== null && size !== undefined ? size : null,
           dataSize:

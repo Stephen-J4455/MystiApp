@@ -60,19 +60,23 @@ Deno.serve(async (req) => {
     dbError = (err as Error).message;
   }
 
-  const paystackConfigured = Boolean(
-    Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-    Deno.env.get("PAYSTACK_SECRET_KEY"),
-  );
+  const appEnv = getAppEnv();
+  const paystackSecret =
+    appEnv === "production"
+      ? Deno.env.get("PAYSTACK_SECRET_KEY")
+      : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+        Deno.env.get("PAYSTACK_SECRET_KEY");
+  const paystackConfigured = Boolean(paystackSecret);
   const fcmConfigured = Boolean(Deno.env.get("FCM_SERVICE_ACCOUNT_JSON"));
   const paystackPublicKey =
-    Deno.env.get("TEST_PAYSTACK_PUBLIC_KEY") ||
-    Deno.env.get("PAYSTACK_PUBLIC_KEY") ||
-    null;
+    (appEnv === "production"
+      ? Deno.env.get("PAYSTACK_PUBLIC_KEY")
+      : Deno.env.get("TEST_PAYSTACK_PUBLIC_KEY") ||
+        Deno.env.get("PAYSTACK_PUBLIC_KEY")) || null;
 
   const payload = {
     ok: dbOk && paystackConfigured,
-    appEnv: getAppEnv(),
+    appEnv,
     function: "health",
     version: Deno.env.get("FUNCTION_VERSION") || null,
     deployedAt: info.nowIso,
@@ -86,11 +90,7 @@ Deno.serve(async (req) => {
       paystack: {
         configured: paystackConfigured,
         live: paystackConfigured
-          ? (
-              Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-              Deno.env.get("PAYSTACK_SECRET_KEY") ||
-              ""
-            ).startsWith("sk_live_")
+          ? (paystackSecret || "").startsWith("sk_live_")
           : false,
       },
       fcm: {
@@ -103,7 +103,9 @@ Deno.serve(async (req) => {
   };
 
   return new Response(JSON.stringify(payload, null, 2), {
-    status: payload.ok ? 200 : 503,
+    // Paystack clients need the public key even if the optional database
+    // probe is unavailable. Keep the database result in checks.database.
+    status: paystackConfigured ? 200 : 503,
     headers: {
       ...corsHeaders,
       "Content-Type": "application/json",

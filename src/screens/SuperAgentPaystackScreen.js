@@ -19,6 +19,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import colors from "../components/theme";
+import { invokeEdgeFunction } from "../lib/edgeFunctions";
 import { getEdgeFunctionName } from "../lib/env";
 
 export default function SuperAgentPaystackScreen({ navigation }) {
@@ -94,10 +95,9 @@ export default function SuperAgentPaystackScreen({ navigation }) {
   // Fetch verification status from Paystack
   const fetchVerification = async () => {
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("paystack-subaccount"),
-        { body: { action: "verifySubaccount" } },
-      );
+      const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+        body: { action: "verifySubaccount" },
+      });
       if (error) throw error;
       if (data?.subaccount) {
         setSubaccount(data.subaccount);
@@ -111,7 +111,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         setVerificationStatus({ verified: false, paystack_status: null, message: data.message || "No sub-account" });
       }
     } catch (err) {
-      console.error("Failed to verify subaccount:", err);
+      console.error("Failed to verify subaccount (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
       setVerificationStatus({ verified: false, message: "Verification failed" });
     }
   };
@@ -119,10 +119,9 @@ export default function SuperAgentPaystackScreen({ navigation }) {
   const fetchBanks = async () => {
     setBanksLoading(true);
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("paystack-subaccount"),
-        { body: { action: "listBanks" } },
-      );
+      const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+        body: { action: "listBanks" },
+      });
       if (error) throw error;
       const rawBanks = data?.banks || [];
 
@@ -174,7 +173,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
       setBanks(banksOnly);
       setMobileMoneyProviders(mobileOnly);
     } catch (err) {
-      console.error("Failed to fetch banks:", err);
+      console.error("Failed to fetch banks (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
     } finally {
       setBanksLoading(false);
     }
@@ -204,10 +203,9 @@ export default function SuperAgentPaystackScreen({ navigation }) {
   // Fetch existing sub-account from backend
   const fetchSubaccount = async (userId) => {
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("paystack-subaccount"),
-        { body: { action: "getSubaccount" } },
-      );
+      const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+        body: { action: "getSubaccount" },
+      });
       if (error) throw error;
       if (data?.subaccount) {
         setSubaccount(data.subaccount);
@@ -229,7 +227,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         setShowForm(true);
       }
     } catch (err) {
-      console.error("Failed to fetch subaccount:", err);
+      console.error("Failed to fetch subaccount (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
       if (err.message?.includes("migration_required")) {
         showError(
           "Setup Required",
@@ -259,21 +257,18 @@ export default function SuperAgentPaystackScreen({ navigation }) {
     try {
       if (subaccount) {
         setUpdating(true);
-        const { data, error } = await supabase.functions.invoke(
-          getEdgeFunctionName("paystack-subaccount"),
-          {
-            body: {
-              action: "updateSubaccount",
-              subaccount: {
-                business_name: form.business_name.trim(),
-                settlement_bank_code: form.settlement_bank_code.trim(),
-                account_number: form.account_number.trim(),
-                percentage_charge: 1.95,
-                description: form.description.trim() || null,
-              },
+        const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+          body: {
+            action: "updateSubaccount",
+            subaccount: {
+              business_name: form.business_name.trim(),
+              settlement_bank_code: form.settlement_bank_code.trim(),
+              account_number: form.account_number.trim(),
+              percentage_charge: 1.95,
+              description: form.description.trim() || null,
             },
           },
-        );
+        });
         if (error) throw error;
         if (data?.error) throw new Error(data.error);
         showSuccess("Updated", "Sub-account details updated successfully.");
@@ -284,21 +279,18 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         if (user) await fetchSubaccount(user.id);
       } else {
         setCreating(true);
-        const { data, error } = await supabase.functions.invoke(
-          getEdgeFunctionName("paystack-subaccount"),
-          {
-            body: {
-              action: "createSubaccount",
-              subaccount: {
-                business_name: form.business_name.trim(),
-                settlement_bank_code: form.settlement_bank_code.trim(),
-                account_number: form.account_number.trim(),
-                percentage_charge: 1.95,
-                description: form.description.trim() || null,
-              },
+        const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+          body: {
+            action: "createSubaccount",
+            subaccount: {
+              business_name: form.business_name.trim(),
+              settlement_bank_code: form.settlement_bank_code.trim(),
+              account_number: form.account_number.trim(),
+              percentage_charge: 1.95,
+              description: form.description.trim() || null,
             },
           },
-        );
+        });
         if (error) throw error;
         if (data?.error) throw new Error(data.error);
         showSuccess("Created", "Paystack sub-account created successfully.");
@@ -310,7 +302,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         if (user) await fetchSubaccount(user.id);
       }
     } catch (err) {
-      console.error("Sub-account operation error:", err);
+      console.error("Sub-account operation error (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
       showError("Error", err.message || "Failed to save sub-account.");
     } finally {
       setCreating(false);
@@ -322,10 +314,9 @@ export default function SuperAgentPaystackScreen({ navigation }) {
   const handleVerifyPress = async () => {
     setVerifying(true);
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("paystack-subaccount"),
-        { body: { action: "verifySubaccount" } },
-      );
+      const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+        body: { action: "verifySubaccount" },
+      });
       if (error) throw error;
       if (data?.subaccount) {
         setSubaccount(data.subaccount);
@@ -347,7 +338,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         setVerificationStatus({ verified: false, paystack_status: null, message: data.message || "Not verified" });
       }
     } catch (err) {
-      console.error("Verification failed:", err);
+      console.error("Verification failed (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
       showError("Error", "Failed to verify sub-account with Paystack.");
       setVerificationStatus({ verified: false, message: "Verification failed" });
     } finally {
@@ -361,22 +352,19 @@ export default function SuperAgentPaystackScreen({ navigation }) {
       return;
     }
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("paystack-subaccount"),
-        {
-          body: {
-            action: "updateSubaccount",
-            subaccount: { active: !subaccount.is_active },
-          },
+      const { data, error } = await invokeEdgeFunction("paystack-subaccount", {
+        body: {
+          action: "updateSubaccount",
+          subaccount: { active: !subaccount.is_active },
         },
-      );
+      });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       const ns = !subaccount.is_active;
       showSuccess("Updated", "Sub-account is now " + (ns ? "active" : "inactive") + ".");
       setSubaccount({ ...subaccount, is_active: ns });
     } catch (err) {
-      console.error("Toggle active error:", err);
+      console.error("Toggle active error (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
       showError("Error", err.message || "Failed to update status.");
     }
   };
@@ -392,21 +380,18 @@ export default function SuperAgentPaystackScreen({ navigation }) {
           style: "destructive",
           onPress: async () => {
             try {
-              await supabase.functions.invoke(
-                getEdgeFunctionName("paystack-subaccount"),
-                {
-                  body: {
-                    action: "updateSubaccount",
-                    subaccount: {
-                      business_name: "",
-                      settlement_bank_code: "",
-                      account_number: "",
-                      percentage_charge: 0,
-                      active: false,
-                    },
+              await invokeEdgeFunction("paystack-subaccount", {
+                body: {
+                  action: "updateSubaccount",
+                  subaccount: {
+                    business_name: "",
+                    settlement_bank_code: "",
+                    account_number: "",
+                    percentage_charge: 0,
+                    active: false,
                   },
                 },
-              );
+              });
               showSuccess("Deleted", "Sub-account has been removed.");
               setSubaccount(null);
               setForm({
@@ -419,7 +404,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                 description: "",
               });
             } catch (err) {
-              console.error("Delete error:", err);
+              console.error("Delete error (" + getEdgeFunctionName("paystack-subaccount") + "):", err);
               showError("Error", err.message || "Failed to delete sub-account.");
             }
           },

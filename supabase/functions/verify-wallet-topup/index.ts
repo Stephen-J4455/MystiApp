@@ -88,7 +88,12 @@ Deno.serve(async (req) => {
     }
 
     // Verify payment with Paystack
-    const paystackSecret = Deno.env.get("TEST_PAYSTACK_SECRET_KEY") || Deno.env.get("PAYSTACK_SECRET_KEY");
+    const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase().trim();
+    const paystackSecret =
+      appEnv === "production"
+        ? Deno.env.get("PAYSTACK_SECRET_KEY")
+        : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+          Deno.env.get("PAYSTACK_SECRET_KEY");
     if (!paystackSecret) {
       console.error("PAYSTACK_SECRET_KEY not configured");
       return new Response(
@@ -99,6 +104,14 @@ Deno.serve(async (req) => {
         },
       );
     }
+
+    console.log(
+      "[DEBUG] APP_ENV:",
+      appEnv,
+      "| secret starts with:",
+      paystackSecret ? paystackSecret.substring(0, 7) : "NONE",
+    );
+    console.log("[DEBUG] Reference:", reference, "| User:", user?.id);
 
     // Verify the payment with Paystack
     console.log("Verifying payment with Paystack for reference:", reference);
@@ -114,7 +127,14 @@ Deno.serve(async (req) => {
     );
 
     const verifyData = await verifyResponse.json();
-    console.log("Paystack verification response:", verifyData);
+    console.log(
+      "[DEBUG] Paystack response ok:",
+      verifyResponse.ok,
+      "| status:",
+      verifyData.status,
+      "| data.status:",
+      verifyData.data?.status,
+    );
 
     if (
       !verifyResponse.ok ||
@@ -140,6 +160,17 @@ Deno.serve(async (req) => {
       .select("*")
       .eq("reference", reference)
       .single();
+
+    console.log(
+      "[DEBUG] Wallet topup found:",
+      existingTopup ? "yes" : "no",
+      "| agent_id:",
+      existingTopup?.agent_id,
+      "| user.id:",
+      user.id,
+      "| status:",
+      existingTopup?.status,
+    );
 
     if (topupError || !existingTopup) {
       console.error("Wallet topup not found:", topupError);
@@ -182,8 +213,8 @@ Deno.serve(async (req) => {
     // Resolve the super agent for the current agent (if any) and capture the
     // Paystack subaccount the topup was charged through so we can reconcile
     // wallet funding against the super-agent's settlement later on.
-    let resolvedSuperAgentId: string | null = user.user_metadata
-      ?.super_agent_id || null;
+    let resolvedSuperAgentId: string | null =
+      user.user_metadata?.super_agent_id || null;
     let resolvedSubaccountCode: string | null =
       verifyData.data?.subaccount?.subaccount_code ||
       verifyData.data?.subaccount_code ||
@@ -386,5 +417,3 @@ Deno.serve(async (req) => {
     );
   }
 });
-
-

@@ -61,10 +61,12 @@ Deno.serve(async (req) => {
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
     const supabaseServiceRoleKey =
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+    const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase().trim();
     const paystackSecret =
-      (Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-        Deno.env.get("PAYSTACK_SECRET_KEY")) ??
-      "";
+      (appEnv === "production"
+        ? Deno.env.get("PAYSTACK_SECRET_KEY")
+        : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
+          Deno.env.get("PAYSTACK_SECRET_KEY")) ?? "";
 
     if (!supabaseUrl || !supabaseServiceRoleKey) {
       return new Response(
@@ -589,14 +591,14 @@ async function handleVerifySubaccount(
       rawActive === true &&
       paystackData?.is_verified !== false &&
       paystackData?.verified !== false &&
-      !(
-        UNVERIFIED_STATUSES.includes(
-          String(
-            paystackData.verification_status ||
-              paystackData.account_verification_status ||
-              "",
-          ).trim().toLowerCase(),
+      !UNVERIFIED_STATUSES.includes(
+        String(
+          paystackData.verification_status ||
+            paystackData.account_verification_status ||
+            "",
         )
+          .trim()
+          .toLowerCase(),
       );
 
     const isActive = Boolean(effectiveVerified);

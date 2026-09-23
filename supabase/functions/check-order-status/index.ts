@@ -10,14 +10,18 @@ interface OrderStatusResponse {
   statusCode: number;
   payload: {
     orderId: string;
-    status: string;
-    phone: string;
-    network: string;
-    type: string;
-    size: number;
-    amount: number;
-    createdAt?: string;
-    updatedAt?: string;
+    totalOrders: number;
+    totalAmount: number;
+    orders: Array<{
+      id: string;
+      packageId: string;
+      phone: string;
+      network: string;
+      size: number;
+      type: string;
+      status: string;
+      amount: number;
+    }>;
   };
 }
 
@@ -35,14 +39,18 @@ Deno.serve(async (req) => {
           error: "Jehuca API key not configured on server",
         }),
         {
-          status: 500,
+          status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },
       );
     }
 
     const url = new URL(req.url);
-    const orderId = url.pathname.split("/").pop();
+    const body = await req.json().catch(() => ({}));
+    const orderId =
+      body?.orderId ||
+      url.searchParams.get("orderId") ||
+      url.pathname.split("/").pop();
 
     if (!orderId) {
       return new Response(
@@ -52,7 +60,7 @@ Deno.serve(async (req) => {
           details: "orderId is required in the URL path",
         }),
         {
-          status: 400,
+          status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },
       );
@@ -71,14 +79,50 @@ Deno.serve(async (req) => {
 
     const data = await response.json();
 
-    return new Response(JSON.stringify(data), {
-      status: response.status,
-      headers: {
-        ...corsHeaders,
-        "Content-Type": "application/json",
-        "Cache-Control": "no-store",
+    if (!response.ok || data?.success === false || data?.status === false) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error:
+            data?.error || data?.message || "Jehucal status request failed",
+          providerStatusCode: response.status,
+          providerResponse: data,
+          orderId,
+        }),
+        {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          },
+        },
+      );
+    }
+
+    // The provider returns the current status on the first order in payload.orders.
+    const providerOrder = data?.payload?.orders?.[0];
+    const providerOrderStatus =
+      providerOrder?.status ??
+      (Array.isArray(data?.payload)
+        ? (data.payload[0]?.packages?.[0]?.status ?? null)
+        : (data?.payload?.status ?? null));
+
+    return new Response(
+      JSON.stringify({
+        ...data,
+        providerOrderStatus,
+        orderStatus: providerOrderStatus,
+      }),
+      {
+        status: response.status,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        },
       },
-    });
+    );
   } catch (error) {
     console.error("Error fetching order status:", error);
     return new Response(
@@ -88,7 +132,7 @@ Deno.serve(async (req) => {
         details: (error as Error).message,
       }),
       {
-        status: 500,
+        status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       },
     );

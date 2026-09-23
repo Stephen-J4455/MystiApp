@@ -23,11 +23,12 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 import { WebView } from "react-native-webview";
-import { getEdgeFunctionName } from "../lib/env";
+import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
 import { Modal } from "react-native";
 import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { getPaystackPublicKey } from "../lib/supabase";
+import { getEdgeFunctionName } from "../lib/env";
 
 import {
   loadSubAgentPackages,
@@ -55,6 +56,76 @@ export default function DataScreen({ navigation, route }) {
   const { showError, showSuccess } = useNotification();
   const bundleSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
+  const getAgentPaymentBreakdown = useCallback(() => {
+    if (
+      !selectedBundle ||
+      !resolvedSubaccountCode ||
+      !selectedBundle.base_price
+    ) {
+      return null;
+    }
+
+    const baseAmount = Number(selectedBundle.base_price || 0);
+    const agentMarkup = Number(selectedBundle.tier_extra || 0);
+    const transactionFee = Number((baseAmount * 0.02).toFixed(2));
+
+    return {
+      baseAmount,
+      agentMarkup,
+      transactionFee,
+      grossAmount: Number(
+        (baseAmount + agentMarkup + transactionFee).toFixed(2),
+      ),
+      mainAccountAmount: Number((baseAmount + transactionFee).toFixed(2)),
+    };
+  }, [selectedBundle, resolvedSubaccountCode]);
+
+  const dispatchProviderOrder = useCallback(
+    async (bundle, phone) => {
+      const rawSize = Number(
+        bundle.size || String(bundle.dataSize || "").match(/[\d.]+/)?.[0] || 0,
+      );
+      const rawType = String(bundle.type || bundle.name || "").toUpperCase();
+      const providerType = rawType.includes("BIG TIME")
+        ? "BIG TIME"
+        : rawType.includes("ISHARE")
+          ? "ISHARE"
+          : rawType.split(/[(-]/)[0].trim();
+      const packageRequest = {
+        packageId: String(bundle.package_id || bundle.id),
+        size: Math.round(rawSize * 1000),
+        network: String(bundle.network || network).toUpperCase(),
+        type: providerType,
+        phone: String(phone || "").replace(/\s+/g, ""),
+      };
+
+      const { data, error } = await supabase.functions.invoke(
+        getEdgeFunctionName("make-orders"),
+        { body: { packages: [packageRequest] } },
+      );
+
+      const debugPayload = {
+        function: getEdgeFunctionName("make-orders"),
+        request: { packages: [packageRequest] },
+        response: data || null,
+        error: error?.message || null,
+        accepted: Boolean(
+          !error &&
+          data?.status === true &&
+          (data?.payload?.orderId || data?.payload?.orders?.length),
+        ),
+      };
+
+      console.log("[Jehuca debug] make-orders:", debugPayload);
+      return {
+        data,
+        error,
+        accepted: debugPayload.accepted,
+      };
+    },
+    [network],
+  );
+
   // Paystack payment handlers
   const handlePaymentSuccess = useCallback(
     async (response) => {
@@ -77,7 +148,9 @@ export default function DataScreen({ navigation, route }) {
               reference: response.reference,
               user_id: user.id,
               offer_id: selectedBundle.id,
-              amount: parseFloat(selectedBundle.price.replace("Ghc ", "")),
+              amount:
+                getAgentPaymentBreakdown()?.grossAmount ||
+                parseFloat(selectedBundle.price.replace("Ghc ", "")),
               network: network,
               recipient_phone:
                 purchaseType === "self"
@@ -85,6 +158,9 @@ export default function DataScreen({ navigation, route }) {
                   : recipientPhone.trim().replace(/\s+/g, ""),
               super_agent_id: superAgentId,
               paystack_subaccount_code: resolvedSubaccountCode,
+              base_price: getAgentPaymentBreakdown()?.baseAmount || 0,
+              tier_extra: getAgentPaymentBreakdown()?.agentMarkup || 0,
+              transaction_fee: getAgentPaymentBreakdown()?.transactionFee || 0,
             },
           },
         );
@@ -99,6 +175,45 @@ export default function DataScreen({ navigation, route }) {
         }
 
         if (data.success) {
+          const providerResult = await dispatchProviderOrder(
+            selectedBundle,
+            purchaseType === "self" ? userPhone : recipientPhone,
+          );
+
+          if (providerResult.error || !providerResult.accepted) {
+            showError(
+              "Provider Order Failed",
+              "Payment was verified, but Jehucal did not accept the order. Contact support with the payment reference.",
+            );
+            return;
+          }
+
+          const providerOrderId =
+            providerResult.data?.payload?.orderId ||
+            providerResult.data?.orderId ||
+            providerResult.data?.payload?.orders?.[0]?.id ||
+            null;
+          const providerStatus =
+            providerResult.data?.payload?.orders?.[0]?.status ||
+            providerResult.data?.status ||
+            "accepted";
+          await supabase
+            .from(data.is_agent_order ? "agent_orders" : "orders")
+            .update({
+              jehuca_order_id: providerOrderId,
+              jehuca_order_status: providerStatus,
+              jehuca_response: providerResult.data || null,
+            })
+            .eq("id", data.order.id);
+          await supabase
+            .from("payment_transactions")
+            .update({
+              jehuca_order_id: providerOrderId,
+              jehuca_order_status: providerStatus,
+              jehuca_response: providerResult.data || null,
+            })
+            .eq("payment_reference", data.order.payment_reference);
+
           showSuccess(
             "Purchase Successful!",
             `Your ${selectedBundle.name} data bundle has been purchased successfully!`,
@@ -149,6 +264,8 @@ export default function DataScreen({ navigation, route }) {
       navigation,
       showError,
       showSuccess,
+      dispatchProviderOrder,
+      getAgentPaymentBreakdown,
     ],
   );
 
@@ -159,14 +276,28 @@ export default function DataScreen({ navigation, route }) {
   }, [showError]);
 
   const [paystackPublicKey, setPaystackPublicKey] = useState("");
+  const [paystackKeyError, setPaystackKeyError] = useState(false);
 
   useEffect(() => {
     let active = true;
 
     const loadPaystackPublicKey = async () => {
-      const key = await getPaystackPublicKey();
-      if (active) {
-        setPaystackPublicKey(key);
+      try {
+        const key = await getPaystackPublicKey();
+        if (!active) return;
+        if (key) {
+          setPaystackPublicKey(key);
+        } else {
+          setPaystackKeyError(true);
+          console.error(
+            "Paystack public key unavailable. Ensure the Paystack secret keys are configured in the edge function secrets.",
+          );
+        }
+      } catch (err) {
+        if (active) {
+          setPaystackKeyError(true);
+          console.error("Failed to load Paystack public key:", err);
+        }
       }
     };
 
@@ -181,15 +312,21 @@ export default function DataScreen({ navigation, route }) {
   const paystackConfig = useMemo(() => {
     if (!selectedBundle || !userEmail) return null;
 
+    const paymentBreakdown = getAgentPaymentBreakdown();
+    const payableAmount = paymentBreakdown
+      ? paymentBreakdown.grossAmount
+      : parseFloat(selectedBundle.price.replace("Ghc ", ""));
+
     return {
       reference: `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       email: userEmail,
-      amount: Math.floor(
-        parseFloat(selectedBundle.price.replace("Ghc ", "")) * 100,
-      ),
+      amount: Math.floor(payableAmount * 100),
+      transactionCharge: paymentBreakdown
+        ? Math.floor(paymentBreakdown.mainAccountAmount * 100)
+        : null,
       currency: "GHS",
       publicKey: paystackPublicKey,
-      subaccount: resolvedSubaccountCode || undefined,
+      subaccount: resolvedSubaccountCode || null,
       metadata: {
         offer_id: selectedBundle.id,
         offer_title: selectedBundle.name,
@@ -201,6 +338,9 @@ export default function DataScreen({ navigation, route }) {
             : recipientPhone.trim().replace(/\s+/g, ""),
         super_agent_id: superAgentId || null,
         paystack_subaccount_code: resolvedSubaccountCode || null,
+        base_price: selectedBundle.base_price || 0,
+        tier_price: payableAmount,
+        transaction_fee: paymentBreakdown?.transactionFee || 0,
       },
       onSuccess: handlePaymentSuccess,
       onClose: handlePaymentClose,
@@ -217,6 +357,7 @@ export default function DataScreen({ navigation, route }) {
     paystackPublicKey,
     handlePaymentSuccess,
     handlePaymentClose,
+    getAgentPaymentBreakdown,
   ]);
 
   const { initializePayment, isLoaded, isLoading } =
@@ -402,13 +543,13 @@ export default function DataScreen({ navigation, route }) {
                 id: agentOffer.package_id
                   ? String(agentOffer.package_id)
                   : String(agentOffer.id),
+                package_id: agentOffer.package_id || null,
                 superAgentOfferId:
                   agentOffer.superAgentOfferId || agentOffer.id,
                 network: String(agentOffer.network || "").toUpperCase(),
                 type: String(agentOffer.type || descriptor).toUpperCase(),
                 name:
-                  agentOffer.title ||
-                  `${agentOffer.network} — ${descriptor}`,
+                  agentOffer.title || `${agentOffer.network} — ${descriptor}`,
                 price:
                   typeof agentOffer.price === "string" &&
                   agentOffer.price.startsWith("Ghc")
@@ -419,6 +560,10 @@ export default function DataScreen({ navigation, route }) {
                   (agentOffer.size
                     ? `${agentOffer.size} GB`
                     : formatBundleSizeFromDescriptor(descriptor)),
+                base_price: Number(
+                  agentOffer.base_price || agentOffer.price || 0,
+                ),
+                tier_extra: Number(agentOffer.tier_extra || 0),
                 tierName: agentOffer.tier_name || null,
               };
             });
@@ -505,8 +650,16 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
 
-      // Extract price as number (remove 'Ghc ' prefix)
+      // Wallet purchases use the same base, markup, and 2% fee contract.
       const price = parseFloat(bundle.price.replace("Ghc ", ""));
+      const basePrice = Number(bundle.base_price || price);
+      const agentMarkup = Number(
+        bundle.tier_extra ?? Math.max(0, price - basePrice),
+      );
+      const transactionFee = Number((basePrice * 0.02).toFixed(2));
+      const grossPrice = Number(
+        (basePrice + agentMarkup + transactionFee).toFixed(2),
+      );
 
       if (isNaN(price)) {
         showError("Error", "Invalid bundle price");
@@ -636,12 +789,12 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
 
-      if (!walletData || walletData.balance < price) {
+      if (!walletData || walletData.balance < grossPrice) {
         showError(
           "Insufficient Balance",
           `Your wallet balance (GHS ${
             walletData?.balance || 0
-          }) is not enough for this purchase (GHS ${price})`,
+          }) is not enough for this purchase (GHS ${grossPrice})`,
         );
         return;
       }
@@ -652,7 +805,7 @@ export default function DataScreen({ navigation, route }) {
       // First, deduct from wallet
       const { error: walletUpdateError } = await supabase
         .from("agent_wallet")
-        .update({ balance: walletData.balance - price })
+        .update({ balance: walletData.balance - grossPrice })
         .eq("agent_id", user.id);
 
       if (walletUpdateError) {
@@ -663,14 +816,42 @@ export default function DataScreen({ navigation, route }) {
       }
 
       // Update local balance
-      setAgentBalance(walletData.balance - price);
+      setAgentBalance(walletData.balance - grossPrice);
 
-      // Then create order in agent_orders table
+      const {
+        data: upstreamOrder,
+        error: upstreamOrderError,
+        accepted: providerOrderAccepted,
+      } = await dispatchProviderOrder(bundle, cleanPhone);
+
+      if (
+        upstreamOrderError ||
+        upstreamOrder?.success === false ||
+        upstreamOrder?.status === false ||
+        !providerOrderAccepted
+      ) {
+        console.error(
+          "Jehuca order error:",
+          upstreamOrderError || upstreamOrder,
+        );
+        await supabase
+          .from("agent_wallet")
+          .update({ balance: walletData.balance })
+          .eq("agent_id", user.id);
+        setAgentBalance(walletData.balance);
+        showError("Error", "Failed to send order to the data provider");
+        setLoading(false);
+        return;
+      }
+
+      const providerOrder = upstreamOrder?.payload?.orders?.[0] || null;
+
+      // Store the local transaction after the provider accepts the order.
       const { data: orderData, error: orderError } = await supabase
         .from("agent_orders")
         .insert({
           agent_id: user.id,
-          offer_id: bundle.id,
+          offer_id: bundle.superAgentOfferId,
           offer_title: bundle.name,
           network: network,
           super_agent_id: superAgentId || null,
@@ -678,9 +859,24 @@ export default function DataScreen({ navigation, route }) {
           device_token: cleanPhone,
           recipient_name: recipientName.trim(),
           recipient_phone: cleanPhone,
-          amount: price,
+          amount: grossPrice,
+          base_amount: basePrice,
+          agent_markup: agentMarkup,
+          transaction_fee: transactionFee,
+          main_account_amount: basePrice + transactionFee,
+          admin_share: basePrice + transactionFee,
+          super_agent_share: agentMarkup,
+          agent_net: 0,
           status: "pending",
           transaction_status: "pending",
+          jehuca_order_id:
+            upstreamOrder?.payload?.orderId || providerOrder?.id || null,
+          jehuca_order_status:
+            upstreamOrder?.data?.status ||
+            upstreamOrder?.payload?.status ||
+            providerOrder?.status ||
+            "pending",
+          jehuca_response: upstreamOrder || null,
         })
         .select("id")
         .single();
@@ -696,6 +892,32 @@ export default function DataScreen({ navigation, route }) {
         showError("Error", "Failed to create order");
         setLoading(false);
         return;
+      }
+
+      const { error: ledgerError } = await supabase
+        .from("payment_transactions")
+        .insert({
+          user_id: user.id,
+          order_id: orderData.id,
+          order_type: "agent",
+          payment_reference: `AGENT-WALLET-${orderData.id}`,
+          gross_amount: grossPrice,
+          base_amount: basePrice,
+          agent_markup: agentMarkup,
+          transaction_fee: transactionFee,
+          main_account_amount: basePrice + transactionFee,
+          super_agent_amount: agentMarkup,
+          agent_net: 0,
+          super_agent_id: superAgentId || null,
+          settlement_status: "pending",
+          network,
+          offer_title: bundle.name,
+          recipient_phone: cleanPhone,
+          channel: "Agent wallet",
+          paystack_transaction_status: "wallet_debit",
+        });
+      if (ledgerError) {
+        console.error("Wallet transaction ledger insert failed:", ledgerError);
       }
 
       if (true) {
@@ -786,11 +1008,26 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
-  const generatePaystackHTML = (amount, email, reference, subaccountCode, paystackPublicKey) => {
-    const safeKey = paystackPublicKey ? String(paystackPublicKey).replace(/\\/g, "\\\\").replace(/'/g, "\\'") : "";
-    const safeEmail = String(email || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    const safeRef = String(reference || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    const safeSub = subaccountCode ? String(subaccountCode).replace(/\\/g, "\\\\").replace(/'/g, "\\'") : "";
+  const generatePaystackHTML = (
+    amount,
+    email,
+    reference,
+    subaccountCode,
+    transactionCharge,
+    paystackPublicKey,
+  ) => {
+    const safeKey = paystackPublicKey
+      ? String(paystackPublicKey).replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+      : "";
+    const safeEmail = String(email || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "\\'");
+    const safeRef = String(reference || "")
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "\\'");
+    const safeSub = subaccountCode
+      ? String(subaccountCode).replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+      : "";
     return `
       <!DOCTYPE html>
       <html>
@@ -963,6 +1200,7 @@ export default function DataScreen({ navigation, route }) {
               }
             };
             ${safeSub ? "setupOptions.subaccount = '" + safeSub + "';" : ""}
+            ${safeSub && transactionCharge ? `setupOptions.transaction_charge = ${transactionCharge};` : ""}
             var handler = PaystackPop.setup(setupOptions);
             handler.openIframe();
           };
@@ -1226,56 +1464,70 @@ export default function DataScreen({ navigation, route }) {
               </Text>
             </View>
           ) : (
-            Object.entries(bundlesByNetwork).map(([networkName, networkBundles]) => (
-              <View key={networkName} style={{ marginBottom: 20 }}>
-                <View style={styles.networkSectionHeader}>
-                  <Text style={styles.networkSectionTitle}>{networkName} Network</Text>
-                  <Text style={styles.networkSectionSubtitle}>
-                    {networkBundles.length} {networkBundles.length === 1 ? "bundle" : "bundles"} available
-                  </Text>
+            Object.entries(bundlesByNetwork).map(
+              ([networkName, networkBundles]) => (
+                <View key={networkName} style={{ marginBottom: 20 }}>
+                  <View style={styles.networkSectionHeader}>
+                    <Text style={styles.networkSectionTitle}>
+                      {networkName} Network
+                    </Text>
+                    <Text style={styles.networkSectionSubtitle}>
+                      {networkBundles.length}{" "}
+                      {networkBundles.length === 1 ? "bundle" : "bundles"}{" "}
+                      available
+                    </Text>
+                  </View>
+                  {networkBundles.map((bundle) => (
+                    <TouchableOpacity
+                      key={bundle.id}
+                      style={styles.bundleCard}
+                      onPress={() => {
+                        if (isAgent) {
+                          handleAgentPurchase(bundle);
+                        } else if (purchaseType === "self") {
+                          handlePurchaseForSelf(bundle);
+                        } else {
+                          handlePurchaseForOthers(bundle);
+                        }
+                      }}
+                    >
+                      <View style={styles.bundleCardContent}>
+                        <View style={styles.bundleInfo}>
+                          <View style={styles.bundleHeader}>
+                            <View style={styles.networkBadge}>
+                              <Text style={styles.networkBadgeText}>
+                                {bundle.network}
+                              </Text>
+                            </View>
+                            <Text style={styles.bundleType}>{bundle.type}</Text>
+                          </View>
+                          <View style={styles.bundleDetailsRow}>
+                            <View style={styles.bundleDetail}>
+                              <Text style={styles.bundleDetailLabel}>Data</Text>
+                              <Text style={styles.bundleDetailValue}>
+                                {bundle.dataSize}
+                              </Text>
+                            </View>
+                            <View style={styles.bundleDetail}>
+                              <Text style={styles.bundleDetailLabel}>
+                                Bundle
+                              </Text>
+                              <Text style={styles.bundleDetailValue}>
+                                {bundle.type}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                        <View style={styles.bundlePriceContainer}>
+                          <Text style={styles.bundlePrice}>{bundle.price}</Text>
+                          <Text style={styles.bundlePriceLabel}>Price</Text>
+                        </View>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
                 </View>
-                {networkBundles.map((bundle) => (
-                  <TouchableOpacity
-                    key={bundle.id}
-                    style={styles.bundleCard}
-                    onPress={() => {
-                      if (isAgent) {
-                        handleAgentPurchase(bundle);
-                      } else if (purchaseType === "self") {
-                        handlePurchaseForSelf(bundle);
-                      } else {
-                        handlePurchaseForOthers(bundle);
-                      }
-                    }}
-                  >
-                    <View style={styles.bundleCardContent}>
-                      <View style={styles.bundleInfo}>
-                        <View style={styles.bundleHeader}>
-                          <View style={styles.networkBadge}>
-                            <Text style={styles.networkBadgeText}>{bundle.network}</Text>
-                          </View>
-                          <Text style={styles.bundleType}>{bundle.type}</Text>
-                        </View>
-                        <View style={styles.bundleDetailsRow}>
-                          <View style={styles.bundleDetail}>
-                            <Text style={styles.bundleDetailLabel}>Data</Text>
-                            <Text style={styles.bundleDetailValue}>{bundle.dataSize}</Text>
-                          </View>
-                          <View style={styles.bundleDetail}>
-                            <Text style={styles.bundleDetailLabel}>Bundle</Text>
-                            <Text style={styles.bundleDetailValue}>{bundle.type}</Text>
-                          </View>
-                        </View>
-                      </View>
-                      <View style={styles.bundlePriceContainer}>
-                        <Text style={styles.bundlePrice}>{bundle.price}</Text>
-                        <Text style={styles.bundlePriceLabel}>Price</Text>
-                      </View>
-                    </View>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            ))
+              ),
+            )
           )}
         </View>
 
@@ -1372,8 +1624,9 @@ export default function DataScreen({ navigation, route }) {
                     }}
                   >
                     GHS{" "}
-                    {parseFloat(
-                      selectedBundle.price.replace("Ghc ", ""),
+                    {(
+                      getAgentPaymentBreakdown()?.grossAmount ||
+                      parseFloat(selectedBundle.price.replace("Ghc ", ""))
                     ).toFixed(2)}
                   </Text>
                 </View>
@@ -1448,10 +1701,16 @@ export default function DataScreen({ navigation, route }) {
             <WebView
               source={{
                 html: generatePaystackHTML(
-                  parseFloat(selectedBundle.price.replace("Ghc ", "")),
+                  getAgentPaymentBreakdown()?.grossAmount ||
+                    parseFloat(selectedBundle.price.replace("Ghc ", "")),
                   userEmail,
                   `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                   resolvedSubaccountCode,
+                  getAgentPaymentBreakdown()?.mainAccountAmount
+                    ? Math.floor(
+                        getAgentPaymentBreakdown().mainAccountAmount * 100,
+                      )
+                    : null,
                   paystackPublicKey,
                 ),
               }}
@@ -1485,9 +1744,11 @@ export default function DataScreen({ navigation, route }) {
                           reference: message.data.reference,
                           user_id: user.id,
                           offer_id: selectedBundle.id,
-                          amount: parseFloat(
-                            selectedBundle.price.replace("Ghc ", ""),
-                          ),
+                          amount:
+                            getAgentPaymentBreakdown()?.grossAmount ||
+                            parseFloat(
+                              selectedBundle.price.replace("Ghc ", ""),
+                            ),
                           network: network,
                           recipient_phone:
                             purchaseType === "self"
@@ -1495,6 +1756,10 @@ export default function DataScreen({ navigation, route }) {
                               : recipientPhone.trim().replace(/\s+/g, ""), // Clean phone number
                           super_agent_id: superAgentId,
                           paystack_subaccount_code: resolvedSubaccountCode,
+                          base_price: selectedBundle.base_price || 0,
+                          tier_extra: selectedBundle.tier_extra || 0,
+                          transaction_fee:
+                            getAgentPaymentBreakdown()?.transactionFee || 0,
                         },
                       },
                     );
@@ -1509,6 +1774,47 @@ export default function DataScreen({ navigation, route }) {
                     }
 
                     if (data.success) {
+                      const providerResult = await dispatchProviderOrder(
+                        selectedBundle,
+                        purchaseType === "self" ? userPhone : recipientPhone,
+                      );
+
+                      if (providerResult.error || !providerResult.accepted) {
+                        showError(
+                          "Provider Order Failed",
+                          "Payment was verified, but Jehucal did not accept the order. Contact support with the payment reference.",
+                        );
+                        return;
+                      }
+
+                      const providerOrderId =
+                        providerResult.data?.payload?.orderId ||
+                        providerResult.data?.orderId ||
+                        providerResult.data?.payload?.orders?.[0]?.id ||
+                        null;
+                      await supabase
+                        .from(data.is_agent_order ? "agent_orders" : "orders")
+                        .update({
+                          jehuca_order_id: providerOrderId,
+                          jehuca_order_status:
+                            providerResult.data?.payload?.orders?.[0]?.status ||
+                            providerResult.data?.status ||
+                            "accepted",
+                          jehuca_response: providerResult.data || null,
+                        })
+                        .eq("id", data.order.id);
+                      await supabase
+                        .from("payment_transactions")
+                        .update({
+                          jehuca_order_id: providerOrderId,
+                          jehuca_order_status:
+                            providerResult.data?.payload?.orders?.[0]?.status ||
+                            providerResult.data?.status ||
+                            "accepted",
+                          jehuca_response: providerResult.data || null,
+                        })
+                        .eq("payment_reference", data.order.payment_reference);
+
                       showSuccess(
                         "Purchase Successful!",
                         `Your ${selectedBundle.name} data bundle has been purchased successfully!`,

@@ -13,10 +13,10 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { supabase } from "../lib/supabase";
+import { supabase, getPaystackPublicKey } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
-import { getEdgeFunctionName, PAYSTACK_PUBLIC_KEY } from "../lib/env";
+import { getEdgeFunctionName } from "../lib/env";
 import { WebView } from "react-native-webview";
 
 // Escape user-controlled strings before interpolating into inline JS / HTML
@@ -47,8 +47,9 @@ const generatePaystackHTML = (
   subaccountCode,
   recipientName,
   recipientLabel,
+  paystackPublicKey,
 ) => {
-  const paystackKey = escapeJs(PAYSTACK_PUBLIC_KEY);
+  const paystackKey = escapeJs(paystackPublicKey || "");
   const safeEmail = escapeJs(email);
   const safeRef = escapeJs(reference);
   const safeSub = subaccountCode ? escapeJs(subaccountCode) : "";
@@ -108,9 +109,38 @@ export default function WalletTopUpScreen({ navigation }) {
   const [superAgentName, setSuperAgentName] = useState("");
   const [subaccountCode, setSubaccountCode] = useState(null);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
+  const [paystackPublicKey, setPaystackPublicKey] = useState("");
+  const [paystackKeyError, setPaystackKeyError] = useState(false);
   const predefinedAmounts = [50, 100, 200, 500, 1000];
   const MIN_AMOUNT = 5;
   const MAX_AMOUNT = 5000;
+
+  useEffect(() => {
+    let active = true;
+    const loadPaystackPublicKey = async () => {
+      try {
+        const key = await getPaystackPublicKey();
+        if (!active) return;
+        if (key) {
+          setPaystackPublicKey(key);
+        } else {
+          setPaystackKeyError(true);
+          console.error(
+            "Paystack public key unavailable. Ensure the Paystack secret keys are configured in the edge function secrets.",
+          );
+        }
+      } catch (err) {
+        if (active) {
+          setPaystackKeyError(true);
+          console.error("Failed to load Paystack public key:", err);
+        }
+      }
+    };
+    loadPaystackPublicKey();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handlePaymentSuccess = useCallback(
     async (response) => {
@@ -458,7 +488,23 @@ export default function WalletTopUpScreen({ navigation }) {
                 </TouchableOpacity>
               </View>
               <View style={styles.webviewContainer}>
-                {currentReference && userEmail && amount && (
+                {paystackKeyError && (
+                  <View style={styles.webviewError}>
+                    <Ionicons
+                      name="alert-circle-outline"
+                      size={48}
+                      color={colors.danger}
+                    />
+                    <Text style={styles.webviewErrorText}>
+                      Payment configuration not available
+                    </Text>
+                    <Text style={styles.webviewErrorSubtext}>
+                      Paystack public key could not be loaded. Ensure Paystack
+                      secrets are configured on the server.
+                    </Text>
+                  </View>
+                )}
+                {currentReference && userEmail && amount && paystackPublicKey && (
                   <WebView
                     source={{
                       html: generatePaystackHTML(
@@ -475,6 +521,7 @@ export default function WalletTopUpScreen({ navigation }) {
                         subaccountCode && superAgentName
                           ? "Super Agent"
                           : "Business",
+                        paystackPublicKey,
                       ),
                     }}
                     javaScriptEnabled

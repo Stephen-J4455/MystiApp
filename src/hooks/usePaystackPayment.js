@@ -111,6 +111,7 @@ export const usePaystackPayment = (config) => {
           currency: config.currency || "GHS",
           ref: config.reference,
           subaccount: config.subaccount || null,
+          transaction_charge: config.transactionCharge || null,
         });
 
         const setupOptions = {
@@ -140,6 +141,9 @@ export const usePaystackPayment = (config) => {
         // to the super agent's settlement account.
         if (config.subaccount) {
           setupOptions.subaccount = config.subaccount;
+          if (config.transactionCharge) {
+            setupOptions.transaction_charge = config.transactionCharge;
+          }
         }
 
         const handler = window.PaystackPop.setup(setupOptions);

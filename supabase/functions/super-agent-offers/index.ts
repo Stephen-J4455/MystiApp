@@ -35,7 +35,10 @@ const isMissingDatabaseObject = (error: any) => {
   );
 };
 
-const normalizeKey = (value: unknown) => String(value || "").trim().toUpperCase();
+const normalizeKey = (value: unknown) =>
+  String(value || "")
+    .trim()
+    .toUpperCase();
 
 const sizeFromDataValue = (dataValue: unknown) => {
   const match = String(dataValue || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
@@ -54,14 +57,21 @@ const findCatalogPackageForOffer = (catalog: any[], offer: any) => {
       if (normalizeKey(pkg?.network) !== network) return false;
       const type = normalizeKey(pkg?.type);
       const size =
-        pkg?.size !== undefined && pkg?.size !== null && String(pkg.size).trim() !== ""
+        pkg?.size !== undefined &&
+        pkg?.size !== null &&
+        String(pkg.size).trim() !== ""
           ? `${pkg.size}GB`
           : "";
       const descriptor =
         size && !type.includes(size) ? `${type} - ${size}` : type || size;
 
       if (descriptor && descriptor === dataValue) return true;
-      if (String(pkg?.id || "").trim().toUpperCase() === dataValue) return true;
+      if (
+        String(pkg?.id || "")
+          .trim()
+          .toUpperCase() === dataValue
+      )
+        return true;
       if (
         size &&
         (dataValue === `${type} - ${size}` ||
@@ -189,7 +199,9 @@ Deno.serve(async (req) => {
 
       const baseUrl = "https://backend.jehucale-business.com/api/packages";
       const queryParts: string[] = [];
-      const networkFilter = String(offer?.network || body?.network || "").trim();
+      const networkFilter = String(
+        offer?.network || body?.network || "",
+      ).trim();
       const typeFilter = String(offer?.type || body?.type || "").trim();
       if (networkFilter) {
         queryParts.push(`network=${encodeURIComponent(networkFilter)}`);
@@ -340,8 +352,8 @@ Deno.serve(async (req) => {
         updatePayload.tier_name = String(offer.tier_name).trim() || null;
       }
       if (offer?.default_tier_name !== undefined) {
-        updatePayload.default_tier_name = String(offer.default_tier_name).trim() ||
-          null;
+        updatePayload.default_tier_name =
+          String(offer.default_tier_name).trim() || null;
       }
       if (offer?.is_active !== undefined) {
         updatePayload.is_active = Boolean(offer.is_active);
@@ -894,10 +906,14 @@ Deno.serve(async (req) => {
       const networkFilter = normalizeKey(body?.network);
 
       const packages = selectedOffers
-        .filter((row) => !networkFilter || normalizeKey(row?.network) === networkFilter)
+        .filter(
+          (row) =>
+            !networkFilter || normalizeKey(row?.network) === networkFilter,
+        )
         .map((row) => {
           const catalogPackage = findCatalogPackageForOffer(catalog, row);
-          const size = catalogPackage?.size ?? sizeFromDataValue(row?.data_value);
+          const size =
+            catalogPackage?.size ?? sizeFromDataValue(row?.data_value);
           const dataValue = String(row?.data_value || "");
 
           return {
@@ -906,6 +922,16 @@ Deno.serve(async (req) => {
             data_value: dataValue,
             title: row?.title || `${row?.network || ""} — ${dataValue}`.trim(),
             price: Number(row?.price || 0),
+            base_price: catalogPackage?.price
+              ? Number(catalogPackage.price) / 100
+              : Number(row?.price || 0),
+            tier_extra: Math.max(
+              0,
+              Number(row?.price || 0) -
+                (catalogPackage?.price
+                  ? Number(catalogPackage.price) / 100
+                  : Number(row?.price || 0)),
+            ),
             tier_name: row?.tier_name || null,
             package_id: catalogPackage?.id ?? null,
             type: catalogPackage?.type ?? null,
@@ -928,10 +954,13 @@ Deno.serve(async (req) => {
 
     if (action === "setPackageBasePrice") {
       if (userRole !== "Admin") {
-        return new Response(JSON.stringify({ error: "Admin access required" }), {
-          status: 403,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ error: "Admin access required" }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
       }
 
       const network = String(body?.network || "").trim();
