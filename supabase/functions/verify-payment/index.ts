@@ -78,6 +78,7 @@ Deno.serve(async (req) => {
       transaction_fee,
       network,
       super_agent_id,
+      recipient_name,
     } = await req.json();
 
     console.log("Received request with params:", {
@@ -238,11 +239,17 @@ Deno.serve(async (req) => {
     const orderNetwork = offer?.network || network || "Unknown";
     const orderTitle = offer?.title || `${orderNetwork} Data Bundle`;
 
-    const resolvedSuperAgentId =
-      super_agent_id ||
+    const userRole = String(
+      user.user_metadata?.role || user.app_metadata?.role || "",
+    ).toLowerCase();
+    const assignedSuperAgentId =
       user.user_metadata?.super_agent_id ||
-      offer?.super_agent_id ||
+      user.user_metadata?.superAgentId ||
+      user.app_metadata?.super_agent_id ||
+      user.app_metadata?.superAgentId ||
       null;
+    const resolvedSuperAgentId = assignedSuperAgentId || null;
+    const isSubAgentOrder = Boolean(resolvedSuperAgentId);
 
     // Resolve the Paystack subaccount linked to the super agent (if any)
     // so the order and settlement can be traced back to where the funds were routed.
@@ -352,7 +359,10 @@ Deno.serve(async (req) => {
         amount: orderAmount,
         recipient_phone: recipient_phone || user.user_metadata?.phone || null,
         recipient_name:
-          user.user_metadata?.full_name || user.email?.split("@")[0] || null,
+          recipient_name ||
+          user.user_metadata?.full_name ||
+          user.email?.split("@")[0] ||
+          null,
         status: "pending",
         transaction_status: verifyData.data.status,
         channel: sharedOrderFields.channel,
@@ -435,6 +445,36 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         },
       );
+    }
+
+    let walletDebit: any = null;
+    if (isSubAgentOrder) {
+      const { data: debitResult, error: debitError } = await supabaseAdmin.rpc(
+        "debit_super_agent_wallet",
+        {
+          p_super_agent_id: resolvedSuperAgentId,
+          p_amount: settlement.baseAmount,
+          p_reference: `agent-order-${order.id}`,
+          p_order_id: order.id,
+          p_reason: "sub_agent_order",
+        },
+      );
+
+      walletDebit = debitResult;
+      if (debitError || !debitResult?.success) {
+        console.warn("Super Agent wallet debit held the order:", {
+          debitError: debitError?.message,
+          debitResult,
+        });
+        await supabaseAdmin
+          .from("agent_orders")
+          .update({
+            status: "held",
+            transaction_status: "wallet_insufficient",
+            settlement_status: "pending",
+          })
+          .eq("id", order.id);
+      }
     }
 
     // Optional: record settlement against the super-agent chain if the extended tables exist.
@@ -521,6 +561,7 @@ Deno.serve(async (req) => {
         agent_net: settlement.agentNet,
         super_agent_id: isAgentOrder ? resolvedSuperAgentId : null,
         settlement_status: isAgentOrder ? "pending" : "settled",
+        status: isSubAgentOrder && !walletDebit?.success ? "held" : "success",
         network: orderNetwork,
         offer_title: orderTitle,
         recipient_phone: recipient_phone || user.user_metadata?.phone || null,
@@ -594,6 +635,11 @@ Deno.serve(async (req) => {
         success: true,
         order: order,
         is_agent_order: isAgentOrder,
+        held: isSubAgentOrder && !walletDebit?.success,
+        hold_reason:
+          isSubAgentOrder && !walletDebit?.success
+            ? walletDebit?.reason || "wallet_debit_failed"
+            : null,
         super_agent_id: resolvedSuperAgentId,
         paystack_subaccount_code: paystackSubaccountCode,
         message: "Payment verified and order created successfully",

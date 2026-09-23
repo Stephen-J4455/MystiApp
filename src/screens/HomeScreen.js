@@ -781,24 +781,7 @@ export default function HomeScreen({ navigation }) {
                   }}
                 >
                   <Ionicons name="people" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Assigned Agents</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentAgents");
-                  }}
-                >
-                  <Ionicons
-                    name="person-add"
-                    size={18}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.superAgentMenuText}>
-                    Create Sub-Agent
-                  </Text>
+                  <Text style={styles.superAgentMenuText}>Agents</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -816,12 +799,12 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
-                    navigation.navigate("History");
+                    navigation.navigate("SuperAgentTopUpHistory");
                   }}
                 >
                   <Ionicons name="wallet" size={18} color={colors.primary} />
                   <Text style={styles.superAgentMenuText}>
-                    Wallet / Transactions
+                    Sub-agent Top-up History
                   </Text>
                 </TouchableOpacity>
 
@@ -860,6 +843,17 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
+                    navigation.navigate("WalletTopUp");
+                  }}
+                >
+                  <Ionicons name="wallet" size={18} color={colors.primary} />
+                  <Text style={styles.superAgentMenuText}>Wallet Top-up</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.superAgentMenuItem}
+                  onPress={() => {
+                    setMenuOpen(false);
                     navigation.navigate("Profile");
                   }}
                 >
@@ -885,53 +879,6 @@ export default function HomeScreen({ navigation }) {
                     color={colors.primary}
                   />
                   <Text style={styles.superAgentMenuText}>Help</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {/* Agent Business Snapshot (if agent) */}
-          {isAgent && (
-            <View style={styles.agentSnapshot}>
-              <View style={styles.snapshotHeader}>
-                <View style={styles.agentTag}>
-                  <Ionicons
-                    name="shield-checkmark"
-                    size={12}
-                    color={colors.white}
-                  />
-                  <Text style={styles.agentTagText}>Verified Agent</Text>
-                </View>
-                <TouchableOpacity
-                  onPress={() => navigation.navigate("WalletTopUp")}
-                >
-                  <Text style={styles.topUpLink}>Top Up Wallet</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.snapshotContent}>
-                <View style={styles.snapshotItem}>
-                  <Text style={styles.snapshotLabel}>Wallet Balance</Text>
-                  <Text style={styles.snapshotValue}>
-                    Ghc {agentBalance.toFixed(2)}
-                  </Text>
-                  {/* Note: Balance update would need to be fetched/passed properly, 
-                      for now using placeholder or if I find where balance is stored I will update */}
-                </View>
-                <View style={styles.divider} />
-                <TouchableOpacity
-                  style={styles.snapshotItem}
-                  onPress={() => navigation.navigate("History")}
-                >
-                  <Text style={styles.snapshotLabel}>Today's Orders</Text>
-                  <Text style={styles.snapshotValue}>
-                    {
-                      transactions.filter(
-                        (t) =>
-                          new Date(t.created_at).toDateString() ===
-                          new Date().toDateString(),
-                      ).length
-                    }
-                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1470,69 +1417,6 @@ const styles = {
     color: colors.white,
     fontSize: 8,
     fontWeight: "bold",
-  },
-  agentSnapshot: {
-    marginHorizontal: 20,
-    backgroundColor: colors.secondary,
-    borderRadius: 24,
-    padding: 20,
-    elevation: 8,
-    shadowColor: colors.secondary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 10,
-    marginBottom: 20,
-  },
-  snapshotHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-  agentTag: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  agentTagText: {
-    color: colors.white,
-    fontSize: 10,
-    fontWeight: "bold",
-    marginLeft: 4,
-  },
-  topUpLink: {
-    color: colors.white,
-    fontSize: 12,
-    fontWeight: "600",
-    textDecorationLine: "underline",
-  },
-  snapshotContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  snapshotItem: {
-    flex: 1,
-  },
-  snapshotLabel: {
-    color: colors.white,
-    fontSize: 12,
-    opacity: 0.8,
-    marginBottom: 4,
-  },
-  snapshotValue: {
-    color: colors.white,
-    fontSize: 22,
-    fontWeight: "bold",
-  },
-  divider: {
-    width: 1,
-    height: 40,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    marginHorizontal: 15,
   },
   superAgentMenuOverlay: {
     position: "absolute",

@@ -50,7 +50,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
     email: "",
     phone: "",
     password: "",
-    initialBalance: "",
     tierName: "",
   });
   const { showError, showSuccess } = useNotification();
@@ -93,19 +92,20 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         getEdgeFunctionName("super-agent-user-management"),
         {
           body: {
-            action: "listUsers",
-            superAgentId,
+            action: "listAgentsWithBalances",
           },
         },
       );
 
       if (error) throw error;
 
-      const assignedAgents = (data?.users || []).filter((member) => {
+      const assignedAgents = (data?.agents || []).filter((member) => {
         const role = normalizeRole(member);
         const assignedSuperAgentId =
           member.user_metadata?.super_agent_id ||
           member.user_metadata?.superAgentId ||
+          member.app_metadata?.super_agent_id ||
+          member.app_metadata?.superAgentId ||
           null;
         return role === "Agent" && assignedSuperAgentId === superAgentId;
       });
@@ -185,8 +185,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const handleCreateSubAgent = async () => {
     if (!currentUser) return;
 
-    const { fullName, businessName, email, phone, password, initialBalance, tierName } =
-      form;
+    const { fullName, businessName, email, phone, password, tierName } = form;
 
     if (!fullName.trim() || !businessName.trim() || !email.trim()) {
       showError(
@@ -209,12 +208,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
       return;
     }
 
-    const balance = Number(initialBalance || 0);
-    if (Number.isNaN(balance) || balance < 0) {
-      showError("Validation", "Please enter a valid initial balance.");
-      return;
-    }
-
     try {
       setCreatingAgent(true);
 
@@ -225,7 +218,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         fullName: fullName.trim(),
         businessName: businessName.trim(),
         phone: phone.trim() || null,
-        initialBalance: balance,
         tierName: tierName.trim() || null,
       });
 
@@ -235,7 +227,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         email: "",
         phone: "",
         password: "",
-        initialBalance: "",
         tierName: "",
       });
 
@@ -249,7 +240,10 @@ export default function SuperAgentAgentsScreen({ navigation }) {
       if (error.message?.includes("already registered")) {
         showError("Error", "An account with this email already exists.");
       } else {
-        showError("Error", error?.message || "Unable to create this sub-agent right now.");
+        showError(
+          "Error",
+          error?.message || "Unable to create this sub-agent right now.",
+        );
       }
     } finally {
       setCreatingAgent(false);
@@ -337,17 +331,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
             style={styles.input}
           />
 
-          <Text style={styles.label}>Initial Wallet Balance (GHS)</Text>
-          <TextInput
-            placeholder="0.00"
-            keyboardType="decimal-pad"
-            value={form.initialBalance}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, initialBalance: value }))
-            }
-            style={styles.input}
-          />
-
           <Text style={styles.label}>Tier Access</Text>
           <Text style={styles.fieldHint}>
             Sub-agents see the prices you set for their tier. General fills any
@@ -409,8 +392,9 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
           {tiers.length === 0 ? (
             <Text style={styles.fieldHint}>
-              Create a tier first (Super Agent → Manage Tiers) to give sub-agents
-              tier pricing. They see your General packages until then.
+              Create a tier first (Super Agent → Manage Tiers) to give
+              sub-agents tier pricing. They see your General packages until
+              then.
             </Text>
           ) : null}
 
@@ -434,6 +418,10 @@ export default function SuperAgentAgentsScreen({ navigation }) {
                         "Business name not set"}
                     </Text>
                     <Text style={styles.agentMeta}>{agent.email}</Text>
+                    <Text style={styles.agentBalance}>
+                      Wallet balance: Ghc{" "}
+                      {Number(agent.wallet_balance || 0).toFixed(2)}
+                    </Text>
 
                     <Text style={styles.agentTierLabel}>
                       {savingTierAgentId === agent.id
@@ -643,5 +631,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.secondary,
     marginTop: 4,
+  },
+  agentBalance: {
+    fontSize: 13,
+    color: colors.dark,
+    fontWeight: "700",
+    marginTop: 8,
   },
 });

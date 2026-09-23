@@ -290,6 +290,49 @@ Deno.serve(async (req) => {
       }
     }
 
+    const userRole = String(
+      user.user_metadata?.role || user.app_metadata?.role || "",
+    ).toLowerCase();
+    if (userRole === "superagent" || userRole === "super_agent") {
+      const { data: creditResult, error: creditError } =
+        await supabaseAdmin.rpc("credit_super_agent_wallet", {
+          p_super_agent_id: user.id,
+          p_amount: existingTopup.amount,
+          p_reference: `wallet-topup-${existingTopup.id}`,
+          p_reason: "wallet_topup",
+          p_metadata: {
+            topup_id: existingTopup.id,
+            paystack_transaction_id: verifyData.data.id,
+          },
+        });
+
+      if (creditError || !creditResult?.success) {
+        console.error("Failed to credit Super Agent wallet:", {
+          creditError,
+          creditResult,
+        });
+        return new Response(
+          JSON.stringify({ error: "Failed to credit Super Agent wallet" }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          new_balance: creditResult.balance,
+          already_processed: creditResult.already_processed || false,
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
     // Get or create agent_wallet
     let { data: wallet, error: walletError } = await supabaseAdmin
       .from("agent_wallet")

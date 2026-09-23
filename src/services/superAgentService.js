@@ -5,8 +5,7 @@ import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
 const SERVICE_ROLE_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmZmd6bmtubG1xeHRpa2t5aHd1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Njk3MTQ3MSwiZXhwIjoyMDYyNTQ3NDcxfQ.GlKnfveTDERNeMVyTPuHlI6ssMCj9G1X1KQnOe9YlYU";
 
-const JEHUCA_CATALOG_URL =
-  "https://backend.jehucale-business.com/api/packages";
+const JEHUCA_CATALOG_URL = "https://backend.jehucale-business.com/api/packages";
 const JEHUCA_API_KEY =
   "jahucal_1789940895638_ctm65irrpx8lzs376zbbwl_4wo9faazdf5igzwfgvv19t";
 
@@ -18,7 +17,10 @@ const adminClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
   },
 });
 
-const normalizeKey = (val) => String(val || "").trim().toUpperCase();
+const normalizeKey = (val) =>
+  String(val || "")
+    .trim()
+    .toUpperCase();
 
 export const formatBundleSizeFromDescriptor = (descriptor) => {
   const match = String(descriptor || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
@@ -67,14 +69,21 @@ const findCatalogPackageForOffer = (catalog, offer) => {
       if (normalizeKey(pkg?.network) !== net) return false;
       const type = normalizeKey(pkg?.type);
       const size =
-        pkg?.size !== undefined && pkg?.size !== null && String(pkg.size).trim() !== ""
+        pkg?.size !== undefined &&
+        pkg?.size !== null &&
+        String(pkg.size).trim() !== ""
           ? `${pkg.size}GB`
           : "";
       const descriptor =
         size && !type.includes(size) ? `${type} - ${size}` : type || size;
 
       if (descriptor && descriptor === dataVal) return true;
-      if (String(pkg?.id || "").trim().toUpperCase() === dataVal) return true;
+      if (
+        String(pkg?.id || "")
+          .trim()
+          .toUpperCase() === dataVal
+      )
+        return true;
       if (
         size &&
         (dataVal === `${type} - ${size}` ||
@@ -130,7 +139,10 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
       };
     }
   } catch (edgeErr) {
-    console.warn("Edge function getAgentPackages error, using direct service:", edgeErr);
+    console.warn(
+      "Edge function getAgentPackages error, using direct service:",
+      edgeErr,
+    );
   }
 
   // 2. Direct fallback via adminClient
@@ -144,7 +156,11 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
 
     if (offerError) {
       console.error("Direct query super_agent_offers error:", offerError);
-      return { offers: [], agent_tier: agentTier || null, error: offerError.message };
+      return {
+        offers: [],
+        agent_tier: agentTier || null,
+        error: offerError.message,
+      };
     }
 
     const publishedOffers = Array.isArray(offerRows) ? offerRows : [];
@@ -178,14 +194,12 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
 
     const mappedPackages = selectedOffers
       .filter(
-        (row) =>
-          !networkFilter || normalizeKey(row?.network) === networkFilter,
+        (row) => !networkFilter || normalizeKey(row?.network) === networkFilter,
       )
       .map((row) => {
         const catalogPackage = findCatalogPackageForOffer(catalog, row);
         const descriptor = String(row?.data_value || "");
-        const size =
-          catalogPackage?.size ?? sizeFromDataValue(descriptor);
+        const size = catalogPackage?.size ?? sizeFromDataValue(descriptor);
 
         const tierPrice = Number(row?.price || 0);
         const basePrice = catalogPackage?.price
@@ -200,9 +214,11 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
           data_value: descriptor,
           type: String(catalogPackage?.type || descriptor).toUpperCase(),
           title:
-            row?.title || `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
+            row?.title ||
+            `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
           name:
-            row?.title || `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
+            row?.title ||
+            `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
           price: tierPrice,
           base_price: basePrice,
           tier_extra: Math.max(0, tierPrice - basePrice),
@@ -230,7 +246,11 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
  * Super agent updates a sub-agent's assigned tier.
  * Saves immediately to user_metadata.tier_name.
  */
-export const updateSubAgentTier = async ({ superAgentId, agentId, tierName }) => {
+export const updateSubAgentTier = async ({
+  superAgentId,
+  agentId,
+  tierName,
+}) => {
   if (!superAgentId || !agentId) {
     throw new Error("superAgentId and agentId are required");
   }
@@ -254,7 +274,10 @@ export const updateSubAgentTier = async ({ superAgentId, agentId, tierName }) =>
       return { success: true, tier_name: cleanTierName };
     }
   } catch (edgeErr) {
-    console.warn("Edge function updateSubAgent failed, using direct admin fallback:", edgeErr);
+    console.warn(
+      "Edge function updateSubAgent failed, using direct admin fallback:",
+      edgeErr,
+    );
   }
 
   // 2. Direct fallback via adminClient
@@ -492,7 +515,7 @@ export const upsertSuperAgentOffer = async ({ superAgentId, offer }) => {
 };
 
 /**
- * Creates a sub-agent assigned to the given super agent, with wallet and initial tier.
+ * Creates a sub-agent assigned to the given super agent and initial tier.
  */
 export const createSubAgent = async ({
   superAgentId,
@@ -501,7 +524,6 @@ export const createSubAgent = async ({
   fullName,
   businessName,
   phone = null,
-  initialBalance = 0,
   tierName = null,
 }) => {
   const cleanEmail = String(email || "").trim();
@@ -509,7 +531,6 @@ export const createSubAgent = async ({
   const cleanFullName = String(fullName || "").trim();
   const cleanBusinessName = String(businessName || "").trim();
   const cleanPhone = String(phone || "").trim() || null;
-  const balance = Number(initialBalance || 0);
   const cleanTier = String(tierName || "").trim() || null;
 
   // 1. Try edge function first
@@ -526,7 +547,6 @@ export const createSubAgent = async ({
               full_name: cleanFullName,
               business_name: cleanBusinessName,
               phone: cleanPhone,
-              initialBalance: balance,
               tier_name: cleanTier,
             },
           },
@@ -559,22 +579,8 @@ export const createSubAgent = async ({
 
     if (createError) throw createError;
 
-    const newUserId = createdUser.user.id;
-
-    const { error: walletError } = await adminClient
-      .from("agent_wallet")
-      .insert({
-        agent_id: newUserId,
-        balance: Number.isFinite(balance) ? balance : 0,
-      });
-
-    if (walletError) {
-      console.warn("Wallet creation warning in createSubAgent:", walletError);
-    }
-
     return {
       user: createdUser.user,
-      wallet: { agent_id: newUserId, balance },
     };
   } catch (err) {
     console.error("Direct createSubAgent error:", err);
@@ -653,5 +659,3 @@ export const deleteSuperAgentOffer = async (offerId) => {
     throw err;
   }
 };
-
-

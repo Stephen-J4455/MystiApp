@@ -107,6 +107,7 @@ export default function WalletTopUpScreen({ navigation }) {
   const [currentBalance, setCurrentBalance] = useState(0);
   const [businessName, setBusinessName] = useState("");
   const [superAgentName, setSuperAgentName] = useState("");
+  const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [subaccountCode, setSubaccountCode] = useState(null);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
   const [paystackPublicKey, setPaystackPublicKey] = useState("");
@@ -220,6 +221,12 @@ export default function WalletTopUpScreen({ navigation }) {
         user?.app_metadata?.business_name ||
         "";
       setBusinessName(metaBusinessName);
+      const normalizedRole = String(
+        user?.user_metadata?.role || user?.app_metadata?.role || "",
+      ).toLowerCase();
+      const isSuperAgentRole =
+        normalizedRole === "superagent" || normalizedRole === "super_agent";
+      setIsSuperAgentUser(isSuperAgentRole);
 
       // Resolve the super agent (if any) and their Paystack subaccount so
       // wallet top-ups can be routed to the super agent's settlement account.
@@ -252,9 +259,9 @@ export default function WalletTopUpScreen({ navigation }) {
       }
 
       const { data: wallet, error: walletError } = await supabase
-        .from("agent_wallet")
+        .from(isSuperAgentRole ? "super_agent_wallets" : "agent_wallet")
         .select("balance")
-        .eq("agent_id", user.id)
+        .eq(isSuperAgentRole ? "super_agent_id" : "agent_id", user.id)
         .maybeSingle();
       if (walletError) {
         console.error("Wallet fetch error:", walletError);
@@ -274,6 +281,11 @@ export default function WalletTopUpScreen({ navigation }) {
           data: { user },
         } = await supabase.auth.getUser();
         if (user) {
+          const normalizedRole = String(
+            user.user_metadata?.role || user.app_metadata?.role || "",
+          ).toLowerCase();
+          const isSuperAgentRole =
+            normalizedRole === "superagent" || normalizedRole === "super_agent";
           walletSubscription = supabase
             .channel("wallet_balance_realtime")
             .on(
@@ -281,8 +293,10 @@ export default function WalletTopUpScreen({ navigation }) {
               {
                 event: "UPDATE",
                 schema: "public",
-                table: "agent_wallet",
-                filter: `agent_id=eq.${user.id}`,
+                table: isSuperAgentRole
+                  ? "super_agent_wallets"
+                  : "agent_wallet",
+                filter: `${isSuperAgentRole ? "super_agent_id" : "agent_id"}=eq.${user.id}`,
               },
               (payload) => {
                 setCurrentBalance(payload.new.balance || 0);
@@ -379,7 +393,9 @@ export default function WalletTopUpScreen({ navigation }) {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={styles.header}>
-            <Text style={styles.title}>Wallet Top-up</Text>
+            <Text style={styles.title}>
+              {isSuperAgentUser ? "Super Agent Wallet" : "Wallet Top-up"}
+            </Text>
             <Text style={styles.subtitle}>
               Add funds to your wallet to start serving customers
             </Text>
@@ -504,74 +520,78 @@ export default function WalletTopUpScreen({ navigation }) {
                     </Text>
                   </View>
                 )}
-                {currentReference && userEmail && amount && paystackPublicKey && (
-                  <WebView
-                    source={{
-                      html: generatePaystackHTML(
-                        parseFloat(amount),
-                        userEmail,
-                        currentReference,
-                        subaccountCode,
-                        // Show the super agent (recipient of the payment) when
-                        // a subaccount is resolved; otherwise fall back to the
-                        // current user's business name.
-                        subaccountCode && superAgentName
-                          ? superAgentName
-                          : businessName,
-                        subaccountCode && superAgentName
-                          ? "Super Agent"
-                          : "Business",
-                        paystackPublicKey,
-                      ),
-                    }}
-                    javaScriptEnabled
-                    domStorageEnabled
-                    startInLoadingState
-                    originWhitelist={["https://*"]}
-                    onMessage={(event) => {
-                      try {
-                        const m = JSON.parse(event.nativeEvent.data);
-                        if (m.type === "success") handlePaymentSuccess(m.data);
-                        else if (m.type === "cancel") handlePaymentClose();
-                      } catch (e) {
-                        console.error("Webview msg err:", e);
-                      }
-                    }}
-                    onError={(syntheticEvent) => {
-                      console.error(
-                        "WebView error:",
-                        syntheticEvent.nativeEvent,
-                      );
-                      showError(
-                        "Payment Error",
-                        "Could not load payment page. Please try again.",
-                      );
-                      handlePaymentClose();
-                    }}
-                    onHttpError={(syntheticEvent) => {
-                      console.error(
-                        "WebView HTTP error:",
-                        syntheticEvent.nativeEvent,
-                      );
-                    }}
-                    renderError={(errorName) => (
-                      <View style={styles.webviewError}>
-                        <Ionicons
-                          name="alert-circle-outline"
-                          size={48}
-                          color={colors.danger}
-                        />
-                        <Text style={styles.webviewErrorText}>
-                          Failed to load payment page
-                        </Text>
-                        <Text style={styles.webviewErrorSubtext}>
-                          {errorName}
-                        </Text>
-                      </View>
-                    )}
-                    style={styles.webview}
-                  />
-                )}
+                {currentReference &&
+                  userEmail &&
+                  amount &&
+                  paystackPublicKey && (
+                    <WebView
+                      source={{
+                        html: generatePaystackHTML(
+                          parseFloat(amount),
+                          userEmail,
+                          currentReference,
+                          subaccountCode,
+                          // Show the super agent (recipient of the payment) when
+                          // a subaccount is resolved; otherwise fall back to the
+                          // current user's business name.
+                          subaccountCode && superAgentName
+                            ? superAgentName
+                            : businessName,
+                          subaccountCode && superAgentName
+                            ? "Super Agent"
+                            : "Business",
+                          paystackPublicKey,
+                        ),
+                      }}
+                      javaScriptEnabled
+                      domStorageEnabled
+                      startInLoadingState
+                      originWhitelist={["https://*"]}
+                      onMessage={(event) => {
+                        try {
+                          const m = JSON.parse(event.nativeEvent.data);
+                          if (m.type === "success")
+                            handlePaymentSuccess(m.data);
+                          else if (m.type === "cancel") handlePaymentClose();
+                        } catch (e) {
+                          console.error("Webview msg err:", e);
+                        }
+                      }}
+                      onError={(syntheticEvent) => {
+                        console.error(
+                          "WebView error:",
+                          syntheticEvent.nativeEvent,
+                        );
+                        showError(
+                          "Payment Error",
+                          "Could not load payment page. Please try again.",
+                        );
+                        handlePaymentClose();
+                      }}
+                      onHttpError={(syntheticEvent) => {
+                        console.error(
+                          "WebView HTTP error:",
+                          syntheticEvent.nativeEvent,
+                        );
+                      }}
+                      renderError={(errorName) => (
+                        <View style={styles.webviewError}>
+                          <Ionicons
+                            name="alert-circle-outline"
+                            size={48}
+                            color={colors.danger}
+                          />
+                          <Text style={styles.webviewErrorText}>
+                            Failed to load payment page
+                          </Text>
+                          <Text style={styles.webviewErrorSubtext}>
+                            {errorName}
+                          </Text>
+                        </View>
+                      )}
+                      style={styles.webview}
+                    />
+                  )}
               </View>
             </View>
           </View>

@@ -78,28 +78,22 @@ export const usePaystackPayment = (config) => {
         !!window.PaystackPop,
       );
 
-      if (!isLoaded) {
+      if (!window.PaystackPop) {
         console.log("Paystack script still loading, waiting...");
-        // Wait for script to load
         const checkLoaded = setInterval(() => {
-          if (window.PaystackPop && isLoaded) {
+          if (window.PaystackPop) {
             clearInterval(checkLoaded);
             console.log("Paystack script loaded, proceeding with payment");
             initializePayment();
           }
         }, 100);
 
-        // Timeout after 5 seconds
         setTimeout(() => {
           clearInterval(checkLoaded);
-          console.error("Paystack script loading timeout");
-        }, 5000);
-
-        return;
-      }
-
-      if (!window.PaystackPop) {
-        console.error("PaystackPop not available after loading");
+          if (!window.PaystackPop) {
+            console.error("Paystack script loading timeout");
+          }
+        }, 10000);
         return;
       }
 

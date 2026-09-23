@@ -40,6 +40,7 @@ import SuperAgentOffersScreen from "./src/screens/SuperAgentOffersScreen";
 import SuperAgentAgentsScreen from "./src/screens/SuperAgentAgentsScreen";
 import SuperAgentTierManagementScreen from "./src/screens/SuperAgentTierManagementScreen";
 import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
+import SuperAgentTopUpHistoryScreen from "./src/screens/SuperAgentTopUpHistoryScreen";
 import colors from "./src/components/theme";
 
 const Stack = createNativeStackNavigator();
@@ -416,6 +417,10 @@ export default function App() {
                 <Stack.Screen
                   name="SuperAgentPaystack"
                   component={SuperAgentPaystackScreen}
+                />
+                <Stack.Screen
+                  name="SuperAgentTopUpHistory"
+                  component={SuperAgentTopUpHistoryScreen}
                 />
                 <Stack.Screen name="Receipt" component={ReceiptScreen} />
                 <Stack.Screen name="History" component={HistoryScreen} />

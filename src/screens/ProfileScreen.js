@@ -57,7 +57,7 @@ export default function ProfileScreen({ navigation }) {
           duration: 800,
           useNativeDriver: true,
         }),
-      ])
+      ]),
     );
     animation.start();
     return () => animation.stop();
@@ -87,7 +87,7 @@ export default function ProfileScreen({ navigation }) {
               (payload) => {
                 console.log("Agent order updated in profile:", payload);
                 fetchAgentStats();
-              }
+              },
             )
             .subscribe();
 
@@ -104,14 +104,14 @@ export default function ProfileScreen({ navigation }) {
               (payload) => {
                 console.log("Agent wallet updated in profile:", payload);
                 fetchWalletBalance();
-              }
+              },
             )
             .subscribe();
         }
       } catch (error) {
         console.error(
           "Error setting up profile realtime subscriptions:",
-          error
+          error,
         );
       }
     };
@@ -138,7 +138,7 @@ export default function ProfileScreen({ navigation }) {
         fetchWalletTopUps();
         fetchRecentTransactions();
       }
-    }, [isAgent])
+    }, [isAgent]),
   );
 
   const fetchWalletBalance = async () => {
@@ -173,10 +173,24 @@ export default function ProfileScreen({ navigation }) {
       setEmail(user.email || "");
       setPhone(user.user_metadata?.phone || "");
       setNotificationsEnabled(
-        user.user_metadata?.notifications_enabled ?? true
+        user.user_metadata?.notifications_enabled ?? true,
       );
 
-      // Check if user is an agent and fetch stats
+      const normalizedRole = String(
+        user.user_metadata?.role || user.app_metadata?.role || "",
+      ).toLowerCase();
+      const agentStatus =
+        normalizedRole === "agent" ||
+        normalizedRole === "sub_agent" ||
+        Boolean(
+          user.user_metadata?.super_agent_id ||
+          user.user_metadata?.superAgentId ||
+          user.app_metadata?.super_agent_id ||
+          user.app_metadata?.superAgentId,
+        );
+      setIsAgent(agentStatus);
+
+      // Load legacy agent data only when it exists.
       try {
         const { data: wallet, error } = await supabase
           .from("agent_wallet")
@@ -184,10 +198,7 @@ export default function ProfileScreen({ navigation }) {
           .eq("agent_id", user.id)
           .single();
 
-        const agentStatus = !error && wallet !== null;
-        setIsAgent(agentStatus);
-
-        if (agentStatus) {
+        if (agentStatus && !error && wallet) {
           await fetchWalletBalance();
           await fetchAgentStats();
           await fetchWalletTopUps();
@@ -217,16 +228,16 @@ export default function ProfileScreen({ navigation }) {
       const totalEarnings = orders
         .filter(
           (order) =>
-            order.status === "delivered" || order.status === "completed"
+            order.status === "delivered" || order.status === "completed",
         )
         .reduce((sum, order) => sum + (order.amount || 0), 0);
 
       const pendingOrders = orders.filter(
-        (order) => order.status === "pending" || order.status === "processing"
+        (order) => order.status === "pending" || order.status === "processing",
       ).length;
 
       const completedOrders = orders.filter(
-        (order) => order.status === "delivered" || order.status === "completed"
+        (order) => order.status === "delivered" || order.status === "completed",
       ).length;
 
       setAgentStats({
@@ -300,7 +311,7 @@ export default function ProfileScreen({ navigation }) {
       if (!ghanaPhoneRegex.test(cleanPhone)) {
         showError(
           "Error",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)"
+          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
         );
         return;
       }
@@ -405,11 +416,14 @@ export default function ProfileScreen({ navigation }) {
       </TouchableOpacity>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
-
         <View style={styles.content}>
           <View style={styles.profileImageContainer}>
             <View style={styles.avatarRing}>
-              <Ionicons name="person-circle" size={100} color={colors.primary} />
+              <Ionicons
+                name="person-circle"
+                size={100}
+                color={colors.primary}
+              />
             </View>
           </View>
 
@@ -512,113 +526,6 @@ export default function ProfileScreen({ navigation }) {
               />
             </View>
           </View>
-
-          {isAgent && (
-            <View style={styles.agentStatsSection}>
-              <Text style={styles.sectionTitle}>Agent Statistics</Text>
-
-              {/* Wallet Balance Section */}
-              <View style={styles.walletSection}>
-                <View style={styles.walletBalanceContainer}>
-                  <Ionicons name="wallet" size={24} color={colors.primary} />
-                  <View style={styles.walletTextContainer}>
-                    <Text style={styles.walletLabel}>Wallet Balance</Text>
-                    <Text style={styles.walletBalance}>
-                      Ghc{walletBalance.toFixed(2)}
-                    </Text>
-                  </View>
-                </View>
-                <TouchableOpacity
-                  style={styles.topUpButton}
-                  onPress={() => navigation.navigate("WalletTopUp")}
-                >
-                  <Ionicons name="add-circle" size={20} color="#fff" />
-                  <Text style={styles.topUpButtonText}>Top Up</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.statsGrid}>
-                <View style={styles.statItem}>
-                  <Ionicons
-                    name="cart-outline"
-                    size={30}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.statNumber}>
-                    {agentStats.totalOrders}
-                  </Text>
-                  <Text style={styles.statLabel}>Total Orders</Text>
-                </View>
-
-                <View style={styles.statItem}>
-                  <Ionicons
-                    name="cash-outline"
-                    size={30}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.statNumber}>
-                    Ghc{agentStats.totalEarnings.toFixed(2)}
-                  </Text>
-                  <Text style={styles.statLabel}>Total Earnings</Text>
-                </View>
-
-                <View style={styles.statItem}>
-                  <Ionicons
-                    name="time-outline"
-                    size={30}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.statNumber}>
-                    {agentStats.pendingOrders}
-                  </Text>
-                  <Text style={styles.statLabel}>Pending</Text>
-                </View>
-
-                <View style={styles.statItem}>
-                  <Ionicons
-                    name="checkmark-circle-outline"
-                    size={30}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.statNumber}>
-                    {agentStats.completedOrders}
-                  </Text>
-                  <Text style={styles.statLabel}>Completed</Text>
-                </View>
-              </View>
-            </View>
-          )}
-
-          {isAgent && walletTopUps.length > 0 && (
-            <View style={styles.walletHistorySection}>
-              <Text style={styles.sectionTitle}>Wallet Top-up History</Text>
-              {walletTopUps.map((topUp) => (
-                <View key={topUp.id} style={styles.historyItem}>
-                  <View style={styles.historyLeft}>
-                    <View style={styles.agentBadgeSmall}>
-                      <Ionicons
-                        name="shield-checkmark"
-                        size={12}
-                        color="#fff"
-                      />
-                      <Text style={styles.agentBadgeTextSmall}>AGENT</Text>
-                    </View>
-                    <View style={styles.historyDetails}>
-                      <Text style={styles.historyAmount}>
-                        +Ghc{topUp.amount.toFixed(2)}
-                      </Text>
-                      <Text style={styles.historyDate}>
-                        {new Date(topUp.created_at).toLocaleDateString()}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.historyRight}>
-                    <Text style={styles.historyStatus}>Completed</Text>
-                  </View>
-                </View>
-              ))}
-            </View>
-          )}
 
           <View style={styles.appInfoSection}>
             <TouchableOpacity
@@ -904,124 +811,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "600",
     color: colors.dark,
-  },
-  agentStatsSection: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  walletSection: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: colors.light,
-    padding: 16,
-    borderRadius: 20,
-    marginBottom: 24,
-  },
-  walletBalanceContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  walletTextContainer: {
-    marginLeft: 12,
-  },
-  walletLabel: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.6,
-  },
-  walletBalance: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.primary,
-  },
-  topUpButton: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  topUpButtonText: {
-    color: colors.white,
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  statsGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    gap: 15,
-  },
-  statItem: {
-    width: "47%",
-    backgroundColor: colors.light,
-    borderRadius: 20,
-    padding: 16,
-    alignItems: "center",
-  },
-  statNumber: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.dark,
-    marginTop: 8,
-  },
-  statLabel: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.5,
-    marginTop: 2,
-    textAlign: "center",
-  },
-  walletHistorySection: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  historyItem: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  historyLeft: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  historyDetails: {
-    marginLeft: 12,
-  },
-  historyAmount: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: colors.primary,
-  },
-  historyDate: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.4,
-  },
-  historyStatus: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: colors.success,
   },
   appInfoSection: {
     backgroundColor: colors.white,

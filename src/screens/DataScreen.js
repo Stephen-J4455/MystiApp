@@ -42,6 +42,8 @@ export default function DataScreen({ navigation, route }) {
   const [bundles, setBundles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [paystackModalVisible, setPaystackModalVisible] = useState(false);
+  const [directPaystackRequested, setDirectPaystackRequested] = useState(false);
+  const [recipientModalVisible, setRecipientModalVisible] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
   const [recipientName, setRecipientName] = useState("");
@@ -152,10 +154,12 @@ export default function DataScreen({ navigation, route }) {
                 getAgentPaymentBreakdown()?.grossAmount ||
                 parseFloat(selectedBundle.price.replace("Ghc ", "")),
               network: network,
-              recipient_phone:
-                purchaseType === "self"
+              recipient_phone: isAgent
+                ? recipientPhone.trim().replace(/\s+/g, "")
+                : purchaseType === "self"
                   ? userPhone
                   : recipientPhone.trim().replace(/\s+/g, ""),
+              recipient_name: isAgent ? recipientName.trim() : null,
               super_agent_id: superAgentId,
               paystack_subaccount_code: resolvedSubaccountCode,
               base_price: getAgentPaymentBreakdown()?.baseAmount || 0,
@@ -175,9 +179,21 @@ export default function DataScreen({ navigation, route }) {
         }
 
         if (data.success) {
+          if (data.held) {
+            showError(
+              "Order Pending",
+              "Payment received, but the Super Agent wallet needs funding before this order can be fulfilled.",
+            );
+            return;
+          }
+
           const providerResult = await dispatchProviderOrder(
             selectedBundle,
-            purchaseType === "self" ? userPhone : recipientPhone,
+            isAgent
+              ? recipientPhone
+              : purchaseType === "self"
+                ? userPhone
+                : recipientPhone,
           );
 
           if (providerResult.error || !providerResult.accepted) {
@@ -233,8 +249,9 @@ export default function DataScreen({ navigation, route }) {
                 user.email?.split("@")[0] ||
                 "N/A",
               user_email: user.email,
-              phone:
-                purchaseType === "self"
+              phone: isAgent
+                ? recipientPhone.trim().replace(/\s+/g, "")
+                : purchaseType === "self"
                   ? userPhone
                   : recipientPhone.trim().replace(/\s+/g, ""),
               country_code: "GH",
@@ -257,6 +274,8 @@ export default function DataScreen({ navigation, route }) {
     },
     [
       selectedBundle,
+      isAgent,
+      recipientName,
       purchaseType,
       userPhone,
       recipientPhone,
@@ -366,6 +385,26 @@ export default function DataScreen({ navigation, route }) {
   // Add loading state for Paystack initialization
   const [paystackLoading, setPaystackLoading] = useState(false);
 
+  useEffect(() => {
+    if (
+      Platform.OS !== "web" ||
+      !directPaystackRequested ||
+      !selectedBundle ||
+      !initializePayment
+    ) {
+      return;
+    }
+
+    setDirectPaystackRequested(false);
+    setPaystackLoading(true);
+    Promise.resolve(initializePayment())
+      .catch((error) => {
+        console.error("Paystack initialization error:", error);
+        showError("Payment Error", "Failed to open Paystack payment.");
+      })
+      .finally(() => setPaystackLoading(false));
+  }, [directPaystackRequested, selectedBundle, initializePayment, showError]);
+
   // Format network name for display (uppercase)
   const displayNetwork = network.toUpperCase();
 
@@ -411,32 +450,18 @@ export default function DataScreen({ navigation, route }) {
         const assignedSuperAgentId =
           user.user_metadata?.super_agent_id ||
           user.user_metadata?.superAgentId ||
+          user.app_metadata?.super_agent_id ||
+          user.app_metadata?.superAgentId ||
           null;
         setSuperAgentId(assignedSuperAgentId);
         setAgentTier(user.user_metadata?.tier_name || null);
 
         const isUserRoleAgent =
-          user.user_metadata?.role?.toLowerCase() === "agent" ||
-          Boolean(assignedSuperAgentId);
+          String(
+            user.user_metadata?.role || user.app_metadata?.role || "",
+          ).toLowerCase() === "agent" || Boolean(assignedSuperAgentId);
 
-        // Check if user is an agent
-        try {
-          const { data: wallet, error: walletError } = await supabase
-            .from("agent_wallet")
-            .select("*")
-            .eq("agent_id", user.id)
-            .single();
-
-          const hasWallet = !walletError && wallet !== null;
-          const agentStatus = hasWallet || isUserRoleAgent;
-          setIsAgent(agentStatus);
-          if (wallet) {
-            setAgentBalance(wallet.balance || 0);
-          }
-        } catch (error) {
-          console.error("Error checking agent status:", error);
-          setIsAgent(isUserRoleAgent);
-        }
+        setIsAgent(isUserRoleAgent);
 
         // If this user is a sub-agent of a super agent, ask the edge
         // function for the super-agent's Paystack subaccount so the
@@ -668,7 +693,11 @@ export default function DataScreen({ navigation, route }) {
 
       // Open Paystack payment modal
       setSelectedBundle(bundle);
-      setPaystackModalVisible(true);
+      if (Platform.OS === "web") {
+        setDirectPaystackRequested(true);
+      } else {
+        setPaystackModalVisible(true);
+      }
     } catch (error) {
       console.error("Purchase error:", error);
       showError("Error", "Failed to initiate purchase");
@@ -719,7 +748,11 @@ export default function DataScreen({ navigation, route }) {
 
       // Open Paystack payment modal
       setSelectedBundle(bundle);
-      setPaystackModalVisible(true);
+      if (Platform.OS === "web") {
+        setDirectPaystackRequested(true);
+      } else {
+        setPaystackModalVisible(true);
+      }
     } catch (error) {
       console.error("Purchase error:", error);
       showError("Error", "Failed to initiate purchase");
@@ -728,284 +761,51 @@ export default function DataScreen({ navigation, route }) {
 
   const handleAgentPurchase = async (bundle) => {
     try {
-      // Get current user
-      const {
-        data: { user },
-        error: userError,
-      } = await supabase.auth.getUser();
-
-      if (userError || !user) {
-        showError("Authentication Error", "Please log in to make a purchase");
-        return;
-      }
-
-      // Validate recipient name and phone number
-      if (!recipientName.trim()) {
-        showError(
-          "Recipient Name Required",
-          "Please enter the recipient's name",
-        );
-        return;
-      }
-
-      if (!recipientPhone.trim()) {
-        showError(
-          "Phone Number Required",
-          "Please enter the recipient's phone number",
-        );
-        return;
-      }
-
-      // Ghana phone number validation (more flexible)
-      const phoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
-      const cleanPhone = recipientPhone.trim().replace(/\s+/g, ""); // Remove spaces
-
-      if (!phoneRegex.test(cleanPhone)) {
-        showError(
-          "Invalid Phone Number",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
-        );
-        return;
-      }
-
-      // Extract price as number (remove 'Ghc ' prefix)
       const price = parseFloat(bundle.price.replace("Ghc ", ""));
-
       if (isNaN(price)) {
         showError("Error", "Invalid bundle price");
         return;
       }
 
-      // Check agent wallet balance
-      const { data: walletData, error: walletError } = await supabase
-        .from("agent_wallet")
-        .select("balance")
-        .eq("agent_id", user.id)
-        .single();
-
-      if (walletError) {
-        console.error("Wallet check error:", walletError);
-        showError("Error", "Failed to check wallet balance");
-        return;
-      }
-
-      if (!walletData || walletData.balance < grossPrice) {
-        showError(
-          "Insufficient Balance",
-          `Your wallet balance (GHS ${
-            walletData?.balance || 0
-          }) is not enough for this purchase (GHS ${grossPrice})`,
-        );
-        return;
-      }
-
-      // Show loading
-      setLoading(true);
-
-      // First, deduct from wallet
-      const { error: walletUpdateError } = await supabase
-        .from("agent_wallet")
-        .update({ balance: walletData.balance - grossPrice })
-        .eq("agent_id", user.id);
-
-      if (walletUpdateError) {
-        console.error("Wallet deduction error:", walletUpdateError);
-        showError("Error", "Failed to deduct from wallet");
-        setLoading(false);
-        return;
-      }
-
-      // Update local balance
-      setAgentBalance(walletData.balance - grossPrice);
-
-      const {
-        data: upstreamOrder,
-        error: upstreamOrderError,
-        accepted: providerOrderAccepted,
-      } = await dispatchProviderOrder(bundle, cleanPhone);
-
-      if (
-        upstreamOrderError ||
-        upstreamOrder?.success === false ||
-        upstreamOrder?.status === false ||
-        !providerOrderAccepted
-      ) {
-        console.error(
-          "Jehuca order error:",
-          upstreamOrderError || upstreamOrder,
-        );
-        await supabase
-          .from("agent_wallet")
-          .update({ balance: walletData.balance })
-          .eq("agent_id", user.id);
-        setAgentBalance(walletData.balance);
-        showError("Error", "Failed to send order to the data provider");
-        setLoading(false);
-        return;
-      }
-
-      const providerOrder = upstreamOrder?.payload?.orders?.[0] || null;
-
-      // Store the local transaction after the provider accepts the order.
-      const { data: orderData, error: orderError } = await supabase
-        .from("agent_orders")
-        .insert({
-          agent_id: user.id,
-          offer_id: bundle.superAgentOfferId,
-          offer_title: bundle.name,
-          network: network,
-          super_agent_id: superAgentId || null,
-          channel: "Agent",
-          device_token: cleanPhone,
-          recipient_name: recipientName.trim(),
-          recipient_phone: cleanPhone,
-          amount: grossPrice,
-          base_amount: basePrice,
-          agent_markup: agentMarkup,
-          transaction_fee: transactionFee,
-          main_account_amount: basePrice + transactionFee,
-          admin_share: basePrice + transactionFee,
-          super_agent_share: agentMarkup,
-          agent_net: 0,
-          status: "pending",
-          transaction_status: "pending",
-          jehuca_order_id:
-            upstreamOrder?.payload?.orderId || providerOrder?.id || null,
-          jehuca_order_status:
-            upstreamOrder?.data?.status ||
-            upstreamOrder?.payload?.status ||
-            providerOrder?.status ||
-            "pending",
-          jehuca_response: upstreamOrder || null,
-        })
-        .select("id")
-        .single();
-
-      if (orderError) {
-        console.error("Order creation error:", orderError);
-        // Attempt to refund wallet if order creation failed
-        await supabase
-          .from("agent_wallet")
-          .update({ balance: walletData.balance })
-          .eq("agent_id", user.id);
-        setAgentBalance(walletData.balance);
-        showError("Error", "Failed to create order");
-        setLoading(false);
-        return;
-      }
-
-      const { error: ledgerError } = await supabase
-        .from("payment_transactions")
-        .insert({
-          user_id: user.id,
-          order_id: orderData.id,
-          order_type: "agent",
-          payment_reference: `AGENT-WALLET-${orderData.id}`,
-          gross_amount: grossPrice,
-          base_amount: basePrice,
-          agent_markup: agentMarkup,
-          transaction_fee: transactionFee,
-          main_account_amount: basePrice + transactionFee,
-          super_agent_amount: agentMarkup,
-          agent_net: 0,
-          super_agent_id: superAgentId || null,
-          settlement_status: "pending",
-          network,
-          offer_title: bundle.name,
-          recipient_phone: cleanPhone,
-          channel: "Agent wallet",
-          paystack_transaction_status: "wallet_debit",
-        });
-      if (ledgerError) {
-        console.error("Wallet transaction ledger insert failed:", ledgerError);
-      }
-
-      if (true) {
-        // Proceed to send notification via Edge Function directly
-        // Send push notification to agent
-        try {
-          const { error: agentNotifyError } = await supabase.functions.invoke(
-            getEdgeFunctionName("send-notification"),
-            {
-              body: {
-                userId: user.id,
-                title: "Agent Order Successful",
-                message: `${bundle.name} data bundle purchased for ${recipientName.trim()}`,
-                type: "agent_order",
-              },
-            },
-          );
-
-          if (agentNotifyError) {
-            console.error(
-              "Failed to send agent notification:",
-              agentNotifyError,
-            );
-          } else {
-            console.log("Agent notification sent successfully");
-          }
-
-          // Notify admins about the new agent order
-          try {
-            await supabase.functions.invoke(
-              getEdgeFunctionName("send-notification"),
-              {
-                body: {
-                  sendToAdmins: true,
-                  title: "New Agent Order Received",
-                  message: `Agent ${user.email} purchased ${bundle.name} for ${recipientName.trim()} (${cleanPhone}). Amount: GHS ${price}`,
-                  type: "agent_order",
-                },
-              },
-            );
-            console.log("Admin notification for agent order sent successfully");
-          } catch (adminPushError) {
-            console.error(
-              "Error notifying admins about agent order:",
-              adminPushError,
-            );
-          }
-        } catch (pushError) {
-          console.error("Error sending agent push notification:", pushError);
-        }
-      }
-
-      // Note: Admin notifications for agent orders should be handled via database
-      // triggers or a separate edge function to avoid permission issues
-
-      // Success - navigate to receipt screen
-      navigation.navigate("Receipt", {
-        transaction: {
-          id: orderData.id,
-          status: "pending",
-          offer_title: bundle.name,
-          network: bundle.network,
-          data_amount: bundle.name,
-          amount: price,
-          created_at: new Date().toISOString(),
-          user_name: recipientName.trim(),
-          phone: cleanPhone,
-          payment_reference: `AGENT-${orderData.id}`,
-          orderType: "agent",
-        },
-      });
-
-      // Reset form
-      setRecipientName("");
-      setRecipientPhone("");
-      setSelectedBundle(null);
-      setLoading(false);
-
-      // Show success message
-      showSuccess(
-        "Purchase Successful!",
-        `Data bundle purchased successfully for ${recipientName.trim()}!`,
-      );
+      setSelectedBundle(bundle);
+      setRecipientModalVisible(true);
     } catch (error) {
-      console.error("Agent purchase error:", error);
-      showError("Error", "Failed to complete purchase");
-      setLoading(false);
+      console.error("Agent package selection error:", error);
+      showError("Error", "Failed to select package");
     }
+  };
+
+  const continueAgentPurchase = async () => {
+    if (!recipientName.trim()) {
+      showError("Recipient Name Required", "Please enter the recipient's name");
+      return;
+    }
+
+    if (!recipientPhone.trim()) {
+      showError(
+        "Phone Number Required",
+        "Please enter the recipient's phone number",
+      );
+      return;
+    }
+
+    const phoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
+    const cleanPhone = recipientPhone.trim().replace(/\s+/g, "");
+    if (!phoneRegex.test(cleanPhone)) {
+      showError(
+        "Invalid Phone Number",
+        "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
+      );
+      return;
+    }
+
+    setRecipientModalVisible(false);
+    if (Platform.OS === "web") {
+      setDirectPaystackRequested(true);
+      return;
+    }
+
+    setPaystackModalVisible(true);
   };
 
   const generatePaystackHTML = (
@@ -1403,28 +1203,9 @@ export default function DataScreen({ navigation, route }) {
         )}
 
         {/* Phone Number Input for Others - Always shown for Agents */}
-        {(purchaseType === "others" || isAgent) && (
+        {!isAgent && purchaseType === "others" && (
           <View style={styles.phoneInputContainer}>
-            <Text style={styles.phoneInputLabel}>
-              {isAgent ? "Recipient Details" : "Recipient Phone Number"}
-            </Text>
-            {isAgent && (
-              <View style={styles.phoneInputWrapper}>
-                <Ionicons
-                  name="person"
-                  size={20}
-                  color={colors.secondary}
-                  style={styles.phoneIcon}
-                />
-                <TextInput
-                  style={styles.phoneInput}
-                  placeholder="Enter recipient name"
-                  placeholderTextColor={colors.secondary}
-                  value={recipientName}
-                  onChangeText={setRecipientName}
-                />
-              </View>
-            )}
+            <Text style={styles.phoneInputLabel}>Recipient Phone Number</Text>
             <View style={styles.phoneInputWrapper}>
               <Ionicons
                 name="call"
@@ -1443,9 +1224,7 @@ export default function DataScreen({ navigation, route }) {
               />
             </View>
             <Text style={styles.phoneInputHint}>
-              {isAgent
-                ? "Enter the recipient's name and phone number for the data bundle"
-                : "Enter the phone number that will receive the data bundle"}
+              Enter the phone number that will receive the data bundle
             </Text>
           </View>
         )}
@@ -1541,6 +1320,82 @@ export default function DataScreen({ navigation, route }) {
           </Text>
         </View>
       </ScrollView>
+
+      {isAgent && selectedBundle && recipientModalVisible && (
+        <Modal
+          visible={recipientModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setRecipientModalVisible(false)}
+        >
+          <View style={styles.recipientModalOverlay}>
+            <View style={styles.recipientModalCard}>
+              <View style={styles.recipientModalHeader}>
+                <View>
+                  <Text style={styles.recipientModalTitle}>
+                    Recipient Details
+                  </Text>
+                  <Text style={styles.recipientModalSubtitle}>
+                    {selectedBundle.name}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setRecipientModalVisible(false)}
+                  style={styles.recipientModalClose}
+                >
+                  <Ionicons name="close" size={22} color={colors.secondary} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.phoneInputLabel}>Recipient Name</Text>
+              <View style={styles.phoneInputWrapper}>
+                <Ionicons
+                  name="person"
+                  size={20}
+                  color={colors.secondary}
+                  style={styles.phoneIcon}
+                />
+                <TextInput
+                  style={styles.phoneInput}
+                  placeholder="Enter recipient name"
+                  placeholderTextColor={colors.secondary}
+                  value={recipientName}
+                  onChangeText={setRecipientName}
+                  autoFocus
+                />
+              </View>
+
+              <Text style={styles.phoneInputLabel}>Phone Number</Text>
+              <View style={styles.phoneInputWrapper}>
+                <Ionicons
+                  name="call"
+                  size={20}
+                  color={colors.secondary}
+                  style={styles.phoneIcon}
+                />
+                <TextInput
+                  style={styles.phoneInput}
+                  placeholder="Enter phone number (e.g., 0532973455)"
+                  placeholderTextColor={colors.secondary}
+                  value={recipientPhone}
+                  onChangeText={setRecipientPhone}
+                  keyboardType="phone-pad"
+                  maxLength={13}
+                />
+              </View>
+
+              <TouchableOpacity
+                style={styles.recipientContinueButton}
+                onPress={continueAgentPurchase}
+              >
+                <Text style={styles.recipientContinueText}>
+                  Continue to Payment
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      )}
 
       {selectedBundle && paystackModalVisible && (
         <Modal visible={paystackModalVisible} animationType="slide">
@@ -1750,10 +1605,12 @@ export default function DataScreen({ navigation, route }) {
                               selectedBundle.price.replace("Ghc ", ""),
                             ),
                           network: network,
-                          recipient_phone:
-                            purchaseType === "self"
+                          recipient_phone: isAgent
+                            ? recipientPhone.trim().replace(/\s+/g, "")
+                            : purchaseType === "self"
                               ? userPhone
                               : recipientPhone.trim().replace(/\s+/g, ""), // Clean phone number
+                          recipient_name: isAgent ? recipientName.trim() : null,
                           super_agent_id: superAgentId,
                           paystack_subaccount_code: resolvedSubaccountCode,
                           base_price: selectedBundle.base_price || 0,
@@ -1774,9 +1631,21 @@ export default function DataScreen({ navigation, route }) {
                     }
 
                     if (data.success) {
+                      if (data.held) {
+                        showError(
+                          "Order Pending",
+                          "Payment received, but the Super Agent wallet needs funding before this order can be fulfilled.",
+                        );
+                        return;
+                      }
+
                       const providerResult = await dispatchProviderOrder(
                         selectedBundle,
-                        purchaseType === "self" ? userPhone : recipientPhone,
+                        isAgent
+                          ? recipientPhone
+                          : purchaseType === "self"
+                            ? userPhone
+                            : recipientPhone,
                       );
 
                       if (providerResult.error || !providerResult.accepted) {
@@ -1835,8 +1704,9 @@ export default function DataScreen({ navigation, route }) {
                             user.email?.split("@")[0] ||
                             "N/A",
                           user_email: user.email,
-                          phone:
-                            purchaseType === "self"
+                          phone: isAgent
+                            ? recipientPhone.trim().replace(/\s+/g, "")
+                            : purchaseType === "self"
                               ? userPhone
                               : recipientPhone.trim().replace(/\s+/g, ""),
                           country_code: "GH",
@@ -2217,6 +2087,54 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     marginTop: 8,
     fontStyle: "italic",
+  },
+  recipientModalOverlay: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(0, 0, 0, 0.45)",
+  },
+  recipientModalCard: {
+    backgroundColor: colors.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    padding: 24,
+    paddingBottom: 32,
+  },
+  recipientModalHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    marginBottom: 24,
+  },
+  recipientModalTitle: {
+    color: colors.dark,
+    fontSize: 20,
+    fontWeight: "800",
+  },
+  recipientModalSubtitle: {
+    color: colors.secondary,
+    fontSize: 13,
+    marginTop: 4,
+  },
+  recipientModalClose: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.light,
+  },
+  recipientContinueButton: {
+    backgroundColor: colors.primary,
+    borderRadius: 14,
+    alignItems: "center",
+    paddingVertical: 15,
+    marginTop: 24,
+  },
+  recipientContinueText: {
+    color: colors.white,
+    fontSize: 16,
+    fontWeight: "700",
   },
   userPhoneContainer: {
     backgroundColor: colors.light,

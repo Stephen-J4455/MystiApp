@@ -134,8 +134,13 @@ Deno.serve(async (req) => {
     if (action === "listUsers") {
       if (!isAllowedAdmin) {
         return new Response(
-          JSON.stringify({ error: "Only admins and super-agents can list users" }),
-          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          JSON.stringify({
+            error: "Only admins and super-agents can list users",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
         );
       }
       const { data: usersData, error: listError } =
@@ -152,6 +157,8 @@ Deno.serve(async (req) => {
             const assignedSuperAgentId =
               member.user_metadata?.super_agent_id ||
               member.user_metadata?.superAgentId ||
+              member.app_metadata?.super_agent_id ||
+              member.app_metadata?.superAgentId ||
               null;
             return role === "Agent" && assignedSuperAgentId === superAgentId;
           })
@@ -161,6 +168,146 @@ Deno.serve(async (req) => {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
+    }
+
+    if (action === "listAgentsWithBalances") {
+      if (userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({
+            error: "Only super-agents can list agent balances",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: usersData, error: listError } =
+        await supabaseAdmin.auth.admin.listUsers();
+      if (listError) throw listError;
+
+      const assignedAgents = (usersData?.users || []).filter((member: any) => {
+        const memberRole = normalizeRole(member);
+        const assignedSuperAgentId =
+          member.user_metadata?.super_agent_id ||
+          member.user_metadata?.superAgentId ||
+          member.app_metadata?.super_agent_id ||
+          member.app_metadata?.superAgentId ||
+          null;
+        return memberRole === "Agent" && assignedSuperAgentId === user.id;
+      });
+      const agentIds = assignedAgents.map((agent: any) => agent.id);
+
+      const { data: wallets, error: walletError } = agentIds.length
+        ? await supabaseAdmin
+            .from("agent_wallet")
+            .select("agent_id, balance")
+            .in("agent_id", agentIds)
+        : { data: [], error: null };
+      if (walletError) throw walletError;
+
+      const balances = new Map(
+        (wallets || []).map((wallet: any) => [wallet.agent_id, wallet.balance]),
+      );
+      return new Response(
+        JSON.stringify({
+          agents: assignedAgents.map((agent: any) => ({
+            ...agent,
+            wallet_balance: balances.get(agent.id) ?? 0,
+          })),
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    if (action === "listTopUps") {
+      if (!isAllowedAdmin || userRole !== "SuperAgent") {
+        return new Response(
+          JSON.stringify({
+            error: "Only super-agents can list sub-agent top-ups",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: usersData, error: listError } =
+        await supabaseAdmin.auth.admin.listUsers();
+      if (listError) throw listError;
+
+      const subAgents = (usersData?.users || []).filter((member: any) => {
+        const memberRole = normalizeRole(member);
+        const assignedSuperAgentId =
+          member.user_metadata?.super_agent_id ||
+          member.user_metadata?.superAgentId ||
+          member.app_metadata?.super_agent_id ||
+          member.app_metadata?.superAgentId ||
+          null;
+        return memberRole === "Agent" && assignedSuperAgentId === user.id;
+      });
+
+      const subAgentIds = subAgents.map((member: any) => member.id);
+      if (subAgentIds.length === 0) {
+        return new Response(JSON.stringify({ topUps: [] }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const { data: paystackConfig, error: paystackConfigError } =
+        await supabaseAdmin
+          .from("super_agent_paystack")
+          .select("subaccount_code, percentage_charge")
+          .eq("super_agent_id", user.id)
+          .maybeSingle();
+      if (
+        paystackConfigError &&
+        !isMissingDatabaseObject(paystackConfigError)
+      ) {
+        throw paystackConfigError;
+      }
+
+      const { data: topUps, error: topUpsError } = await supabaseAdmin
+        .from("wallet_topups")
+        .select("*")
+        .in("agent_id", subAgentIds)
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (topUpsError) throw topUpsError;
+
+      const businessNames = new Map(
+        subAgents.map((member: any) => [
+          member.id,
+          member.user_metadata?.business_name ||
+            member.user_metadata?.full_name ||
+            member.email ||
+            "Sub-agent",
+        ]),
+      );
+
+      return new Response(
+        JSON.stringify({
+          topUps: (topUps || []).map((topUp: any) => ({
+            ...topUp,
+            business_name: businessNames.get(topUp.agent_id) || "Sub-agent",
+            split_subaccount_code:
+              topUp.paystack_subaccount_code ||
+              paystackConfig?.subaccount_code ||
+              null,
+            split_percentage_charge: paystackConfig?.percentage_charge ?? null,
+          })),
+        }),
+        {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
     }
 
     if (action === "createSubAgent") {
@@ -179,7 +326,6 @@ Deno.serve(async (req) => {
       const fullName = String(userData?.full_name || "").trim();
       const businessName = String(userData?.business_name || "").trim();
       const phone = String(userData?.phone || "").trim();
-      const initialBalance = Number(userData?.initialBalance || 0);
 
       if (!email || !password || !fullName || !businessName) {
         return new Response(
@@ -226,21 +372,9 @@ Deno.serve(async (req) => {
         throw createError;
       }
 
-      const { error: walletError } = await supabaseAdmin
-        .from("agent_wallet")
-        .insert({
-          agent_id: createdUser.user.id,
-          balance: Number.isFinite(initialBalance) ? initialBalance : 0,
-        });
-
-      if (walletError) {
-        throw walletError;
-      }
-
       return new Response(
         JSON.stringify({
           user: createdUser.user,
-          wallet: { agent_id: createdUser.user.id },
         }),
         {
           status: 200,
@@ -262,13 +396,10 @@ Deno.serve(async (req) => {
 
       const targetAgentId = String(userData?.agent_id || "").trim();
       if (!targetAgentId) {
-        return new Response(
-          JSON.stringify({ error: "agent_id is required" }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
+        return new Response(JSON.stringify({ error: "agent_id is required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       const updatePayload: Record<string, unknown> = {};
@@ -276,8 +407,8 @@ Deno.serve(async (req) => {
         updatePayload.full_name = String(userData.full_name).trim();
       }
       if (userData?.business_name !== undefined) {
-        updatePayload.business_name = String(userData.business_name).trim() ||
-          null;
+        updatePayload.business_name =
+          String(userData.business_name).trim() || null;
       }
       if (userData?.phone !== undefined) {
         updatePayload.phone = String(userData.phone).trim() || null;
@@ -313,19 +444,14 @@ Deno.serve(async (req) => {
         await supabaseAdmin.auth.admin.getUserById(targetAgentId);
 
       if (fetchError || !existingUser?.user) {
-        return new Response(
-          JSON.stringify({ error: "Sub agent not found" }),
-          {
-            status: 404,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
+        return new Response(JSON.stringify({ error: "Sub agent not found" }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       const existingMeta = existingUser.user.user_metadata || {};
-      if (
-        String(existingMeta.super_agent_id || "") !== String(user.id)
-      ) {
+      if (String(existingMeta.super_agent_id || "") !== String(user.id)) {
         return new Response(
           JSON.stringify({
             error: "Sub agent does not belong to this super agent",
@@ -348,19 +474,18 @@ Deno.serve(async (req) => {
         throw updateError;
       }
 
-      return new Response(
-        JSON.stringify({ user: updatedUser?.user || null }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
+      return new Response(JSON.stringify({ user: updatedUser?.user || null }), {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     if (action === "deactivateSubAgent") {
       if (userRole !== "SuperAgent") {
         return new Response(
-          JSON.stringify({ error: "Only super agents can deactivate sub agents" }),
+          JSON.stringify({
+            error: "Only super agents can deactivate sub agents",
+          }),
           {
             status: 403,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -370,32 +495,24 @@ Deno.serve(async (req) => {
 
       const targetAgentId = String(userData?.agent_id || "").trim();
       if (!targetAgentId) {
-        return new Response(
-          JSON.stringify({ error: "agent_id is required" }),
-          {
-            status: 400,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
+        return new Response(JSON.stringify({ error: "agent_id is required" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       const { data: existingUser, error: fetchError } =
         await supabaseAdmin.auth.admin.getUserById(targetAgentId);
 
       if (fetchError || !existingUser?.user) {
-        return new Response(
-          JSON.stringify({ error: "Sub agent not found" }),
-          {
-            status: 404,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
+        return new Response(JSON.stringify({ error: "Sub agent not found" }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       const existingMeta = existingUser.user.user_metadata || {};
-      if (
-        String(existingMeta.super_agent_id || "") !== String(user.id)
-      ) {
+      if (String(existingMeta.super_agent_id || "") !== String(user.id)) {
         return new Response(
           JSON.stringify({
             error: "Sub agent does not belong to this super agent",
@@ -444,21 +561,20 @@ Deno.serve(async (req) => {
 
       const subaccountCode = String(userData?.subaccount_code || "").trim();
       const businessName = String(userData?.business_name || "").trim();
-      const settlementBank = String(userData?.settlement_bank || "").trim() ||
-        null;
-      const settlementBankCode = String(
-        userData?.settlement_bank_code || "",
-      ).trim() || null;
-      const accountNumber = String(userData?.account_number || "").trim() ||
-        null;
+      const settlementBank =
+        String(userData?.settlement_bank || "").trim() || null;
+      const settlementBankCode =
+        String(userData?.settlement_bank_code || "").trim() || null;
+      const accountNumber =
+        String(userData?.account_number || "").trim() || null;
       const paystackRawResponse = userData?.paystack_raw_response || null;
-      const isActive = userData?.is_active === undefined
-        ? true
-        : Boolean(userData.is_active);
-      const percentageCharge = userData?.percentage_charge !== undefined &&
+      const isActive =
+        userData?.is_active === undefined ? true : Boolean(userData.is_active);
+      const percentageCharge =
+        userData?.percentage_charge !== undefined &&
         userData?.percentage_charge !== null
-        ? Number(userData.percentage_charge)
-        : null;
+          ? Number(userData.percentage_charge)
+          : null;
 
       if (!subaccountCode) {
         return new Response(
@@ -525,12 +641,16 @@ Deno.serve(async (req) => {
       // Allow SuperAgents to get their own sub-account, OR
       // Allow Sub-Agents to get their assigned SuperAgent's sub-account.
       const targetSuperAgentId = user.user_metadata?.super_agent_id || null;
-      const effectiveAgentId = userRole === "SuperAgent" ? user.id : targetSuperAgentId;
+      const effectiveAgentId =
+        userRole === "SuperAgent" ? user.id : targetSuperAgentId;
 
       if (!effectiveAgentId) {
         return new Response(
           JSON.stringify({ error: "No super_agent_id found in user metadata" }),
-          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
         );
       }
 
@@ -540,7 +660,9 @@ Deno.serve(async (req) => {
           : true;
         if (!isMember && !targetSuperAgentId) {
           return new Response(
-            JSON.stringify({ error: "Must be a super-agent or have a super_agent_id assigned" }),
+            JSON.stringify({
+              error: "Must be a super-agent or have a super_agent_id assigned",
+            }),
             {
               status: 403,
               headers: { ...corsHeaders, "Content-Type": "application/json" },

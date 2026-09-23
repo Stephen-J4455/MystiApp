@@ -72,7 +72,10 @@ export default function SuperAgentManagementScreen({ navigation }) {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+        <TouchableOpacity
+          onPress={() => navigation.goBack()}
+          style={styles.backButton}
+        >
           <Ionicons name="arrow-back" size={24} color={colors.primary} />
         </TouchableOpacity>
         <Text style={styles.title}>Super Agent</Text>
@@ -82,12 +85,17 @@ export default function SuperAgentManagementScreen({ navigation }) {
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Management Center</Text>
           <Text style={styles.cardText}>
-            Welcome{user?.email ? `, ${user.email}` : ""}. Your super agent tools are ready.
+            Welcome{user?.email ? `, ${user.email}` : ""}. Your super agent
+            tools are ready.
           </Text>
         </View>
 
         <View style={styles.infoBanner}>
-          <Ionicons name="information-circle" size={20} color={colors.primary} />
+          <Ionicons
+            name="information-circle"
+            size={20}
+            color={colors.primary}
+          />
           <Text style={styles.infoBannerText}>
             Admin sets the base price for every bundle. Use Tier Management to
             set what your agents pay per tier, then assign offers from there.
@@ -132,6 +140,14 @@ export default function SuperAgentManagementScreen({ navigation }) {
         >
           <Ionicons name="receipt" size={20} color="#fff" />
           <Text style={styles.actionText}>Transactions</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.actionButton}
+          onPress={() => navigation.navigate("SuperAgentTopUpHistory")}
+        >
+          <Ionicons name="wallet" size={20} color="#fff" />
+          <Text style={styles.actionText}>Sub-agent Top-up History</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

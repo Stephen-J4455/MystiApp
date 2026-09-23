@@ -301,11 +301,29 @@ export default function HistoryScreen({ navigation }) {
           } else {
             const refreshedAssignedOrders =
               await refreshProviderStatuses(assignedOrders);
+            const { data: subAgentData, error: subAgentError } =
+              await supabase.functions.invoke(
+                getEdgeFunctionName("super-agent-user-management"),
+                {
+                  body: { action: "listUsers", superAgentId: user.id },
+                },
+              );
+            if (subAgentError) {
+              console.error("Error fetching sub-agent names:", subAgentError);
+            }
+            const subAgentBusinessNames = new Map(
+              (subAgentData?.users || []).map((subAgent) => [
+                subAgent.id,
+                subAgent.user_metadata?.business_name || "",
+              ]),
+            );
             const assignedTransactions = refreshedAssignedOrders.map(
               (order) => ({
                 ...order,
                 orderType: "agent",
                 isSubAgentTransaction: true,
+                subAgentBusinessName:
+                  subAgentBusinessNames.get(order.agent_id) || "",
                 displayName: order.recipient_name,
                 displayPhone: order.recipient_phone,
               }),
@@ -334,7 +352,7 @@ export default function HistoryScreen({ navigation }) {
   };
 
   const getStatusColor = (status) => {
-    switch (status?.toLowerCase()) {
+    switch (String(status || "").toLowerCase()) {
       case "completed":
         return "#27ae60";
       case "processing":
@@ -351,7 +369,11 @@ export default function HistoryScreen({ navigation }) {
 
   const getStatusText = (status) => {
     if (!status) return "Unknown";
-    return status.charAt(0).toUpperCase() + status.slice(1).toLowerCase();
+    const normalizedStatus = String(status);
+    return (
+      normalizedStatus.charAt(0).toUpperCase() +
+      normalizedStatus.slice(1).toLowerCase()
+    );
   };
 
   const formatDate = (dateString) => {
@@ -452,11 +474,17 @@ export default function HistoryScreen({ navigation }) {
                           : "") + (transaction.data_amount || "Data Bundle")}
                   </Text>
                   {transaction.isSubAgentTransaction && (
-                    <Text style={styles.transactionDesc}>
-                      Base Ghc {Number(transaction.admin_share || 0).toFixed(2)}{" "}
-                      | Tier Ghc{" "}
-                      {Number(transaction.super_agent_share || 0).toFixed(2)}
-                    </Text>
+                    <>
+                      <Text style={styles.transactionDesc}>
+                        Sub-agent: {transaction.subAgentBusinessName || "N/A"}
+                      </Text>
+                      <Text style={styles.transactionDesc}>
+                        Base Ghc{" "}
+                        {Number(transaction.admin_share || 0).toFixed(2)} | Tier
+                        Ghc{" "}
+                        {Number(transaction.super_agent_share || 0).toFixed(2)}
+                      </Text>
+                    </>
                   )}
                   <Text style={styles.transactionDate}>
                     {formatDate(transaction.created_at)}
@@ -466,17 +494,23 @@ export default function HistoryScreen({ navigation }) {
                   <Text
                     style={[
                       styles.transactionAmount,
-                      (
-                        transaction.jehuca_order_status || transaction.status
-                      )?.toLowerCase() === "completed" &&
+                      String(
+                        transaction.jehuca_order_status ||
+                          transaction.status ||
+                          "",
+                      ).toLowerCase() === "completed" &&
                         styles.transactionAmountCompleted,
-                      (
-                        transaction.jehuca_order_status || transaction.status
-                      )?.toLowerCase() === "processing" &&
+                      String(
+                        transaction.jehuca_order_status ||
+                          transaction.status ||
+                          "",
+                      ).toLowerCase() === "processing" &&
                         styles.transactionAmountProcessing,
-                      (
-                        transaction.jehuca_order_status || transaction.status
-                      )?.toLowerCase() === "pending" &&
+                      String(
+                        transaction.jehuca_order_status ||
+                          transaction.status ||
+                          "",
+                      ).toLowerCase() === "pending" &&
                         styles.transactionAmountPending,
                     ]}
                   >
