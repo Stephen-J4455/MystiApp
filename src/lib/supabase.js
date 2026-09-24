@@ -38,14 +38,17 @@ const _originalFunctionsInvoke = supabase.functions.invoke.bind(
 );
 
 supabase.functions.invoke = async (name, options = {}) => {
+  const resolvedName = getEdgeFunctionName(name);
   const method = options.body ? "POST" : "GET";
-  console.log(`[Edge] → ${name} (${method})`);
+  console.log(`[Edge] → ${resolvedName} (${method})`);
   try {
-    const result = await _originalFunctionsInvoke(name, options);
+    const result = await _originalFunctionsInvoke(resolvedName, options);
     if (result.error) {
-      console.error(`[Edge] ✗ ${name} → error: ${result.error.message}`);
+      console.error(
+        `[Edge] ✗ ${resolvedName} → error: ${result.error.message}`,
+      );
     } else {
-      console.log(`[Edge] ✓ ${name} → ${result.data ? "ok" : "empty"}`);
+      console.log(`[Edge] ✓ ${resolvedName} → ${result.data ? "ok" : "empty"}`);
     }
     return result;
   } catch (err) {
@@ -58,8 +61,8 @@ supabase.functions.invoke = async (name, options = {}) => {
         ? ` Response: ${JSON.stringify(errBody).slice(0, 500)}`
         : "";
       console.error(
-        `[Edge] ✗ ${name} → FunctionsHttpError (HTTP ${err.status || "unknown"}): Edge Function returned a non-2xx status code. ` +
-          `Endpoint: ${name}. Check that the edge function is deployed and healthy. ` +
+        `[Edge] ✗ ${resolvedName} → FunctionsHttpError (HTTP ${err.status || "unknown"}): Edge Function returned a non-2xx status code. ` +
+          `Endpoint: ${resolvedName}. Check that the edge function is deployed and healthy. ` +
           `Possible causes: missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY in function secrets, invalid Paystack key, or function runtime error.${errDetail}`,
       );
     } else {

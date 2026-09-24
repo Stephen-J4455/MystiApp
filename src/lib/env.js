@@ -12,8 +12,8 @@ export const getEdgeFunctionName = (name) => {
   const env = (APP_ENV || "development").toLowerCase();
   if (env === "development" || env === "test") {
     const [functionName, ...pathSegments] = String(name).split("/");
-    const suffixedName = `${functionName}-test`;
-    return [suffixedName, ...pathSegments].join("/");
+    if (functionName.endsWith("-test")) return name;
+    return [`${functionName}-test`, ...pathSegments].join("/");
   }
   return name;
 };
