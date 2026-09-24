@@ -71,6 +71,11 @@ Deno.serve(async (req) => {
     const {
       reference,
       offer_id,
+      wallet_order,
+      package_name,
+      package_size,
+      provider_type,
+      provider_size,
       recipient_phone,
       amount,
       base_price,
@@ -89,6 +94,155 @@ Deno.serve(async (req) => {
       network,
       super_agent_id,
     });
+
+    if (wallet_order) {
+      const role = String(
+        user.user_metadata?.role || user.app_metadata?.role || "",
+      ).toLowerCase();
+      const isSuperAgent = role === "superagent" || role === "super_agent";
+      const walletAmount = Number(amount);
+
+      if (!isSuperAgent) {
+        return new Response(
+          JSON.stringify({ error: "Super Agent role required" }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (
+        !reference ||
+        !offer_id ||
+        !Number.isFinite(walletAmount) ||
+        walletAmount <= 0
+      ) {
+        return new Response(
+          JSON.stringify({ error: "Missing or invalid wallet order fields" }),
+          {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const normalizedSize = String(package_size || "").trim();
+      const orderNetwork = String(network || "Unknown").toUpperCase();
+      const orderTitle = normalizedSize
+        ? `${orderNetwork} - ${normalizedSize} Data Bundle`
+        : package_name || `${orderNetwork} Data Bundle`;
+      const recipientPhone =
+        recipient_phone || user.user_metadata?.phone || null;
+      const orderData = {
+        user_id: user.id,
+        user_name:
+          user.user_metadata?.full_name ||
+          user.email?.split("@")[0] ||
+          "Unknown",
+        user_email: user.email,
+        phone: recipientPhone,
+        offer_title: orderTitle,
+        amount: walletAmount,
+        network: orderNetwork,
+        status: "pending",
+        payment_reference: reference,
+        is_self: recipientPhone === (user.user_metadata?.phone || ""),
+        data_amount: orderTitle,
+        offer_id: null,
+        device_token: null,
+        country_code: "GH",
+      };
+
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from("orders")
+        .insert(orderData)
+        .select()
+        .single();
+      if (orderError) {
+        console.error("Wallet order creation failed:", orderError);
+        return new Response(
+          JSON.stringify({
+            error: "Failed to create wallet order",
+            details: orderError,
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const { data: debitResult, error: debitError } = await supabaseAdmin.rpc(
+        "debit_super_agent_wallet",
+        {
+          p_super_agent_id: user.id,
+          p_amount: walletAmount,
+          p_reference: `wallet-order-${reference}`,
+          p_order_id: order.id,
+          p_reason: "super_agent_package_purchase",
+        },
+      );
+      if (debitError || !debitResult?.success) {
+        await supabaseAdmin
+          .from("orders")
+          .update({ status: "held" })
+          .eq("id", order.id);
+        return new Response(
+          JSON.stringify({
+            success: true,
+            held: true,
+            reason: debitResult?.reason || "wallet_debit_failed",
+            balance: debitResult?.balance,
+            required: debitResult?.required || walletAmount,
+            order,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      const { error: transactionError } = await supabaseAdmin
+        .from("payment_transactions")
+        .insert({
+          user_id: user.id,
+          order_id: order.id,
+          order_type: "regular",
+          payment_reference: reference,
+          gross_amount: walletAmount,
+          base_amount: Number(base_price || walletAmount),
+          transaction_fee: Number(transaction_fee || 0),
+          main_account_amount: walletAmount,
+          settlement_status: "settled",
+          status: "success",
+          network: orderNetwork,
+          offer_title: orderTitle,
+          recipient_phone: recipientPhone,
+        });
+      if (transactionError) {
+        console.error(
+          "Wallet transaction ledger insert failed:",
+          transactionError,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "Wallet debited but ledger creation failed",
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          held: false,
+          order,
+          wallet: debitResult,
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     if (!reference || !offer_id) {
       console.error("Missing required fields:", { reference, offer_id });
@@ -237,7 +391,21 @@ Deno.serve(async (req) => {
       );
     }
     const orderNetwork = offer?.network || network || "Unknown";
-    const orderTitle = offer?.title || `${orderNetwork} Data Bundle`;
+    const normalizedPackageSize = String(package_size || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    const orderTitle =
+      offer?.title ||
+      (normalizedPackageSize
+        ? `${orderNetwork} - ${normalizedPackageSize} Data Bundle`
+        : package_name || `${orderNetwork} Data Bundle`);
+    const localOfferId = offer?.id ? Number(offer.id) : null;
+
+    console.log("Resolved local offer reference:", {
+      requestedOfferId: offer_id,
+      localOfferId,
+      hasLocalOffer: Boolean(offer),
+    });
 
     const userRole = String(
       user.user_metadata?.role || user.app_metadata?.role || "",
@@ -281,6 +449,28 @@ Deno.serve(async (req) => {
       resolvedSubaccountCode ||
       null;
 
+    if (isSubAgentOrder && !paystackSubaccountCode) {
+      return new Response(
+        JSON.stringify({
+          error: "Super Agent Paystack subaccount is not available",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    const { data: chargeSettings } = await supabaseAdmin
+      .from("payment_charge_settings")
+      .select("super_agent_percent")
+      .order("updated_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const superAgentChargePercent = Number(
+      chargeSettings?.super_agent_percent ?? 1.95,
+    );
+
     const settlement = (() => {
       const gross = Number(orderAmount || 0);
       const requestedBase = Number(base_price);
@@ -296,14 +486,17 @@ Deno.serve(async (req) => {
         Math.abs(
           requestedBase + requestedTierExtra + requestedTransactionFee - gross,
         ) <= 0.01 &&
-        Math.abs(requestedTransactionFee - requestedBase * 0.02) <= 0.01;
+        Math.abs(
+          requestedTransactionFee -
+            requestedBase * (superAgentChargePercent / 100),
+        ) <= 0.01;
 
       if (hasPaymentSplit) {
         return {
-          adminShare: Number(
-            (requestedBase + requestedTransactionFee).toFixed(2),
+          adminShare: Number(requestedTransactionFee.toFixed(2)),
+          superAgentShare: Number(
+            (requestedBase + requestedTierExtra).toFixed(2),
           ),
-          superAgentShare: Number(requestedTierExtra.toFixed(2)),
           agentNet: 0,
           baseAmount: Number(requestedBase.toFixed(2)),
           agentMarkup: Number(requestedTierExtra.toFixed(2)),
@@ -329,8 +522,62 @@ Deno.serve(async (req) => {
       };
     })();
 
+    const requestedBase = Number(base_price);
+    const requestedTierExtra = Number(tier_extra);
+    const requestedTransactionFee = Number(transaction_fee);
+    const hasConfiguredSubAgentSplit =
+      Boolean(resolvedSuperAgentId) &&
+      Number.isFinite(requestedBase) &&
+      Number.isFinite(requestedTierExtra) &&
+      Number.isFinite(requestedTransactionFee) &&
+      requestedBase >= 0 &&
+      requestedTierExtra >= 0 &&
+      requestedTransactionFee >= 0 &&
+      Math.abs(
+        requestedBase +
+          requestedTierExtra +
+          requestedTransactionFee -
+          orderAmount,
+      ) <= 0.01 &&
+      Math.abs(
+        requestedTransactionFee -
+          requestedBase * (superAgentChargePercent / 100),
+      ) <= 0.01;
+
+    if (isSubAgentOrder && !hasConfiguredSubAgentSplit) {
+      return new Response(
+        JSON.stringify({
+          error: "Invalid sub-agent settlement breakdown",
+          details: {
+            base_price,
+            tier_extra,
+            transaction_fee,
+            amount: orderAmount,
+            super_agent_charge_percent: superAgentChargePercent,
+          },
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
     const isAgentOrder = Boolean(
       resolvedSuperAgentId || user.user_metadata?.role === "Agent",
+    );
+    const rawProviderType = String(
+      provider_type || offer?.type || "",
+    ).toUpperCase();
+    const normalizedProviderType = rawProviderType.includes("BIG TIME")
+      ? "BIG TIME"
+      : rawProviderType.includes("ISHARE")
+        ? "ISHARE"
+        : rawProviderType.split(/[(-]/)[0].trim();
+    const normalizedProviderSize = Number(
+      provider_size ||
+        normalizedPackageSize.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] ||
+        0,
     );
 
     const sharedOrderFields = {
@@ -353,7 +600,10 @@ Deno.serve(async (req) => {
       // and super-agent chain survive the order lifecycle.
       const agentOrderData = {
         agent_id: user.id,
-        offer_id: parseInt(offer_id),
+        offer_id: localOfferId,
+        provider_package_id: String(offer_id),
+        provider_type: normalizedProviderType,
+        provider_size: normalizedProviderSize,
         offer_title: orderTitle,
         network: orderNetwork,
         amount: orderAmount,
@@ -410,7 +660,10 @@ Deno.serve(async (req) => {
         payment_reference: reference,
         is_self: isSelfPurchase,
         data_amount: orderTitle,
-        offer_id: parseInt(offer_id),
+        // Normal-user package IDs come from Jehuca, not public.offers.
+        // Keep this nullable unless a matching local offer was found so the
+        // orders foreign key is not given an unrelated provider package ID.
+        offer_id: localOfferId,
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
         paystack_transaction_status:
           sharedOrderFields.paystack_transaction_status,

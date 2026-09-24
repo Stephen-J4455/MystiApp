@@ -91,7 +91,7 @@ if [[ "$ENV_UPPER" == "TEST" ]]; then
 fi
 
 if [[ "${SKIP_FUNCTIONS:-0}" != "1" ]]; then
-  for fn in health paystack-subaccount send-notification super-agent-offers super-agent-tier-management super-agent-user-management verify-payment verify-wallet-topup get-packages make-orders get-orders check-balance get-order-status; do
+  for fn in health paystack-subaccount send-notification super-agent-offers super-agent-tier-management super-agent-user-management verify-payment reorder-held-agent-order verify-wallet-topup get-packages make-orders get-orders check-balance get-order-status; do
     run_step "Deploying edge function: ${fn}${SUFFIX}" \
       supabase functions deploy "${fn}${SUFFIX}" --project-ref "$PROJECT_ID"
   done

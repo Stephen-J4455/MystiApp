@@ -1,4 +1,10 @@
-﻿import React, { useState, useEffect, useCallback } from "react";
+﻿import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import {
   View,
   Text,
@@ -18,6 +24,11 @@ import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
 import { WebView } from "react-native-webview";
+import { usePaystackPayment } from "../hooks/usePaystackPayment";
+import {
+  fetchPaymentChargeSettings,
+  getTransactionChargeAmount,
+} from "../lib/paymentSettings";
 
 // Escape user-controlled strings before interpolating into inline JS / HTML
 // to prevent injection (e.g. breaking out of a quoted string with a `'`).
@@ -55,7 +66,7 @@ const generatePaystackHTML = (
   const safeSub = subaccountCode ? escapeJs(subaccountCode) : "";
   const paystackSub = safeSub ? ",subaccount:'" + safeSub + "'" : "";
   const jsBody =
-    "document.getElementById('pay-btn').onclick=function(){var o={" +
+    "document.getElementById('pay-btn').onclick=function(){var b=this;b.disabled=true;var started=Date.now();var open=function(){if(!window.PaystackPop){if(Date.now()-started<10000){setTimeout(open,100);return;}window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',message:'Paystack payment service did not load'}));b.disabled=false;return;}var o={" +
     "key:'" +
     paystackKey +
     "'," +
@@ -63,7 +74,7 @@ const generatePaystackHTML = (
     safeEmail +
     "'," +
     "amount:" +
-    amount * 100 +
+    Math.round(amount * 100) +
     "," +
     "currency:'GHS'," +
     "ref:'" +
@@ -72,10 +83,10 @@ const generatePaystackHTML = (
     paystackSub +
     ",callback:function(r){window.ReactNativeWebView.postMessage(JSON.stringify({type:'success',data:r}))}," +
     "onClose:function(){window.ReactNativeWebView.postMessage(JSON.stringify({type:'cancel'}))}};" +
-    "PaystackPop.setup(o).openIframe()}";
+    "try{var handler=PaystackPop.setup(o);handler.openIframe()}catch(e){window.ReactNativeWebView.postMessage(JSON.stringify({type:'error',message:e&&e.message?e.message:'Paystack could not be opened'}));b.disabled=false;}};open();}";
   const safeRecipientLabel = escapeHtml(recipientLabel || "Business");
   return (
-    '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paystack Payment</title><script src="https://js.paystack.co/v1/inline.js"></scr' +
+    '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paystack Payment</title><script src="https://js.paystack.co/v1/inline.js" onerror="window.ReactNativeWebView.postMessage(JSON.stringify({type:\'error\',message:\'Could not load Paystack payment service\'}))"></scr' +
     "ipt>" +
     '<style>:root{--primary:#006769;--secondary:#2B5F1F;--accent:#40A578}body{margin:0;padding:0 20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh}.container{background:#fff;padding:0;width:100%;height:100vh;box-shadow:none;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center}.icon-box{width:70px;height:70px;background-color:#e6f7f7;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}.icon{font-size:32px;color:var(--primary)}.title{font-size:22px;font-weight:800;color:#1A1A1A;margin-bottom:12px}.subtitle{font-size:14px;color:#666;margin-bottom:30px;line-height:1.5}.amt-box{background:#f7f9fa;padding:20px;border-radius:16px;margin-bottom:35px;border:1px solid #eee}.amt-label{font-size:13px;font-weight:600;color:var(--primary);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}.amt-val{font-size:32px;font-weight:900;color:#1A1A1A}.pay-btn{width:100%;padding:18px;background:linear-gradient(to right,var(--primary),var(--accent));color:#fff;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer}.cancel-btn{margin-top:20px;padding:10px 20px;color:#888;background:none;border:none;font-size:14px;font-weight:600;cursor:pointer}.secure-note{margin-top:30px;font-size:11px;color:#aaa}</style>' +
     '</head><body><div class="container"><div class="icon-box"><span class="icon">&#x1F4BC;</span></div><h2 class="title">Wallet Top-up</h2><p class="subtitle">Complete your wallet top-up.</p><div class="amt-box"><div class="amt-label">Top-up Amount</div><div class="amt-val">GHS ' +
@@ -110,11 +121,41 @@ export default function WalletTopUpScreen({ navigation }) {
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [subaccountCode, setSubaccountCode] = useState(null);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
+  const paymentCompletedRef = useRef(false);
+  const [webPaymentRequested, setWebPaymentRequested] = useState(false);
   const [paystackPublicKey, setPaystackPublicKey] = useState("");
   const [paystackKeyError, setPaystackKeyError] = useState(false);
+  const [paymentChargeSettings, setPaymentChargeSettings] = useState({
+    normalUserPercent: 1.95,
+    superAgentPercent: 1.95,
+    walletTopUpPercent: 1.95,
+  });
+  const [grossTopUpAmount, setGrossTopUpAmount] = useState(0);
   const predefinedAmounts = [50, 100, 200, 500, 1000];
   const MIN_AMOUNT = 5;
   const MAX_AMOUNT = 5000;
+
+  useEffect(() => {
+    let active = true;
+
+    const loadSettings = async () => {
+      try {
+        const settings = await fetchPaymentChargeSettings();
+        if (!active) return;
+        setPaymentChargeSettings(settings);
+      } catch (error) {
+        console.warn(
+          "Failed to load payment charge settings for wallet top-up:",
+          error,
+        );
+      }
+    };
+
+    loadSettings();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -146,13 +187,16 @@ export default function WalletTopUpScreen({ navigation }) {
   const handlePaymentSuccess = useCallback(
     async (response) => {
       console.log("Wallet topup payment successful:", response);
+      paymentCompletedRef.current = true;
       setPaystackModalVisible(false);
       setPaymentCompleted(true);
+      const paidReference =
+        response?.reference || response?.trxref || currentReference;
       try {
         const { data: result, error } = await supabase.functions.invoke(
           getEdgeFunctionName("verify-wallet-topup"),
           {
-            body: { reference: currentReference, amount: parseFloat(amount) },
+            body: { reference: paidReference },
           },
         );
         if (error) {
@@ -198,11 +242,57 @@ export default function WalletTopUpScreen({ navigation }) {
     console.log("Wallet topup payment cancelled");
     setPaystackModalVisible(false);
     // Only notify if the user actually cancelled (not after a successful payment).
-    if (!paymentCompleted) {
+    if (!paymentCompletedRef.current) {
       showError("Payment Cancelled", "Top-up was not completed");
     }
+    paymentCompletedRef.current = false;
     setPaymentCompleted(false);
-  }, [paymentCompleted, showError]);
+  }, [showError]);
+
+  const webPaystackConfig = useMemo(() => {
+    if (Platform.OS !== "web" || !currentReference || !userEmail) {
+      return null;
+    }
+    return {
+      publicKey: paystackPublicKey,
+      email: userEmail,
+      amount: Math.round(grossTopUpAmount * 100),
+      currency: "GHS",
+      reference: currentReference,
+      subaccount: subaccountCode || null,
+      onSuccess: handlePaymentSuccess,
+      onClose: handlePaymentClose,
+    };
+  }, [
+    currentReference,
+    userEmail,
+    grossTopUpAmount,
+    paystackPublicKey,
+    subaccountCode,
+    handlePaymentSuccess,
+    handlePaymentClose,
+  ]);
+
+  const { initializePayment } = usePaystackPayment(webPaystackConfig);
+
+  useEffect(() => {
+    if (
+      Platform.OS !== "web" ||
+      !webPaymentRequested ||
+      !webPaystackConfig ||
+      !paystackPublicKey
+    ) {
+      return;
+    }
+
+    setWebPaymentRequested(false);
+    initializePayment();
+  }, [
+    webPaymentRequested,
+    webPaystackConfig,
+    paystackPublicKey,
+    initializePayment,
+  ]);
 
   const fetchUserData = useCallback(async () => {
     try {
@@ -347,8 +437,12 @@ export default function WalletTopUpScreen({ navigation }) {
         return;
       }
 
-      // Generate a unique reference client-side and insert a pending
-      // wallet_topups row. verify-wallet-topup looks up by this reference.
+      const chargeFee = getTransactionChargeAmount(
+        numericAmount,
+        paymentChargeSettings.walletTopUpPercent,
+      );
+      const grossAmount = Number((numericAmount + chargeFee).toFixed(2));
+
       const reference = `wt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
       const { error: insertError } = await supabase
@@ -368,8 +462,14 @@ export default function WalletTopUpScreen({ navigation }) {
       }
 
       setCurrentReference(reference);
+      setGrossTopUpAmount(grossAmount);
+      paymentCompletedRef.current = false;
       setPaymentCompleted(false);
-      setPaystackModalVisible(true);
+      if (Platform.OS === "web") {
+        setWebPaymentRequested(true);
+      } else {
+        setPaystackModalVisible(true);
+      }
     } catch (error) {
       console.error("Top-up error:", error);
       showError("Error", "Please try again");
@@ -482,52 +582,50 @@ export default function WalletTopUpScreen({ navigation }) {
             </TouchableOpacity>
           </ScrollView>
         </KeyboardAvoidingView>
-        <Modal
-          visible={paystackModalVisible}
-          transparent
-          animationType="slide"
-          onRequestClose={handlePaymentClose}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Complete Payment</Text>
-                <TouchableOpacity
-                  onPress={handlePaymentClose}
-                  style={styles.closeButton}
-                >
-                  <Ionicons
-                    name="close"
-                    size={24}
-                    color={colors.textSecondary}
-                  />
-                </TouchableOpacity>
-              </View>
-              <View style={styles.webviewContainer}>
-                {paystackKeyError && (
-                  <View style={styles.webviewError}>
+        {Platform.OS !== "web" && (
+          <Modal
+            visible={paystackModalVisible}
+            transparent
+            animationType="slide"
+            onRequestClose={handlePaymentClose}
+          >
+            <View style={styles.modalOverlay}>
+              <View style={styles.modalContent}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Complete Payment</Text>
+                  <TouchableOpacity
+                    onPress={handlePaymentClose}
+                    style={styles.closeButton}
+                  >
                     <Ionicons
-                      name="alert-circle-outline"
-                      size={48}
-                      color={colors.danger}
+                      name="close"
+                      size={24}
+                      color={colors.textSecondary}
                     />
-                    <Text style={styles.webviewErrorText}>
-                      Payment configuration not available
-                    </Text>
-                    <Text style={styles.webviewErrorSubtext}>
-                      Paystack public key could not be loaded. Ensure Paystack
-                      secrets are configured on the server.
-                    </Text>
-                  </View>
-                )}
-                {currentReference &&
-                  userEmail &&
-                  amount &&
-                  paystackPublicKey && (
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.webviewContainer}>
+                  {paystackKeyError && (
+                    <View style={styles.webviewError}>
+                      <Ionicons
+                        name="alert-circle-outline"
+                        size={48}
+                        color={colors.danger}
+                      />
+                      <Text style={styles.webviewErrorText}>
+                        Payment configuration not available
+                      </Text>
+                      <Text style={styles.webviewErrorSubtext}>
+                        Paystack public key could not be loaded. Ensure Paystack
+                        secrets are configured on the server.
+                      </Text>
+                    </View>
+                  )}
+                  {currentReference && userEmail && amount && (
                     <WebView
                       source={{
                         html: generatePaystackHTML(
-                          parseFloat(amount),
+                          grossTopUpAmount || parseFloat(amount),
                           userEmail,
                           currentReference,
                           subaccountCode,
@@ -545,14 +643,28 @@ export default function WalletTopUpScreen({ navigation }) {
                       }}
                       javaScriptEnabled
                       domStorageEnabled
+                      userAgent="Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.106 Mobile Safari/537.36"
+                      scalesPageToFit
+                      thirdPartyCookiesEnabled
+                      sharedCookiesEnabled
+                      mixedContentMode="always"
+                      setSupportMultipleWindows={false}
                       startInLoadingState
-                      originWhitelist={["https://*"]}
+                      originWhitelist={["*"]}
                       onMessage={(event) => {
                         try {
                           const m = JSON.parse(event.nativeEvent.data);
                           if (m.type === "success")
                             handlePaymentSuccess(m.data);
                           else if (m.type === "cancel") handlePaymentClose();
+                          else if (m.type === "error") {
+                            console.error("Paystack WebView error:", m.message);
+                            showError(
+                              "Payment Error",
+                              m.message ||
+                                "Could not initialize Paystack payment.",
+                            );
+                          }
                         } catch (e) {
                           console.error("Webview msg err:", e);
                         }
@@ -592,10 +704,11 @@ export default function WalletTopUpScreen({ navigation }) {
                       style={styles.webview}
                     />
                   )}
+                </View>
               </View>
             </View>
-          </View>
-        </Modal>
+          </Modal>
+        )}
       </SafeAreaView>
     </View>
   );

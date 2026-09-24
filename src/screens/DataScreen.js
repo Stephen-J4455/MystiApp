@@ -35,6 +35,10 @@ import {
   formatBundleSizeFromDescriptor,
   fetchCatalogPackages,
 } from "../services/superAgentService";
+import {
+  fetchPaymentChargeSettings,
+  getTransactionChargeAmount,
+} from "../lib/paymentSettings";
 
 export default function DataScreen({ navigation, route }) {
   const { network } = route.params;
@@ -50,26 +54,56 @@ export default function DataScreen({ navigation, route }) {
   const [userPhone, setUserPhone] = useState("");
   const [purchaseType, setPurchaseType] = useState("self"); // 'self' or 'others'
   const [isAgent, setIsAgent] = useState(false);
+  const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [resolvedSubaccountCode, setResolvedSubaccountCode] = useState(null);
   const [superAgentId, setSuperAgentId] = useState(null);
   const [agentChecked, setAgentChecked] = useState(false);
   const [agentBalance, setAgentBalance] = useState(0);
   const [agentTier, setAgentTier] = useState(null);
+  const [paymentChargeSettings, setPaymentChargeSettings] = useState({
+    normalUserPercent: 1.95,
+    superAgentPercent: 1.95,
+    walletTopUpPercent: 1.95,
+  });
   const { showError, showSuccess } = useNotification();
   const bundleSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
+  useEffect(() => {
+    let active = true;
+
+    const loadSettings = async () => {
+      try {
+        const settings = await fetchPaymentChargeSettings();
+        if (!active) return;
+        setPaymentChargeSettings(settings);
+      } catch (error) {
+        console.warn(
+          "Failed to load payment charge settings, using defaults:",
+          error,
+        );
+      }
+    };
+
+    loadSettings();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const getAgentPaymentBreakdown = useCallback(() => {
-    if (
-      !selectedBundle ||
-      !resolvedSubaccountCode ||
-      !selectedBundle.base_price
-    ) {
+    if (!selectedBundle || !selectedBundle.base_price) {
       return null;
     }
 
     const baseAmount = Number(selectedBundle.base_price || 0);
     const agentMarkup = Number(selectedBundle.tier_extra || 0);
-    const transactionFee = Number((baseAmount * 0.02).toFixed(2));
+    const chargePercent = superAgentId
+      ? paymentChargeSettings.superAgentPercent
+      : paymentChargeSettings.normalUserPercent;
+    const transactionFee = getTransactionChargeAmount(
+      baseAmount,
+      chargePercent,
+    );
 
     return {
       baseAmount,
@@ -78,12 +112,13 @@ export default function DataScreen({ navigation, route }) {
       grossAmount: Number(
         (baseAmount + agentMarkup + transactionFee).toFixed(2),
       ),
-      mainAccountAmount: Number((baseAmount + transactionFee).toFixed(2)),
+      mainAccountAmount: transactionFee,
     };
-  }, [selectedBundle, resolvedSubaccountCode]);
+  }, [selectedBundle, superAgentId, paymentChargeSettings]);
 
   const dispatchProviderOrder = useCallback(
     async (bundle, phone) => {
+      const functionName = getEdgeFunctionName("make-orders");
       const rawSize = Number(
         bundle.size || String(bundle.dataSize || "").match(/[\d.]+/)?.[0] || 0,
       );
@@ -101,13 +136,13 @@ export default function DataScreen({ navigation, route }) {
         phone: String(phone || "").replace(/\s+/g, ""),
       };
 
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("make-orders"),
-        { body: { packages: [packageRequest] } },
-      );
+      console.log("[Purchase] Calling edge function:", functionName);
+      const { data, error } = await supabase.functions.invoke(functionName, {
+        body: { packages: [packageRequest] },
+      });
 
       const debugPayload = {
-        function: getEdgeFunctionName("make-orders"),
+        function: functionName,
         request: { packages: [packageRequest] },
         response: data || null,
         error: error?.message || null,
@@ -143,34 +178,46 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
 
-        const { data, error } = await supabase.functions.invoke(
-          getEdgeFunctionName("verify-payment"),
-          {
-            body: {
-              reference: response.reference,
-              user_id: user.id,
-              offer_id: selectedBundle.id,
-              amount:
-                getAgentPaymentBreakdown()?.grossAmount ||
-                parseFloat(selectedBundle.price.replace("Ghc ", "")),
-              network: network,
-              recipient_phone: isAgent
-                ? recipientPhone.trim().replace(/\s+/g, "")
-                : purchaseType === "self"
-                  ? userPhone
-                  : recipientPhone.trim().replace(/\s+/g, ""),
-              recipient_name: isAgent ? recipientName.trim() : null,
-              super_agent_id: superAgentId,
-              paystack_subaccount_code: resolvedSubaccountCode,
-              base_price: getAgentPaymentBreakdown()?.baseAmount || 0,
-              tier_extra: getAgentPaymentBreakdown()?.agentMarkup || 0,
-              transaction_fee: getAgentPaymentBreakdown()?.transactionFee || 0,
-            },
+        const functionName = getEdgeFunctionName("verify-payment");
+        console.log("[Purchase] Calling edge function:", functionName);
+        const { data, error } = await supabase.functions.invoke(functionName, {
+          body: {
+            reference: response.reference,
+            user_id: user.id,
+            offer_id: selectedBundle.id,
+            package_name: selectedBundle.name,
+            package_type: selectedBundle.type || null,
+            package_size: selectedBundle.dataSize || null,
+            provider_type: selectedBundle.type || null,
+            provider_size: Number(
+              String(selectedBundle.dataSize || "").match(/[\d.]+/)?.[0] || 0,
+            ),
+            amount:
+              getAgentPaymentBreakdown()?.grossAmount ||
+              parseFloat(selectedBundle.price.replace("Ghc ", "")),
+            network: network,
+            recipient_phone: isAgent
+              ? recipientPhone.trim().replace(/\s+/g, "")
+              : purchaseType === "self"
+                ? userPhone
+                : recipientPhone.trim().replace(/\s+/g, ""),
+            recipient_name: isAgent ? recipientName.trim() : null,
+            super_agent_id: superAgentId,
+            paystack_subaccount_code: resolvedSubaccountCode,
+            base_price: getAgentPaymentBreakdown()?.baseAmount || 0,
+            tier_extra: getAgentPaymentBreakdown()?.agentMarkup || 0,
+            transaction_fee: getAgentPaymentBreakdown()?.transactionFee || 0,
           },
-        );
+        });
 
         if (error) {
-          console.error("Edge function error:", error);
+          console.error("[Purchase] Edge function failed:", {
+            function: functionName,
+            name: error.name,
+            message: error.message,
+            status: error.status,
+            details: error.context || error.error || null,
+          });
           showError(
             "Payment Verification Failed",
             "Please contact support if payment was deducted",
@@ -302,6 +349,10 @@ export default function DataScreen({ navigation, route }) {
 
     const loadPaystackPublicKey = async () => {
       try {
+        console.log(
+          "[Purchase] Calling edge function:",
+          getEdgeFunctionName("health"),
+        );
         const key = await getPaystackPublicKey();
         if (!active) return;
         if (key) {
@@ -390,7 +441,8 @@ export default function DataScreen({ navigation, route }) {
       Platform.OS !== "web" ||
       !directPaystackRequested ||
       !selectedBundle ||
-      !initializePayment
+      !initializePayment ||
+      !paystackPublicKey
     ) {
       return;
     }
@@ -403,7 +455,13 @@ export default function DataScreen({ navigation, route }) {
         showError("Payment Error", "Failed to open Paystack payment.");
       })
       .finally(() => setPaystackLoading(false));
-  }, [directPaystackRequested, selectedBundle, initializePayment, showError]);
+  }, [
+    directPaystackRequested,
+    selectedBundle,
+    paystackPublicKey,
+    initializePayment,
+    showError,
+  ]);
 
   // Format network name for display (uppercase)
   const displayNetwork = network.toUpperCase();
@@ -456,10 +514,17 @@ export default function DataScreen({ navigation, route }) {
         setSuperAgentId(assignedSuperAgentId);
         setAgentTier(user.user_metadata?.tier_name || null);
 
+        const normalizedRole = String(
+          user.user_metadata?.role || user.app_metadata?.role || "",
+        ).toLowerCase();
+        setIsSuperAgentUser(
+          normalizedRole === "superagent" || normalizedRole === "super_agent",
+        );
         const isUserRoleAgent =
-          String(
-            user.user_metadata?.role || user.app_metadata?.role || "",
-          ).toLowerCase() === "agent" || Boolean(assignedSuperAgentId);
+          normalizedRole === "agent" ||
+          normalizedRole === "superagent" ||
+          normalizedRole === "super_agent" ||
+          Boolean(assignedSuperAgentId);
 
         setIsAgent(isUserRoleAgent);
 
@@ -600,37 +665,95 @@ export default function DataScreen({ navigation, route }) {
 
         // Direct top-level agent without a super agent: load from catalog
         const catalogOffers = await fetchCatalogPackages();
+        const { data: pricingRows, error: pricingError } = await supabase
+          .from("package_pricing")
+          .select("package_id, network, type, size, base_price, is_active")
+          .eq("is_active", true);
+
+        if (pricingError) {
+          console.warn("Could not load admin package pricing:", pricingError);
+        }
+
+        const basePriceByKey = {};
+        const basePriceByPackageId = {};
+        (pricingRows || []).forEach((row) => {
+          const descriptor = String(row.type || "")
+            .trim()
+            .toUpperCase();
+          const key = `${String(row.network || "").toUpperCase()}::${descriptor}`;
+          basePriceByKey[key] = Number(row.base_price || 0);
+          if (row.package_id) {
+            basePriceByPackageId[String(row.package_id)] = Number(
+              row.base_price || 0,
+            );
+          }
+        });
+
         const filteredOffers = (catalogOffers || []).filter(
           (pkg) => pkg.network?.toUpperCase() === network.toUpperCase(),
         );
-        const mappedBundles = filteredOffers.map((pkg) => ({
-          id: pkg.id,
-          network: pkg.network,
-          type: pkg.type,
-          name: `${pkg.network} — ${pkg.type}`,
-          price: `Ghc ${(pkg.price / 100).toFixed(2)}`,
-          dataSize: `${pkg.size} GB`,
-        }));
+        const mappedBundles = filteredOffers.map((pkg) => {
+          const rawType = String(pkg.type || "").trim();
+          const size =
+            pkg.size !== undefined && pkg.size !== null ? `${pkg.size}GB` : "";
+          const descriptor =
+            size && !rawType.toUpperCase().includes(size.toUpperCase())
+              ? `${rawType} - ${size}`.toUpperCase()
+              : (rawType || size).toUpperCase();
+          const key = `${String(pkg.network || "").toUpperCase()}::${descriptor}`;
+          const basePrice =
+            basePriceByPackageId[String(pkg.id)] ?? basePriceByKey[key];
+          const catalogPrice = Number(pkg.price || 0) / 100;
+          const finalPrice = basePrice > 0 ? basePrice : catalogPrice;
+
+          return {
+            id: pkg.id,
+            package_id: pkg.id,
+            network: pkg.network,
+            type: pkg.type,
+            name: `${pkg.network} — ${pkg.type}`,
+            price: `Ghc ${finalPrice.toFixed(2)}`,
+            base_price: finalPrice,
+            dataSize: `${pkg.size} GB`,
+          };
+        });
         setBundles(mappedBundles);
         setLoading(false);
         return;
       }
 
       // Regular customer
-      const offers = await fetchCatalogPackages();
+      const { data: pricingRows, error: pricingError } = await supabase
+        .from("normal_user_package_pricing")
+        .select("package_id, network, type, size, base_price, is_active")
+        .eq("is_active", true);
 
-      const filteredOffers = (offers || []).filter(
-        (pkg) => pkg.network?.toUpperCase() === network.toUpperCase(),
-      );
+      if (pricingError) throw pricingError;
 
-      const mappedBundles = filteredOffers.map((pkg) => ({
-        id: pkg.id,
-        network: pkg.network,
-        type: pkg.type,
-        name: `${pkg.network} — ${pkg.type}`,
-        price: `Ghc ${(pkg.price / 100).toFixed(2)}`,
-        dataSize: `${pkg.size} GB`,
-      }));
+      const mappedBundles = (pricingRows || [])
+        .filter(
+          (row) =>
+            String(row.network || "").toUpperCase() === network.toUpperCase(),
+        )
+        .map((row) => {
+          const descriptor = String(row.type || "").trim();
+          const size = row.size ?? null;
+          const displayName = `${row.network} — ${descriptor}`;
+
+          return {
+            id: row.package_id || `${row.network}-${descriptor}`,
+            package_id: row.package_id || null,
+            network: String(row.network || "").toUpperCase(),
+            type: descriptor,
+            name: displayName,
+            price: `Ghc ${Number(row.base_price || 0).toFixed(2)}`,
+            base_price: Number(row.base_price || 0),
+            dataSize:
+              size !== null
+                ? `${size} GB`
+                : formatBundleSizeFromDescriptor(descriptor),
+          };
+        });
       setBundles(mappedBundles);
     } catch (error) {
       console.error("Error:", error);
@@ -775,6 +898,109 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
+  const handleSuperAgentWalletPurchase = async (bundle, phone) => {
+    const baseAmount = Number(bundle.base_price || 0);
+    const transactionFee = getTransactionChargeAmount(
+      baseAmount,
+      paymentChargeSettings.superAgentPercent,
+    );
+    const grossAmount = Number((baseAmount + transactionFee).toFixed(2));
+    const reference = `wallet_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    const functionName = getEdgeFunctionName("verify-payment");
+
+    try {
+      console.log("[Purchase] Calling wallet edge function:", functionName);
+      const { data, error } = await supabase.functions.invoke(functionName, {
+        body: {
+          wallet_order: true,
+          reference,
+          offer_id: bundle.id,
+          package_name: bundle.name,
+          package_size: bundle.dataSize || null,
+          recipient_phone: phone,
+          amount: grossAmount,
+          network,
+          base_price: baseAmount,
+          transaction_fee: transactionFee,
+        },
+      });
+
+      if (error || !data?.success) {
+        console.error("[Purchase] Wallet edge function failed:", {
+          function: functionName,
+          message: error?.message || data?.error,
+          details: error?.context || data?.details || null,
+        });
+        showError(
+          "Wallet Purchase Failed",
+          data?.reason === "insufficient_balance"
+            ? "Your Super Agent wallet balance is insufficient."
+            : data?.error || "Could not debit the Super Agent wallet.",
+        );
+        return;
+      }
+
+      if (data.held) {
+        showError(
+          "Insufficient Wallet Balance",
+          "Your Super Agent wallet does not have enough balance for this package.",
+        );
+        return;
+      }
+
+      const providerResult = await dispatchProviderOrder(bundle, phone);
+      if (providerResult.error || !providerResult.accepted) {
+        showError(
+          "Provider Order Failed",
+          "Wallet debited, but the data provider did not accept the order.",
+        );
+        return;
+      }
+
+      const providerOrderId =
+        providerResult.data?.payload?.orderId ||
+        providerResult.data?.orderId ||
+        providerResult.data?.payload?.orders?.[0]?.id ||
+        null;
+      const providerStatus =
+        providerResult.data?.payload?.orders?.[0]?.status ||
+        providerResult.data?.status ||
+        "accepted";
+      await supabase
+        .from("orders")
+        .update({
+          jehuca_order_id: providerOrderId,
+          jehuca_order_status: providerStatus,
+          jehuca_response: providerResult.data || null,
+        })
+        .eq("id", data.order.id);
+
+      showSuccess(
+        "Purchase Successful!",
+        `${bundle.name} was purchased from your wallet.`,
+      );
+      navigation.navigate("Receipt", {
+        transaction: {
+          id: data.order.id,
+          status: data.order.status,
+          offer_title: data.order.offer_title,
+          network,
+          data_amount: data.order.data_amount,
+          amount: data.order.amount,
+          created_at: data.order.created_at,
+          payment_reference: data.order.payment_reference,
+          user_email: userEmail,
+          phone,
+          country_code: "GH",
+          orderType: "user",
+        },
+      });
+    } catch (error) {
+      console.error("[Purchase] Wallet purchase error:", error);
+      showError("Wallet Purchase Failed", "Please try again.");
+    }
+  };
+
   const continueAgentPurchase = async () => {
     if (!recipientName.trim()) {
       showError("Recipient Name Required", "Please enter the recipient's name");
@@ -800,6 +1026,11 @@ export default function DataScreen({ navigation, route }) {
     }
 
     setRecipientModalVisible(false);
+    if (isSuperAgentUser) {
+      await handleSuperAgentWalletPurchase(selectedBundle, cleanPhone);
+      return;
+    }
+
     if (Platform.OS === "web") {
       setDirectPaystackRequested(true);
       return;
@@ -1592,13 +1823,27 @@ export default function DataScreen({ navigation, route }) {
                     }
 
                     // Call Supabase edge function to verify payment and create order
+                    const functionName = getEdgeFunctionName("verify-payment");
+                    console.log(
+                      "[Purchase] Calling edge function:",
+                      functionName,
+                    );
                     const { data, error } = await supabase.functions.invoke(
-                      getEdgeFunctionName("verify-payment"),
+                      functionName,
                       {
                         body: {
                           reference: message.data.reference,
                           user_id: user.id,
                           offer_id: selectedBundle.id,
+                          package_name: selectedBundle.name,
+                          package_type: selectedBundle.type || null,
+                          package_size: selectedBundle.dataSize || null,
+                          provider_type: selectedBundle.type || null,
+                          provider_size: Number(
+                            String(selectedBundle.dataSize || "").match(
+                              /[\d.]+/,
+                            )?.[0] || 0,
+                          ),
                           amount:
                             getAgentPaymentBreakdown()?.grossAmount ||
                             parseFloat(
@@ -1622,7 +1867,13 @@ export default function DataScreen({ navigation, route }) {
                     );
 
                     if (error) {
-                      console.error("Edge function error:", error);
+                      console.error("[Purchase] Edge function failed:", {
+                        function: functionName,
+                        name: error.name,
+                        message: error.message,
+                        status: error.status,
+                        details: error.context || error.error || null,
+                      });
                       showError(
                         "Payment Verification Failed",
                         "Please contact support if payment was deducted",

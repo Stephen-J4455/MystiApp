@@ -13,6 +13,7 @@ import { supabase } from "../lib/supabase";
 import colors from "../components/theme";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
+import { useNotification } from "../contexts/NotificationContext";
 
 const refreshProviderStatuses = async (orders) => {
   const results = await Promise.all(
@@ -81,6 +82,9 @@ export default function HistoryScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [isAgent, setIsAgent] = useState(false);
+  const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
+  const [reorderingId, setReorderingId] = useState(null);
+  const { showError, showSuccess } = useNotification();
   const skeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
   useEffect(() => {
@@ -116,77 +120,54 @@ export default function HistoryScreen({ navigation }) {
 
   // Real-time updates for orders
   useEffect(() => {
-    let ordersSubscription = null;
-    let agentOrdersSubscription = null;
+    let historyChannel = null;
 
     const setupRealtimeSubscriptions = async () => {
       try {
         const {
           data: { user },
         } = await supabase.auth.getUser();
-        if (user) {
-          // Subscribe to regular orders
-          ordersSubscription = supabase
-            .channel("history_orders_realtime")
-            .on(
-              "postgres_changes",
-              {
-                event: "*",
-                schema: "public",
-                table: "orders",
-                filter: `user_id=eq.${user.id}`,
-              },
-              (payload) => {
-                console.log("Order updated:", payload);
-                // Refresh transactions when order status changes
-                checkAgentStatus(true);
-              },
-            )
-            .subscribe();
+        if (!user) return;
 
-          // Subscribe to agent orders if user is agent
-          const { data: wallet } = await supabase
-            .from("agent_wallet")
-            .select("*")
-            .eq("agent_id", user.id)
-            .single();
+        const isAssignedSuperAgent = isSuperAgent(user);
 
-          if (wallet) {
-            agentOrdersSubscription = supabase
-              .channel("history_agent_orders_realtime")
-              .on(
-                "postgres_changes",
-                {
-                  event: "*",
-                  schema: "public",
-                  table: "agent_orders",
-                  filter: `agent_id=eq.${user.id}`,
-                },
-                (payload) => {
-                  console.log("Agent order updated:", payload);
-                  // Refresh transactions when agent order status changes
-                  checkAgentStatus(true);
-                },
-              )
-              .subscribe();
-          }
+        historyChannel = supabase
+          .channel("history_orders_realtime")
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "orders",
+              filter: `user_id=eq.${user.id}`,
+            },
+            () => checkAgentStatus(true),
+          )
+          .on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "agent_orders",
+              filter: `agent_id=eq.${user.id}`,
+            },
+            () => checkAgentStatus(true),
+          );
 
-          if (isSuperAgent(user)) {
-            agentOrdersSubscription = supabase
-              .channel("history_super_agent_orders_realtime")
-              .on(
-                "postgres_changes",
-                {
-                  event: "*",
-                  schema: "public",
-                  table: "agent_orders",
-                  filter: `super_agent_id=eq.${user.id}`,
-                },
-                () => checkAgentStatus(true),
-              )
-              .subscribe();
-          }
+        if (isAssignedSuperAgent) {
+          historyChannel.on(
+            "postgres_changes",
+            {
+              event: "*",
+              schema: "public",
+              table: "agent_orders",
+              filter: `super_agent_id=eq.${user.id}`,
+            },
+            () => checkAgentStatus(true),
+          );
         }
+
+        historyChannel.subscribe();
       } catch (error) {
         console.error("Error setting up orders realtime subscriptions:", error);
       }
@@ -195,12 +176,7 @@ export default function HistoryScreen({ navigation }) {
     setupRealtimeSubscriptions();
 
     return () => {
-      if (ordersSubscription) {
-        supabase.removeChannel(ordersSubscription);
-      }
-      if (agentOrdersSubscription) {
-        supabase.removeChannel(agentOrdersSubscription);
-      }
+      if (historyChannel) supabase.removeChannel(historyChannel);
     };
   }, []);
 
@@ -210,6 +186,7 @@ export default function HistoryScreen({ navigation }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user) {
+        setIsSuperAgentUser(isSuperAgent(user));
         const { data: wallet, error } = await supabase
           .from("agent_wallet")
           .select("*")
@@ -301,13 +278,24 @@ export default function HistoryScreen({ navigation }) {
           } else {
             const refreshedAssignedOrders =
               await refreshProviderStatuses(assignedOrders);
-            const { data: subAgentData, error: subAgentError } =
-              await supabase.functions.invoke(
-                getEdgeFunctionName("super-agent-user-management"),
-                {
-                  body: { action: "listUsers", superAgentId: user.id },
-                },
+            const subAgentFunctionName = getEdgeFunctionName(
+              "super-agent-user-management",
+            );
+            let subAgentResult = await supabase.functions.invoke(
+              subAgentFunctionName,
+              { body: { action: "listUsers", superAgentId: user.id } },
+            );
+            if (
+              subAgentResult.error &&
+              subAgentFunctionName !== "super-agent-user-management"
+            ) {
+              subAgentResult = await supabase.functions.invoke(
+                "super-agent-user-management",
+                { body: { action: "listUsers", superAgentId: user.id } },
               );
+            }
+            const subAgentData = subAgentResult.data;
+            const subAgentError = subAgentResult.error;
             if (subAgentError) {
               console.error("Error fetching sub-agent names:", subAgentError);
             }
@@ -349,6 +337,40 @@ export default function HistoryScreen({ navigation }) {
 
   const onRefresh = () => {
     checkAgentStatus(true);
+  };
+
+  const reorderHeldOrder = async (order) => {
+    setReorderingId(order.id);
+    try {
+      const reorderFunctionName = getEdgeFunctionName(
+        "reorder-held-agent-order",
+      );
+      let reorderResult = await supabase.functions.invoke(reorderFunctionName, {
+        body: { order_id: order.id },
+      });
+      if (
+        reorderResult.error &&
+        reorderFunctionName !== "reorder-held-agent-order"
+      ) {
+        reorderResult = await supabase.functions.invoke(
+          "reorder-held-agent-order",
+          { body: { order_id: order.id } },
+        );
+      }
+      const { data, error } = reorderResult;
+      if (error || !data?.success) {
+        throw new Error(
+          data?.error || error?.message || "Could not reorder held order",
+        );
+      }
+      showSuccess("Order Reordered", "The package was sent to Jehucal.");
+      await checkAgentStatus(true);
+    } catch (error) {
+      console.error("Held order reorder failed:", error);
+      showError("Reorder Failed", error.message || "Could not reorder order.");
+    } finally {
+      setReorderingId(null);
+    }
   };
 
   const getStatusColor = (status) => {
@@ -532,6 +554,22 @@ export default function HistoryScreen({ navigation }) {
                       )}
                     </Text>
                   </View>
+                  {isSuperAgentUser &&
+                    transaction.isSubAgentTransaction &&
+                    String(transaction.status).toLowerCase() === "held" && (
+                      <TouchableOpacity
+                        style={styles.reorderButton}
+                        onPress={() => reorderHeldOrder(transaction)}
+                        disabled={reorderingId === transaction.id}
+                      >
+                        <Ionicons name="refresh" size={14} color="#fff" />
+                        <Text style={styles.reorderButtonText}>
+                          {reorderingId === transaction.id
+                            ? "Retrying..."
+                            : "Reorder"}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                 </View>
               </TouchableOpacity>
             ))}

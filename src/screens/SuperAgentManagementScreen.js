@@ -144,6 +144,14 @@ export default function SuperAgentManagementScreen({ navigation }) {
 
         <TouchableOpacity
           style={styles.actionButton}
+          onPress={() => navigation.navigate("SuperAgentHeldOrders")}
+        >
+          <Ionicons name="refresh-circle" size={20} color="#fff" />
+          <Text style={styles.actionText}>Held Agent Orders</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.actionButton}
           onPress={() => navigation.navigate("SuperAgentTopUpHistory")}
         >
           <Ionicons name="wallet" size={20} color="#fff" />

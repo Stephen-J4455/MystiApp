@@ -1,7 +1,7 @@
 export const APP_ENV = (
   process.env.EXPO_PUBLIC_APP_ENV ||
   process.env.APP_ENV ||
-  "development"
+  "production"
 ).toLowerCase();
 export const SUPABASE_URL = "https://sffgznknlmqxtikkyhwu.supabase.co";
 export const SUPABASE_ANON_KEY =

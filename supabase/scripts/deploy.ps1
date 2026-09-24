@@ -105,6 +105,7 @@ try {
             "super-agent-tier-management${suffix}",
             "super-agent-user-management${suffix}",
             "verify-payment${suffix}",
+            "reorder-held-agent-order${suffix}",
             "verify-wallet-topup${suffix}",
             "get-packages${suffix}",
             "make-orders${suffix}",
