@@ -1,158 +1,120 @@
 import { useCallback, useEffect, useState } from "react";
 import { Platform } from "react-native";
 
+const PAYSTACK_SCRIPT_URL = "https://js.paystack.co/v1/inline.js";
+let paystackLoader;
+
+const loadPaystack = () => {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return Promise.reject(new Error("Web payment is unavailable"));
+  }
+
+  if (window.PaystackPop) return Promise.resolve(window.PaystackPop);
+  if (paystackLoader) return paystackLoader;
+
+  paystackLoader = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(
+      `script[src="${PAYSTACK_SCRIPT_URL}"]`,
+    );
+    const script = existingScript || document.createElement("script");
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+
+    script.addEventListener(
+      "load",
+      () => {
+        if (window.PaystackPop) {
+          finish(resolve, window.PaystackPop);
+        } else {
+          finish(reject, new Error("Paystack loaded without PaystackPop"));
+        }
+      },
+      { once: true },
+    );
+    script.addEventListener(
+      "error",
+      () =>
+        finish(reject, new Error("Unable to load Paystack payment service")),
+      { once: true },
+    );
+
+    if (!existingScript) {
+      script.src = PAYSTACK_SCRIPT_URL;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+  });
+
+  paystackLoader.catch(() => {
+    paystackLoader = undefined;
+  });
+  return paystackLoader;
+};
+
 export const usePaystackPayment = (config) => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Load Paystack script dynamically (only on web)
   useEffect(() => {
     if (Platform.OS !== "web") {
-      // On mobile, we'll use a different approach or WebView
       setIsLoaded(true);
       return;
     }
 
-    if (typeof window === "undefined" || typeof document === "undefined") {
-      console.log("Window or document not available");
-      return;
-    }
-
-    // Check if Paystack is already loaded
-    if (window.PaystackPop) {
-      console.log("Paystack already loaded");
-      setIsLoaded(true);
-      return;
-    }
-
-    console.log("Loading Paystack script...");
+    let active = true;
     setIsLoading(true);
-
-    // Load Paystack script
-    const script = document.createElement("script");
-    script.src = "https://js.paystack.co/v1/inline.js";
-    script.async = true;
-    script.onload = () => {
-      console.log("Paystack script loaded successfully");
-      setIsLoaded(true);
-      setIsLoading(false);
-    };
-    script.onerror = (error) => {
-      console.error("Failed to load Paystack script:", error);
-      setIsLoaded(false);
-      setIsLoading(false);
-    };
-
-    // Add to head
-    document.head.appendChild(script);
-
-    // Fallback timeout
-    const timeout = setTimeout(() => {
-      if (!isLoaded) {
-        console.warn("Paystack script loading timeout");
-        setIsLoading(false);
-      }
-    }, 10000);
+    loadPaystack()
+      .then(() => {
+        if (active) setIsLoaded(true);
+      })
+      .catch((error) => {
+        console.error("Failed to load Paystack script:", error);
+        if (active) setIsLoaded(false);
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
 
     return () => {
-      clearTimeout(timeout);
-      // Cleanup script if component unmounts
-      if (document.head && document.head.contains(script)) {
-        document.head.removeChild(script);
-      }
+      active = false;
     };
   }, []);
 
-  const initializePayment = useCallback(() => {
+  const initializePayment = useCallback(async () => {
     if (!config) {
-      console.error("Paystack config missing");
-      return;
+      throw new Error("Paystack config missing");
+    }
+    if (Platform.OS !== "web") return;
+
+    if (!config.publicKey) {
+      throw new Error("Paystack public key is unavailable");
     }
 
-    if (Platform.OS === "web") {
-      // Web implementation
-      console.log(
-        "Web payment initialization - isLoaded:",
-        isLoaded,
-        "PaystackPop exists:",
-        !!window.PaystackPop,
-      );
+    const paystack = await loadPaystack();
+    const setupOptions = {
+      key: config.publicKey,
+      email: config.email,
+      amount: Number(config.amount),
+      currency: config.currency || "GHS",
+      ref: config.reference,
+      metadata: config.metadata || {},
+      callback: (response) => config.onSuccess?.(response),
+      onClose: () => config.onClose?.(),
+    };
 
-      if (!window.PaystackPop) {
-        console.log("Paystack script still loading, waiting...");
-        const checkLoaded = setInterval(() => {
-          if (window.PaystackPop) {
-            clearInterval(checkLoaded);
-            console.log("Paystack script loaded, proceeding with payment");
-            initializePayment();
-          }
-        }, 100);
-
-        setTimeout(() => {
-          clearInterval(checkLoaded);
-          if (!window.PaystackPop) {
-            console.error("Paystack script loading timeout");
-          }
-        }, 10000);
-        return;
+    if (config.subaccount) {
+      setupOptions.subaccount = config.subaccount;
+      if (config.transactionCharge != null) {
+        setupOptions.transaction_charge = config.transactionCharge;
       }
-
-      try {
-        console.log("Setting up Paystack payment with config:", {
-          key: config.publicKey || "",
-          email: config.email,
-          amount: config.amount,
-          currency: config.currency || "GHS",
-          ref: config.reference,
-          subaccount: config.subaccount || null,
-          transaction_charge: config.transactionCharge || null,
-        });
-
-        const setupOptions = {
-          key: config.publicKey || "",
-          email: config.email,
-          amount: config.amount,
-          currency: config.currency || "GHS",
-          ref:
-            config.reference ||
-            `ref_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          metadata: config.metadata || {},
-          callback: (response) => {
-            console.log("Payment successful:", response);
-            if (config.onSuccess) {
-              config.onSuccess(response);
-            }
-          },
-          onClose: () => {
-            console.log("Payment cancelled");
-            if (config.onClose) {
-              config.onClose();
-            }
-          },
-        };
-
-        // Pass the Paystack subaccount code if provided so funds are routed
-        // to the super agent's settlement account.
-        if (config.subaccount) {
-          setupOptions.subaccount = config.subaccount;
-          if (config.transactionCharge) {
-            setupOptions.transaction_charge = config.transactionCharge;
-          }
-        }
-
-        const handler = window.PaystackPop.setup(setupOptions);
-
-        console.log("Opening Paystack iframe");
-        handler.openIframe();
-      } catch (error) {
-        console.error("Error initializing Paystack payment on web:", error);
-      }
-    } else {
-      // Mobile implementation - for now, just log that mobile payment needs different handling
-      console.log("Mobile Paystack payment - needs WebView implementation");
-      // This would need to be implemented with WebView or a native Paystack SDK
     }
-  }, [isLoaded, config]);
+
+    paystack.setup(setupOptions).openIframe();
+  }, [config]);
 
   return { initializePayment, isLoaded, isLoading };
 };

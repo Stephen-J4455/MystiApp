@@ -5,5 +5,6 @@ module.exports = ({ config }) => ({
   extra: {
     ...config.extra,
     appEnv: process.env.APP_ENV,
+    paystackPublicKey: process.env.EXPO_PUBLIC_PAYSTACK_PUBLIC_KEY,
   },
 });
