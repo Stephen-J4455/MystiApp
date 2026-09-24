@@ -61,18 +61,10 @@ Deno.serve(async (req) => {
   }
 
   const appEnv = getAppEnv();
-  const paystackSecret =
-    appEnv === "production"
-      ? Deno.env.get("PAYSTACK_SECRET_KEY")
-      : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-        Deno.env.get("PAYSTACK_SECRET_KEY");
+  const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
   const paystackConfigured = Boolean(paystackSecret);
   const fcmConfigured = Boolean(Deno.env.get("FCM_SERVICE_ACCOUNT_JSON"));
-  const paystackPublicKey =
-    (appEnv === "production"
-      ? Deno.env.get("PAYSTACK_PUBLIC_KEY")
-      : Deno.env.get("TEST_PAYSTACK_PUBLIC_KEY") ||
-        Deno.env.get("PAYSTACK_PUBLIC_KEY")) || null;
+  const paystackPublicKey = Deno.env.get("PAYSTACK_PUBLIC_KEY") || null;
 
   const payload = {
     ok: dbOk && paystackConfigured,

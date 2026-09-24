@@ -1,9 +1,11 @@
 import Constants from "expo-constants";
+import { Platform } from "react-native";
 
+// Web reads the build-time APP_ENV configured in Vercel. Native builds remain
+// fixed to production.
 export const APP_ENV = (
-  process.env.APP_ENV ||
-  Constants.expoConfig?.extra?.appEnv ||
-  "development"
+  (Platform.OS === "web" && Constants.expoConfig?.extra?.appEnv) ||
+  "production"
 ).toLowerCase();
 export const SUPABASE_URL = "https://sffgznknlmqxtikkyhwu.supabase.co";
 export const SUPABASE_ANON_KEY =
@@ -11,7 +13,7 @@ export const SUPABASE_ANON_KEY =
 
 export const getEdgeFunctionName = (name) => {
   if (!name) return name;
-  const env = (APP_ENV || "development").toLowerCase();
+  const env = APP_ENV;
   if (env === "development" || env === "test") {
     const [functionName, ...pathSegments] = String(name).split("/");
     if (functionName.endsWith("-test")) return name;

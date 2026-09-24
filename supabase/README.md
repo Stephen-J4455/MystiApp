@@ -7,36 +7,35 @@ on the `APP_ENV` variable.
 
 ## Environments
 
-| Env name    | What it is                                    | Paystack mode |
-| ----------- | --------------------------------------------- | ------------- |
-| development | Shared Supabase project + TEST function names | TEST          |
-| test        | Shared Supabase project + TEST function names | TEST          |
-| production  | Shared Supabase project + PROD function names | LIVE          |
+| Env name    | What it is                                     | Paystack mode |
+| ----------- | ---------------------------------------------- | ------------- |
+| development | Shared Supabase project + unsuffixed functions | LIVE          |
+| test        | Legacy configuration; not used for deployment  | LIVE          |
+| production  | Shared Supabase project + unsuffixed functions | LIVE          |
 
-Both environments use the same Supabase URL and client credentials. `APP_ENV`
-only controls the Edge Function name suffix in the app. Because Supabase
-secrets are project-wide, a single shared project cannot expose different
-`APP_ENV` secret values to test and production functions at the same time.
+The shared Supabase project uses only the production Paystack secrets
+`PAYSTACK_SECRET_KEY` and `PAYSTACK_PUBLIC_KEY`. The test Paystack secrets
+are no longer read by the Edge Functions. Production builds use
+`APP_ENV=production` and deploy/call the unsuffixed function names.
 
 ## One-time setup
 
 1. Install the Supabase CLI: `npm i -g supabase` (or use
    `npx supabase ...`).
-2. Use one Supabase project for both the test and production app environments.
+2. Use one Supabase project for the production app.
 3. In the Supabase dashboard, copy the project's URL, anon key, and
    service-role key.
-4. In Paystack, get a TEST secret key
-   (`sk_test_�`) and a LIVE secret key (`sk_live_�`).
-5. Copy the env templates:
+4. In Paystack, get a LIVE secret key
+   (`sk_live_...`) and matching LIVE public key
+   (`pk_live_...`).
+5. Copy the production env template:
 
    ```bash
-   cp supabase/.env.test.template       supabase/.env.test
    cp supabase/.env.production.template supabase/.env.production
-   cp .env.test.template                .env.test
    cp .env.production.template          .env.production
    ```
 
-6. Fill in the four copies with your real values. The files are listed
+6. Fill in the production copies with your real values. The files are listed
    in `.gitignore` (via the `.env*` pattern) and the `.template` files
    are safe to commit.
 
@@ -48,43 +47,39 @@ secrets are project-wide, a single shared project cannot expose different
 
 ## Daily workflow
 
-### Deploy everything to TEST
+### Deploy production Edge Functions
 
 ```bash
-npm run deploy:test
+npm run secrets:set:prod
+npm run deploy:prod
 ```
 
-That single command:
+This deploys the unsuffixed function names, such as `health` and
+`verify-payment`, to the shared Supabase project.
 
-1. `supabase link` to the shared project.
-2. `supabase db push` to apply every migration in `supabase/migrations/`.
-3. `supabase functions deploy` for the selected function-name set under
-   `supabase/functions/`.
-
-### Push secrets only
+### Push production secrets only
 
 ```bash
-npm run secrets:set:test
+npm run secrets:set:prod
 ```
 
-Reads `supabase/.env.test`, skips the `EXPO_PUBLIC_*` /
+Reads `supabase/.env.production`, skips the `EXPO_PUBLIC_*` /
 `SUPABASE_PROJECT_ID_*` / `SUPABASE_DB_URL_*` keys, and pushes the rest
-to the shared project's edge function secret store. Also sets the
-project-wide `APP_ENV` value used by the functions.
+to the shared project's Edge Function secret store. It also sets
+`APP_ENV=production`.
 
 ### Deploy only functions (skip migrations)
 
 ```bash
-npm run functions:deploy:test
+npm run functions:deploy:prod
 ```
 
-Useful after iterating on a single function � much faster than running
-the whole `deploy:test`.
+This deploys only the unsuffixed production functions and skips migrations.
 
 ### Verify the deployment
 
 ```bash
-npm run functions:test:test
+npm run functions:test:prod
 ```
 
 Calls the shared project's `<supabase-url>/functions/v1/health` endpoint and
@@ -99,7 +94,7 @@ prints the JSON response. The health endpoint reports:
 It returns HTTP 200 when both the database and Paystack secrets are
 healthy, otherwise 503.
 
-### Deploy to PRODUCTION
+### Production deployment checklist
 
 ```bash
 npm run secrets:set:prod
@@ -107,27 +102,26 @@ npm run deploy:prod
 npm run functions:test:prod
 ```
 
-Production deployments should _always_ push fresh secrets first, then
-deploy, then verify.
+Production deployments should _always_ push fresh production secrets first,
+then deploy the unsuffixed function names, then verify.
 
-## Running the mobile app against a specific env
-
-### Local dev (laptop)
+### Run locally against production functions
 
 ```bash
 # Default Expo dev server uses .env / .env.local:
 npx expo start
 
-# Force a specific function-name set:
-npm run env:test    # APP_ENV=test    ? -test function names
-npm run env:prod    # APP_ENV=production ? unsuffixed function names
+# Production function names:
+APP_ENV=production npx expo start
 ```
+
+The legacy `env:test` path selects `-test` function names and should not be
+used for production.
 
 ### EAS Build
 
 ```bash
-eas build --platform android --env-file .env.test      # ? test APK
-eas build --platform android --env-file .env.production # ? prod APK
+eas build --platform android --env-file .env.production # production APK
 ```
 
 `APP_ENV` is read directly by `src/lib/env.js` to select the edge
@@ -167,33 +161,30 @@ supabase/
 1. Create `supabase/functions/<name>/index.ts`.
 2. Add the function name to the `functions` array in both
    `supabase/scripts/deploy.ps1` and `supabase/scripts/deploy.sh`.
-3. Run `npm run functions:deploy:test` to push it to TEST first.
-4. Run `npm run functions:test:test` to confirm it appears in the
-   `health` response (if you add it to the health probe) or call it
-   manually.
-5. Once it is healthy in TEST, run `npm run deploy:prod`.
+3. Run `npm run functions:deploy:prod` to deploy the unsuffixed function.
+4. Run `npm run functions:test:prod` to confirm it is healthy.
+5. Do not add a `-test` suffix for the production deployment.
 
 ## Troubleshooting
 
 | Symptom                                         | Likely cause                                        | Fix                                                                                      |
 | ----------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `Health check returned non-2xx response`        | The function URL is wrong or the project is offline | Re-check the shared Supabase URL and deployed function name in the selected env          |
-| `checks.database.ok = false`                    | Missing/invalid service-role key                    | Re-run `supabase login` and `npm run secrets:set:test`                                   |
-| `checks.paystack.configured = false`            | `PAYSTACK_SECRET_KEY` not set                       | Add it to `supabase/.env.test` and re-run `npm run secrets:set:test`                     |
+| `checks.database.ok = false`                    | Missing/invalid service-role key                    | Re-run `supabase login` and `npm run secrets:set:prod`                                   |
+| `checks.paystack.configured = false`            | `PAYSTACK_SECRET_KEY` not set                       | Add it to `supabase/.env.production` and re-run `npm run secrets:set:prod`               |
 | `link failed: project not found`                | `SUPABASE_PROJECT_ID_TEST` is wrong                 | Open the Supabase dashboard ? Settings ? General ? Reference ID                          |
 | `db push` reports `permission denied for table` | Migrations include statements RLS blocks            | Run `supabase db push` against a database with a privileged role (use the dashboard URL) |
 | Mobile app still hits the old project           | Stale build cache or `APP_ENV` not set              | `npx expo start -c` to clear the Metro cache, or pass `--env-file .env.test` to EAS      |
 
 ## Script reference
 
-| Script                                  | Purpose                                             |
-| --------------------------------------- | --------------------------------------------------- |
-| `npm run deploy:test` / `:prod`         | Full deploy (link + db push + every edge function)  |
-| `npm run functions:deploy:test`/`:prod` | Edge functions only                                 |
-| `npm run db:push:test` / `:prod`        | Migrations only                                     |
-| `npm run secrets:set:test` / `:prod`    | Push secrets from `supabase/.env.*`                 |
-| `npm run functions:test:test`/`:prod`   | Hit `/functions/v1/health`                          |
-| `npm run env:test` / `:prod`            | Start the Expo dev server against the named backend |
+| Script                          | Purpose                                          |
+| ------------------------------- | ------------------------------------------------ |
+| `npm run deploy:prod`           | Full production deploy                           |
+| `npm run functions:deploy:prod` | Deploy unsuffixed production Edge Functions      |
+| `npm run db:push:prod`          | Apply migrations                                 |
+| `npm run secrets:set:prod`      | Push production secrets and `APP_ENV=production` |
+| `npm run functions:test:prod`   | Hit `/functions/v1/health`                       |
 
-Every script accepts `bash` variants (e.g. `npm run deploy:test:bash`) for
-macOS / Linux users.
+For production, use the `:prod` scripts only. The `:test` scripts are legacy
+entry points and are not part of the production deployment path.

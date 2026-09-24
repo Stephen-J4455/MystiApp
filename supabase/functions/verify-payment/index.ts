@@ -261,12 +261,7 @@ Deno.serve(async (req) => {
     }
 
     // Verify payment with Paystack
-    const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase().trim();
-    const paystackSecret =
-      appEnv === "production"
-        ? Deno.env.get("PAYSTACK_SECRET_KEY")
-        : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-          Deno.env.get("PAYSTACK_SECRET_KEY");
+    const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
     if (!paystackSecret) {
       console.error("PAYSTACK_SECRET_KEY not configured");
       return new Response(

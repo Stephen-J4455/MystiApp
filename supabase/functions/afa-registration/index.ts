@@ -209,12 +209,7 @@ Deno.serve(async (req) => {
       if (lookupError) throw lookupError;
       if (!registration) return json({ error: "Registration not found" }, 404);
 
-      const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase();
-      const paystackSecret =
-        appEnv === "production"
-          ? Deno.env.get("PAYSTACK_SECRET_KEY")
-          : Deno.env.get("TEST_PAYSTACK_SECRET_KEY") ||
-            Deno.env.get("PAYSTACK_SECRET_KEY");
+      const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
       if (!paystackSecret)
         return json({ error: "Paystack is not configured" }, 500);
 

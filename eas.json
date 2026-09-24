@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "APP_ENV": "test"
+        "APP_ENV": "production"
       },
       "android": {
         "gradleCommand": ":app:assembleDebug"
