@@ -152,10 +152,10 @@ export default function SuperAgentManagementScreen({ navigation }) {
 
         <TouchableOpacity
           style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentTopUpHistory")}
+          onPress={() => navigation.navigate("SuperAgentAnalytics")}
         >
-          <Ionicons name="wallet" size={20} color="#fff" />
-          <Text style={styles.actionText}>Sub-agent Top-up History</Text>
+          <Ionicons name="analytics" size={20} color="#fff" />
+          <Text style={styles.actionText}>Business Analytics</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

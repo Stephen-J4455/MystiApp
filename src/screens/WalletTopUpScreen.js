@@ -316,10 +316,18 @@ export default function WalletTopUpScreen({ navigation }) {
       ).toLowerCase();
       const isSuperAgentRole =
         normalizedRole === "superagent" || normalizedRole === "super_agent";
-      setIsSuperAgentUser(isSuperAgentRole);
+      if (!isSuperAgentRole) {
+        showError(
+          "Access denied",
+          "Only Super Agents can fund an operational wallet.",
+        );
+        navigation.goBack();
+        return;
+      }
+      setIsSuperAgentUser(true);
 
-      // Resolve the super agent (if any) and their Paystack subaccount so
-      // wallet top-ups can be routed to the super agent's settlement account.
+      // Resolve the super agent's Paystack subaccount so wallet top-ups can be
+      // routed to the Super Agent settlement account.
       // The super agent's business name lives on super_agent_paystack.business_name.
       const superAgentId =
         user?.user_metadata?.super_agent_id ||
@@ -349,12 +357,12 @@ export default function WalletTopUpScreen({ navigation }) {
       }
 
       const { data: wallet, error: walletError } = await supabase
-        .from(isSuperAgentRole ? "super_agent_wallets" : "agent_wallet")
+        .from("super_agent_wallets")
         .select("balance")
-        .eq(isSuperAgentRole ? "super_agent_id" : "agent_id", user.id)
+        .eq("super_agent_id", user.id)
         .maybeSingle();
       if (walletError) {
-        console.error("Wallet fetch error:", walletError);
+        console.error("Super Agent wallet fetch error:", walletError);
       } else if (wallet) {
         setCurrentBalance(wallet.balance || 0);
       }
@@ -371,22 +379,15 @@ export default function WalletTopUpScreen({ navigation }) {
           data: { user },
         } = await supabase.auth.getUser();
         if (user) {
-          const normalizedRole = String(
-            user.user_metadata?.role || user.app_metadata?.role || "",
-          ).toLowerCase();
-          const isSuperAgentRole =
-            normalizedRole === "superagent" || normalizedRole === "super_agent";
           walletSubscription = supabase
-            .channel("wallet_balance_realtime")
+            .channel("super_agent_wallet_balance_realtime")
             .on(
               "postgres_changes",
               {
                 event: "UPDATE",
                 schema: "public",
-                table: isSuperAgentRole
-                  ? "super_agent_wallets"
-                  : "agent_wallet",
-                filter: `${isSuperAgentRole ? "super_agent_id" : "agent_id"}=eq.${user.id}`,
+                table: "super_agent_wallets",
+                filter: `super_agent_id=eq.${user.id}`,
               },
               (payload) => {
                 setCurrentBalance(payload.new.balance || 0);

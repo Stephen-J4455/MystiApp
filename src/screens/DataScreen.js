@@ -56,6 +56,8 @@ export default function DataScreen({ navigation, route }) {
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [resolvedSubaccountCode, setResolvedSubaccountCode] = useState(null);
+  const [paystackSubaccount, setPaystackSubaccount] = useState(null);
+  const [subaccountLoading, setSubaccountLoading] = useState(false);
   const [superAgentId, setSuperAgentId] = useState(null);
   const [agentChecked, setAgentChecked] = useState(false);
   const [agentBalance, setAgentBalance] = useState(0);
@@ -512,7 +514,9 @@ export default function DataScreen({ navigation, route }) {
           user.app_metadata?.superAgentId ||
           null;
         setSuperAgentId(assignedSuperAgentId);
-        setAgentTier(user.user_metadata?.tier_name || null);
+        setAgentTier(
+          user.user_metadata?.tier_name || user.app_metadata?.tier_name || null,
+        );
 
         const normalizedRole = String(
           user.user_metadata?.role || user.app_metadata?.role || "",
@@ -522,32 +526,47 @@ export default function DataScreen({ navigation, route }) {
         );
         const isUserRoleAgent =
           normalizedRole === "agent" ||
+          normalizedRole === "sub_agent" ||
           normalizedRole === "superagent" ||
           normalizedRole === "super_agent" ||
           Boolean(assignedSuperAgentId);
 
         setIsAgent(isUserRoleAgent);
 
-        // If this user is a sub-agent of a super agent, ask the edge
-        // function for the super-agent's Paystack subaccount so the
-        // purchase is routed through it.
+        // If this user is a sub-agent of a super agent, fetch the exact
+        // Paystack sub-account details used to settle the purchase.
         if (assignedSuperAgentId) {
+          setSubaccountLoading(true);
           try {
-            const { data: subaccountResponse } =
+            const { data: subaccountResponse, error: subaccountError } =
               await supabase.functions.invoke(
                 getEdgeFunctionName("super-agent-user-management"),
                 { body: { action: "getPaystackSubaccount" } },
               );
             const record = subaccountResponse?.subaccount || null;
-            if (record?.is_active && record.subaccount_code) {
+            if (subaccountError || !record) {
+              setPaystackSubaccount(null);
+              setResolvedSubaccountCode(null);
+            } else if (record?.is_active && record.subaccount_code) {
+              setPaystackSubaccount(record);
               setResolvedSubaccountCode(record.subaccount_code);
+            } else {
+              setPaystackSubaccount(record);
+              setResolvedSubaccountCode(null);
             }
           } catch (subaccountError) {
+            setPaystackSubaccount(null);
+            setResolvedSubaccountCode(null);
             console.warn(
               "Could not resolve Paystack subaccount for data purchase:",
               subaccountError,
             );
+          } finally {
+            setSubaccountLoading(false);
           }
+        } else {
+          setPaystackSubaccount(null);
+          setResolvedSubaccountCode(null);
         }
 
         setAgentChecked(true);
@@ -630,9 +649,7 @@ export default function DataScreen({ navigation, route }) {
               const descriptor = String(agentOffer.data_value || "");
 
               return {
-                id: agentOffer.package_id
-                  ? String(agentOffer.package_id)
-                  : String(agentOffer.id),
+                id: String(agentOffer.superAgentOfferId || agentOffer.id),
                 package_id: agentOffer.package_id || null,
                 superAgentOfferId:
                   agentOffer.superAgentOfferId || agentOffer.id,
@@ -773,6 +790,23 @@ export default function DataScreen({ navigation, route }) {
       }
       grouped[networkName].push(bundle);
     });
+
+    Object.values(grouped).forEach((networkBundles) => {
+      networkBundles.sort((first, second) => {
+        const firstPrice = Number(
+          first.base_price ??
+            String(first.price || "").replace(/[^0-9.]/g, "") ??
+            0,
+        );
+        const secondPrice = Number(
+          second.base_price ??
+            String(second.price || "").replace(/[^0-9.]/g, "") ??
+            0,
+        );
+        return firstPrice - secondPrice;
+      });
+    });
+
     return grouped;
   }, [bundles]);
 
@@ -895,6 +929,79 @@ export default function DataScreen({ navigation, route }) {
     } catch (error) {
       console.error("Agent package selection error:", error);
       showError("Error", "Failed to select package");
+    }
+  };
+
+  const openNormalPurchase = (bundle) => {
+    setSelectedBundle(bundle);
+    setPurchaseType("self");
+    setRecipientPhone("");
+    setRecipientModalVisible(true);
+  };
+
+  const continueNormalPurchase = async () => {
+    if (purchaseType === "self") {
+      setRecipientModalVisible(false);
+      await handlePurchaseForSelf(selectedBundle);
+      return;
+    }
+
+    setRecipientModalVisible(false);
+    await handlePurchaseForOthers(selectedBundle);
+  };
+
+  const openPaymentConfirmation = async () => {
+    if (isAgent && !isSuperAgentUser) {
+      setSubaccountLoading(true);
+      try {
+        const { data: subaccountResponse, error: subaccountError } =
+          await supabase.functions.invoke(
+            getEdgeFunctionName("super-agent-user-management"),
+            { body: { action: "getPaystackSubaccount" } },
+          );
+        const record = subaccountResponse?.subaccount || null;
+        if (subaccountError || subaccountResponse?.error || !record) {
+          setPaystackSubaccount(null);
+          setResolvedSubaccountCode(null);
+          showError(
+            "Payment Unavailable",
+            "Could not fetch your Super Agent's Paystack settlement details. Please try again.",
+          );
+          return;
+        }
+
+        setPaystackSubaccount(record);
+        if (!record.is_active || !record.subaccount_code) {
+          setResolvedSubaccountCode(null);
+          showError(
+            "Payment Unavailable",
+            "Your Super Agent's Paystack settlement account is not active. Please contact your Super Agent before paying.",
+          );
+          return;
+        }
+
+        setResolvedSubaccountCode(record.subaccount_code);
+        // Keep the confirmation screen open for sub-agents on every platform
+        // so the settlement destination is visible before Paystack opens.
+        setPaystackModalVisible(true);
+        return;
+      } catch (error) {
+        setPaystackSubaccount(null);
+        setResolvedSubaccountCode(null);
+        showError(
+          "Payment Unavailable",
+          "Could not fetch your Super Agent's Paystack settlement details. Please try again.",
+        );
+        return;
+      } finally {
+        setSubaccountLoading(false);
+      }
+    }
+
+    if (Platform.OS === "web") {
+      setDirectPaystackRequested(true);
+    } else {
+      setPaystackModalVisible(true);
     }
   };
 
@@ -1031,12 +1138,7 @@ export default function DataScreen({ navigation, route }) {
       return;
     }
 
-    if (Platform.OS === "web") {
-      setDirectPaystackRequested(true);
-      return;
-    }
-
-    setPaystackModalVisible(true);
+    await openPaymentConfirmation();
   };
 
   const generatePaystackHTML = (
@@ -1046,6 +1148,13 @@ export default function DataScreen({ navigation, route }) {
     subaccountCode,
     transactionCharge,
     paystackPublicKey,
+    settlementBusinessName,
+    settlementBank,
+    baseAmount,
+    agentMarkup,
+    transactionFee,
+    showPackagePrice,
+    packagePrice,
   ) => {
     const safeKey = paystackPublicKey
       ? String(paystackPublicKey).replace(/\\/g, "\\\\").replace(/'/g, "\\'")
@@ -1059,6 +1168,12 @@ export default function DataScreen({ navigation, route }) {
     const safeSub = subaccountCode
       ? String(subaccountCode).replace(/\\/g, "\\\\").replace(/'/g, "\\'")
       : "";
+    const safeBusinessName = String(settlementBusinessName || "Super Agent")
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "\\'");
+    const safeBank = String(settlementBank || "Paystack settlement account")
+      .replace(/\\/g, "\\\\")
+      .replace(/'/g, "\\'");
     return `
       <!DOCTYPE html>
       <html>
@@ -1077,7 +1192,7 @@ export default function DataScreen({ navigation, route }) {
             margin: 0;
             padding: 0 20px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            background: white;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -1122,9 +1237,9 @@ export default function DataScreen({ navigation, route }) {
           }
           .amount-container {
             background-color: var(--light);
-            padding: 20px;
+            padding: 18px;
             border-radius: 16px;
-            margin-bottom: 35px;
+            margin-bottom: 20px;
             border: 1px solid #eee;
           }
           .amount-label {
@@ -1136,9 +1251,54 @@ export default function DataScreen({ navigation, route }) {
             margin-bottom: 8px;
           }
           .amount {
-            font-size: 32px;
+            font-size: 30px;
             font-weight: 900;
             color: #1A1A1A;
+            margin-bottom: 14px;
+          }
+          .breakdown-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 7px 0;
+            border-top: 1px solid #e5e9eb;
+            font-size: 13px;
+          }
+          .breakdown-label { color: #667; }
+          .breakdown-value { color: #1A1A1A; font-weight: 700; }
+          .breakdown-total {
+            border-top: 1px solid #cfd8dc;
+            margin-top: 3px;
+            padding-top: 10px;
+            font-weight: 800;
+          }
+          .settlement-card {
+            background: #f0faf5;
+            border: 1px solid #b9e5ce;
+            border-radius: 14px;
+            padding: 14px;
+            margin: -20px 0 30px;
+            text-align: left;
+          }
+          .settlement-label {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #2B5F1F;
+            margin-bottom: 6px;
+          }
+          .settlement-business {
+            font-size: 14px;
+            font-weight: 700;
+            color: #1A1A1A;
+            margin-bottom: 2px;
+          }
+          .settlement-bank,
+          .settlement-account {
+            font-size: 12px;
+            color: #48604a;
+            margin-top: 2px;
           }
           .pay-button {
             width: 100%;
@@ -1195,7 +1355,30 @@ export default function DataScreen({ navigation, route }) {
           <div class="amount-container">
             <div class="amount-label">Payable Amount</div>
             <div class="amount">GHS ${amount.toFixed(2)}</div>
+            <div class="breakdown-row">
+              <span class="breakdown-label">${showPackagePrice ? "Package price" : "Base data price"}</span>
+              <span class="breakdown-value">GHS ${Number(showPackagePrice ? packagePrice : baseAmount || 0).toFixed(2)}</span>
+            </div>
+            <div class="breakdown-row">
+              <span class="breakdown-label">Transaction fee</span>
+              <span class="breakdown-value">GHS ${Number(transactionFee || 0).toFixed(2)}</span>
+            </div>
+            <div class="breakdown-row breakdown-total">
+              <span class="breakdown-label">Total payment</span>
+              <span class="breakdown-value">GHS ${amount.toFixed(2)}</span>
+            </div>
           </div>
+
+          ${
+            subaccountCode
+              ? `
+          <div class="settlement-card">
+            <div class="settlement-label">Payment will be sent to</div>
+            <div class="settlement-business">${safeBusinessName}</div>
+            <div class="settlement-bank">${safeBank}</div>
+          </div>`
+              : ""
+          }
           
           <button id="paystack-button" class="pay-button">
             Pay with Paystack
@@ -1364,102 +1547,6 @@ export default function DataScreen({ navigation, route }) {
           </View>
         )}
 
-        {/* Purchase Type Selection - Hidden for Agents */}
-        {!isAgent && (
-          <View style={styles.purchaseTypeContainer}>
-            <Text style={styles.purchaseTypeLabel}>
-              Who is this purchase for?
-            </Text>
-            <View style={styles.purchaseTypeButtons}>
-              <TouchableOpacity
-                style={[
-                  styles.purchaseTypeButton,
-                  purchaseType === "self" && styles.purchaseTypeButtonActive,
-                ]}
-                onPress={() => setPurchaseType("self")}
-              >
-                <Ionicons
-                  name="person"
-                  size={18}
-                  color={
-                    purchaseType === "self" ? colors.white : colors.primary
-                  }
-                />
-                <Text
-                  style={[
-                    styles.purchaseTypeButtonText,
-                    purchaseType === "self" &&
-                      styles.purchaseTypeButtonTextActive,
-                  ]}
-                >
-                  For Myself
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.purchaseTypeButton,
-                  purchaseType === "others" && styles.purchaseTypeButtonActive,
-                ]}
-                onPress={() => setPurchaseType("others")}
-              >
-                <Ionicons
-                  name="people"
-                  size={18}
-                  color={
-                    purchaseType === "others" ? colors.white : colors.primary
-                  }
-                />
-                <Text
-                  style={[
-                    styles.purchaseTypeButtonText,
-                    purchaseType === "others" &&
-                      styles.purchaseTypeButtonTextActive,
-                  ]}
-                >
-                  For Others
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {/* Show user's phone when self is selected - Hidden for Agents */}
-        {!isAgent && purchaseType === "self" && userPhone && (
-          <View style={styles.userPhoneContainer}>
-            <Ionicons name="phone-portrait" size={20} color={colors.primary} />
-            <Text style={styles.userPhoneText}>
-              Data will be sent to: {userPhone}
-            </Text>
-          </View>
-        )}
-
-        {/* Phone Number Input for Others - Always shown for Agents */}
-        {!isAgent && purchaseType === "others" && (
-          <View style={styles.phoneInputContainer}>
-            <Text style={styles.phoneInputLabel}>Recipient Phone Number</Text>
-            <View style={styles.phoneInputWrapper}>
-              <Ionicons
-                name="call"
-                size={20}
-                color={colors.secondary}
-                style={styles.phoneIcon}
-              />
-              <TextInput
-                style={styles.phoneInput}
-                placeholder="Enter phone number (e.g., 0532973455)"
-                placeholderTextColor={colors.secondary}
-                value={recipientPhone}
-                onChangeText={setRecipientPhone}
-                keyboardType="phone-pad"
-                maxLength={13}
-              />
-            </View>
-            <Text style={styles.phoneInputHint}>
-              Enter the phone number that will receive the data bundle
-            </Text>
-          </View>
-        )}
-
         <View style={styles.bundlesContainer}>
           {loading || !agentChecked ? (
             renderBundlePlaceholders()
@@ -1477,16 +1564,6 @@ export default function DataScreen({ navigation, route }) {
             Object.entries(bundlesByNetwork).map(
               ([networkName, networkBundles]) => (
                 <View key={networkName} style={{ marginBottom: 20 }}>
-                  <View style={styles.networkSectionHeader}>
-                    <Text style={styles.networkSectionTitle}>
-                      {networkName} Network
-                    </Text>
-                    <Text style={styles.networkSectionSubtitle}>
-                      {networkBundles.length}{" "}
-                      {networkBundles.length === 1 ? "bundle" : "bundles"}{" "}
-                      available
-                    </Text>
-                  </View>
                   {networkBundles.map((bundle) => (
                     <TouchableOpacity
                       key={bundle.id}
@@ -1494,10 +1571,8 @@ export default function DataScreen({ navigation, route }) {
                       onPress={() => {
                         if (isAgent) {
                           handleAgentPurchase(bundle);
-                        } else if (purchaseType === "self") {
-                          handlePurchaseForSelf(bundle);
                         } else {
-                          handlePurchaseForOthers(bundle);
+                          openNormalPurchase(bundle);
                         }
                       }}
                     >
@@ -1551,6 +1626,135 @@ export default function DataScreen({ navigation, route }) {
           </Text>
         </View>
       </ScrollView>
+
+      {!isAgent && selectedBundle && recipientModalVisible && (
+        <Modal
+          visible={recipientModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setRecipientModalVisible(false)}
+        >
+          <View style={styles.recipientModalOverlay}>
+            <View style={styles.recipientModalCard}>
+              <View style={styles.recipientModalHeader}>
+                <View>
+                  <Text style={styles.recipientModalTitle}>
+                    Who is this data for?
+                  </Text>
+                  <Text style={styles.recipientModalSubtitle}>
+                    {selectedBundle.name}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => setRecipientModalVisible(false)}
+                  style={styles.recipientModalClose}
+                >
+                  <Ionicons name="close" size={22} color={colors.secondary} />
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.purchaseTypeButtons}>
+                <TouchableOpacity
+                  style={[
+                    styles.purchaseTypeButton,
+                    purchaseType === "self" && styles.purchaseTypeButtonActive,
+                  ]}
+                  onPress={() => setPurchaseType("self")}
+                >
+                  <Ionicons
+                    name="person"
+                    size={18}
+                    color={
+                      purchaseType === "self" ? colors.white : colors.primary
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.purchaseTypeButtonText,
+                      purchaseType === "self" &&
+                        styles.purchaseTypeButtonTextActive,
+                    ]}
+                  >
+                    For Myself
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.purchaseTypeButton,
+                    purchaseType === "others" &&
+                      styles.purchaseTypeButtonActive,
+                  ]}
+                  onPress={() => setPurchaseType("others")}
+                >
+                  <Ionicons
+                    name="people"
+                    size={18}
+                    color={
+                      purchaseType === "others" ? colors.white : colors.primary
+                    }
+                  />
+                  <Text
+                    style={[
+                      styles.purchaseTypeButtonText,
+                      purchaseType === "others" &&
+                        styles.purchaseTypeButtonTextActive,
+                    ]}
+                  >
+                    For Others
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {purchaseType === "self" && (
+                <View style={styles.userPhoneContainer}>
+                  <Ionicons
+                    name="phone-portrait"
+                    size={20}
+                    color={colors.primary}
+                  />
+                  <Text style={styles.userPhoneText}>
+                    Data will be sent to: {userPhone || "your profile phone"}
+                  </Text>
+                </View>
+              )}
+
+              {purchaseType === "others" && (
+                <>
+                  <Text style={styles.phoneInputLabel}>
+                    Recipient Phone Number
+                  </Text>
+                  <View style={styles.phoneInputWrapper}>
+                    <Ionicons
+                      name="call"
+                      size={20}
+                      color={colors.secondary}
+                      style={styles.phoneIcon}
+                    />
+                    <TextInput
+                      style={styles.phoneInput}
+                      placeholder="Enter phone number (e.g., 0532973455)"
+                      placeholderTextColor={colors.secondary}
+                      value={recipientPhone}
+                      onChangeText={setRecipientPhone}
+                      keyboardType="phone-pad"
+                      maxLength={13}
+                    />
+                  </View>
+                </>
+              )}
+
+              <TouchableOpacity
+                style={styles.recipientContinueButton}
+                onPress={continueNormalPurchase}
+              >
+                <Text style={styles.recipientContinueText}>
+                  Continue to Payment
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      )}
 
       {isAgent && selectedBundle && recipientModalVisible && (
         <Modal
@@ -1685,28 +1889,31 @@ export default function DataScreen({ navigation, route }) {
                 <View
                   style={{
                     backgroundColor: colors.light,
-                    paddingHorizontal: 20,
+                    paddingHorizontal: 16,
                     paddingVertical: 15,
                     borderRadius: 12,
-                    marginBottom: 30,
+                    marginBottom: isAgent && !isSuperAgentUser ? 14 : 30,
                     width: "100%",
-                    alignItems: "center",
                   }}
                 >
                   <Text
                     style={{
-                      fontSize: 16,
+                      fontSize: 13,
                       color: colors.secondary,
-                      marginBottom: 5,
+                      marginBottom: 4,
+                      textAlign: "center",
+                      fontWeight: "600",
                     }}
                   >
                     Amount to Pay
                   </Text>
                   <Text
                     style={{
-                      fontSize: 28,
+                      fontSize: 27,
                       fontWeight: "bold",
                       color: colors.primary,
+                      textAlign: "center",
+                      marginBottom: 12,
                     }}
                   >
                     GHS{" "}
@@ -1715,7 +1922,112 @@ export default function DataScreen({ navigation, route }) {
                       parseFloat(selectedBundle.price.replace("Ghc ", ""))
                     ).toFixed(2)}
                   </Text>
+                  <View style={styles.paymentBreakdownRow}>
+                    <Text style={styles.paymentBreakdownLabel}>
+                      {isAgent && !isSuperAgentUser
+                        ? "Package price"
+                        : "Base data price"}
+                    </Text>
+                    <Text style={styles.paymentBreakdownValue}>
+                      GHS{" "}
+                      {isAgent && !isSuperAgentUser
+                        ? (
+                            (getAgentPaymentBreakdown()?.baseAmount || 0) +
+                            (getAgentPaymentBreakdown()?.agentMarkup || 0)
+                          ).toFixed(2)
+                        : (
+                            getAgentPaymentBreakdown()?.baseAmount ||
+                            parseFloat(selectedBundle.price.replace("Ghc ", ""))
+                          ).toFixed(2)}
+                    </Text>
+                  </View>
+                  <View style={styles.paymentBreakdownRow}>
+                    <Text style={styles.paymentBreakdownLabel}>
+                      Transaction fee
+                    </Text>
+                    <Text style={styles.paymentBreakdownFee}>
+                      GHS{" "}
+                      {(
+                        getAgentPaymentBreakdown()?.transactionFee || 0
+                      ).toFixed(2)}
+                    </Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.paymentBreakdownRow,
+                      styles.paymentBreakdownTotal,
+                    ]}
+                  >
+                    <Text style={styles.paymentBreakdownTotalLabel}>
+                      Total payment
+                    </Text>
+                    <Text style={styles.paymentBreakdownTotalValue}>
+                      GHS{" "}
+                      {(
+                        getAgentPaymentBreakdown()?.grossAmount ||
+                        parseFloat(selectedBundle.price.replace("Ghc ", ""))
+                      ).toFixed(2)}
+                    </Text>
+                  </View>
                 </View>
+                {isAgent && !isSuperAgentUser && (
+                  <View
+                    style={{
+                      alignSelf: "stretch",
+                      backgroundColor: "#f0faf5",
+                      borderColor: "#b9e5ce",
+                      borderWidth: 1,
+                      borderRadius: 12,
+                      padding: 14,
+                      marginBottom: 20,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        marginBottom: 9,
+                      }}
+                    >
+                      <Ionicons
+                        name="shield-checkmark"
+                        size={19}
+                        color={colors.secondary}
+                        style={{ marginRight: 7 }}
+                      />
+                      <Text
+                        style={{
+                          color: colors.secondary,
+                          fontWeight: "700",
+                          fontSize: 15,
+                        }}
+                      >
+                        Payment will be sent to
+                      </Text>
+                    </View>
+                    <Text
+                      style={{
+                        color: colors.dark,
+                        fontWeight: "600",
+                        fontSize: 15,
+                        marginBottom: 3,
+                      }}
+                    >
+                      {paystackSubaccount?.business_name || "Super Agent"}
+                    </Text>
+                    {paystackSubaccount?.settlement_bank && (
+                      <Text
+                        style={{
+                          color: colors.secondary,
+                          fontSize: 13,
+                          marginBottom: 2,
+                        }}
+                      >
+                        {paystackSubaccount.settlement_bank}
+                      </Text>
+                    )}
+                  </View>
+                )}
                 <TouchableOpacity
                   style={{
                     backgroundColor: colors.primary,
@@ -1798,6 +2110,19 @@ export default function DataScreen({ navigation, route }) {
                       )
                     : null,
                   paystackPublicKey,
+                  isAgent && !isSuperAgentUser
+                    ? paystackSubaccount?.business_name
+                    : null,
+                  isAgent && !isSuperAgentUser
+                    ? paystackSubaccount?.settlement_bank
+                    : null,
+                  getAgentPaymentBreakdown()?.baseAmount ||
+                    parseFloat(selectedBundle.price.replace("Ghc ", "")),
+                  getAgentPaymentBreakdown()?.agentMarkup || 0,
+                  getAgentPaymentBreakdown()?.transactionFee || 0,
+                  isAgent && !isSuperAgentUser,
+                  (getAgentPaymentBreakdown()?.baseAmount || 0) +
+                    (getAgentPaymentBreakdown()?.agentMarkup || 0),
                 ),
               }}
               style={{ flex: 1 }}
@@ -2245,6 +2570,43 @@ const styles = StyleSheet.create({
     color: colors.dark,
     opacity: 0.5,
     marginTop: 2,
+  },
+  paymentBreakdownRow: {
+    alignItems: "center",
+    borderTopColor: colors.border,
+    borderTopWidth: 1,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 6,
+  },
+  paymentBreakdownLabel: {
+    color: colors.secondary,
+    fontSize: 12,
+  },
+  paymentBreakdownValue: {
+    color: colors.dark,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  paymentBreakdownFee: {
+    color: colors.warning,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  paymentBreakdownTotal: {
+    borderTopColor: colors.primary,
+    marginTop: 2,
+    paddingTop: 9,
+  },
+  paymentBreakdownTotalLabel: {
+    color: colors.dark,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  paymentBreakdownTotalValue: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: "900",
   },
   purchaseTypeContainer: {
     backgroundColor: colors.white,

@@ -17,7 +17,7 @@ const normalizeRole = (user: any) => {
   if (normalized === "admin") return "Admin";
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
-  if (normalized === "agent") return "Agent";
+  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
 
   return role;
 };
@@ -168,60 +168,6 @@ Deno.serve(async (req) => {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
-    }
-
-    if (action === "listAgentsWithBalances") {
-      if (userRole !== "SuperAgent") {
-        return new Response(
-          JSON.stringify({
-            error: "Only super-agents can list agent balances",
-          }),
-          {
-            status: 403,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
-      }
-
-      const { data: usersData, error: listError } =
-        await supabaseAdmin.auth.admin.listUsers();
-      if (listError) throw listError;
-
-      const assignedAgents = (usersData?.users || []).filter((member: any) => {
-        const memberRole = normalizeRole(member);
-        const assignedSuperAgentId =
-          member.user_metadata?.super_agent_id ||
-          member.user_metadata?.superAgentId ||
-          member.app_metadata?.super_agent_id ||
-          member.app_metadata?.superAgentId ||
-          null;
-        return memberRole === "Agent" && assignedSuperAgentId === user.id;
-      });
-      const agentIds = assignedAgents.map((agent: any) => agent.id);
-
-      const { data: wallets, error: walletError } = agentIds.length
-        ? await supabaseAdmin
-            .from("agent_wallet")
-            .select("agent_id, balance")
-            .in("agent_id", agentIds)
-        : { data: [], error: null };
-      if (walletError) throw walletError;
-
-      const balances = new Map(
-        (wallets || []).map((wallet: any) => [wallet.agent_id, wallet.balance]),
-      );
-      return new Response(
-        JSON.stringify({
-          agents: assignedAgents.map((agent: any) => ({
-            ...agent,
-            wallet_balance: balances.get(agent.id) ?? 0,
-          })),
-        }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
     }
 
     if (action === "listTopUps") {
@@ -640,7 +586,14 @@ Deno.serve(async (req) => {
     if (action === "getPaystackSubaccount") {
       // Allow SuperAgents to get their own sub-account, OR
       // Allow Sub-Agents to get their assigned SuperAgent's sub-account.
-      const targetSuperAgentId = user.user_metadata?.super_agent_id || null;
+      const targetSuperAgentId =
+        String(
+          user.user_metadata?.super_agent_id ||
+            user.user_metadata?.superAgentId ||
+            user.app_metadata?.super_agent_id ||
+            user.app_metadata?.superAgentId ||
+            "",
+        ).trim() || null;
       const effectiveAgentId =
         userRole === "SuperAgent" ? user.id : targetSuperAgentId;
 

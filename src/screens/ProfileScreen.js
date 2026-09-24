@@ -28,8 +28,6 @@ export default function ProfileScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [isAgent, setIsAgent] = useState(false);
-  const [walletBalance, setWalletBalance] = useState(0);
-  const [walletTopUps, setWalletTopUps] = useState([]);
   const [recentTransactions, setRecentTransactions] = useState([]);
   const [agentStats, setAgentStats] = useState({
     totalOrders: 0,
@@ -66,7 +64,6 @@ export default function ProfileScreen({ navigation }) {
   // Real-time updates for agent data
   useEffect(() => {
     let agentOrdersSubscription = null;
-    let walletSubscription = null;
 
     const setupRealtimeSubscriptions = async () => {
       try {
@@ -90,23 +87,6 @@ export default function ProfileScreen({ navigation }) {
               },
             )
             .subscribe();
-
-          walletSubscription = supabase
-            .channel("profile_agent_wallet_realtime")
-            .on(
-              "postgres_changes",
-              {
-                event: "UPDATE",
-                schema: "public",
-                table: "agent_wallet",
-                filter: `agent_id=eq.${user.id}`,
-              },
-              (payload) => {
-                console.log("Agent wallet updated in profile:", payload);
-                fetchWalletBalance();
-              },
-            )
-            .subscribe();
         }
       } catch (error) {
         console.error(
@@ -124,44 +104,17 @@ export default function ProfileScreen({ navigation }) {
       if (agentOrdersSubscription) {
         supabase.removeChannel(agentOrdersSubscription);
       }
-      if (walletSubscription) {
-        supabase.removeChannel(walletSubscription);
-      }
     };
   }, [isAgent]);
 
-  // Refresh wallet balance when screen comes into focus
+  // Refresh sub-agent activity when the screen comes into focus.
   useFocusEffect(
     React.useCallback(() => {
       if (isAgent) {
-        fetchWalletBalance();
-        fetchWalletTopUps();
         fetchRecentTransactions();
       }
     }, [isAgent]),
   );
-
-  const fetchWalletBalance = async () => {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (user) {
-        const { data: wallet, error } = await supabase
-          .from("agent_wallet")
-          .select("balance")
-          .eq("agent_id", user.id)
-          .single();
-
-        if (!error && wallet) {
-          setWalletBalance(wallet.balance || 0);
-        }
-      }
-    } catch (error) {
-      console.error("Error fetching wallet balance:", error);
-    }
-  };
 
   const getCurrentUser = async () => {
     const {
@@ -190,22 +143,8 @@ export default function ProfileScreen({ navigation }) {
         );
       setIsAgent(agentStatus);
 
-      // Load legacy agent data only when it exists.
-      try {
-        const { data: wallet, error } = await supabase
-          .from("agent_wallet")
-          .select("*")
-          .eq("agent_id", user.id)
-          .single();
-
-        if (agentStatus && !error && wallet) {
-          await fetchWalletBalance();
-          await fetchAgentStats();
-          await fetchWalletTopUps();
-        }
-      } catch (error) {
-        console.error("Error checking agent status:", error);
-        setIsAgent(false);
+      if (agentStatus) {
+        await fetchAgentStats();
       }
     }
   };
@@ -248,29 +187,6 @@ export default function ProfileScreen({ navigation }) {
       });
     } catch (error) {
       console.error("Error fetching agent stats:", error);
-    }
-  };
-
-  const fetchWalletTopUps = async () => {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (user) {
-        const { data: topUps, error } = await supabase
-          .from("wallet_topups")
-          .select("*")
-          .eq("agent_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(5);
-
-        if (!error && topUps) {
-          setWalletTopUps(topUps);
-        }
-      }
-    } catch (error) {
-      console.error("Error fetching wallet top-ups:", error);
     }
   };
 

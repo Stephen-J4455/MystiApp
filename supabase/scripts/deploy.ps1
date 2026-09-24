@@ -108,6 +108,7 @@ try {
             "reorder-held-agent-order${suffix}",
             "cancel-admin-order${suffix}",
             "verify-wallet-topup${suffix}",
+            "afa-registration${suffix}",
             "get-packages${suffix}",
             "make-orders${suffix}",
             "get-orders${suffix}",

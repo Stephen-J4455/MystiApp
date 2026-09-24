@@ -40,8 +40,9 @@ import SuperAgentOffersScreen from "./src/screens/SuperAgentOffersScreen";
 import SuperAgentAgentsScreen from "./src/screens/SuperAgentAgentsScreen";
 import SuperAgentTierManagementScreen from "./src/screens/SuperAgentTierManagementScreen";
 import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
-import SuperAgentTopUpHistoryScreen from "./src/screens/SuperAgentTopUpHistoryScreen";
+import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
 import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
+import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
 import colors from "./src/components/theme";
 
 const Stack = createNativeStackNavigator();
@@ -57,7 +58,7 @@ const normalizeUserRole = (user) => {
   if (normalized === "admin") return "Admin";
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
-  if (normalized === "agent") return "Agent";
+  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
 
   return role;
 };
@@ -264,30 +265,13 @@ export default function App() {
         setIsResettingPassword(false);
       }
 
-      // Check agent status when user changes
+      // Check agent status when user changes. Sub-agents no longer use wallets.
       if (session?.user) {
         const nextRole = normalizeUserRole(session.user);
         if (mounted) {
           setUserRole(nextRole);
+          setIsAgent(nextRole === "Agent");
         }
-
-        supabase
-          .from("agent_wallet")
-          .select("*")
-          .eq("agent_id", session.user.id)
-          .single()
-          .then(({ data, error }) => {
-            if (mounted) {
-              const walletExists = !error && data !== null;
-              setIsAgent(
-                nextRole === "Agent" ||
-                  (walletExists && nextRole !== "SuperAgent"),
-              );
-            }
-          })
-          .catch(() => {
-            if (mounted) setIsAgent(nextRole === "Agent");
-          });
       } else {
         if (mounted) setIsAgent(false);
       }
@@ -420,8 +404,8 @@ export default function App() {
                   component={SuperAgentPaystackScreen}
                 />
                 <Stack.Screen
-                  name="SuperAgentTopUpHistory"
-                  component={SuperAgentTopUpHistoryScreen}
+                  name="SuperAgentAnalytics"
+                  component={SuperAgentAnalyticsScreen}
                 />
                 <Stack.Screen
                   name="SuperAgentHeldOrders"
@@ -432,6 +416,10 @@ export default function App() {
                 <Stack.Screen
                   name="WalletTopUp"
                   component={WalletTopUpScreen}
+                />
+                <Stack.Screen
+                  name="AfaRegistration"
+                  component={AfaRegistrationScreen}
                 />
               </>
             ) : (

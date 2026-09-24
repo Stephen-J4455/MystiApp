@@ -15,6 +15,8 @@ import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
 import { useNotification } from "../contexts/NotificationContext";
 
+const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
 const refreshProviderStatuses = async (orders) => {
   const results = await Promise.all(
     (orders || []).map(async (order) => {
@@ -121,41 +123,44 @@ export default function HistoryScreen({ navigation }) {
   // Real-time updates for orders
   useEffect(() => {
     let historyChannel = null;
+    let cancelled = false;
 
     const setupRealtimeSubscriptions = async () => {
       try {
         const {
           data: { user },
         } = await supabase.auth.getUser();
-        if (!user) return;
+        if (!user || cancelled) return;
 
         const isAssignedSuperAgent = isSuperAgent(user);
+        const channel = supabase.channel("history_orders_realtime");
 
-        historyChannel = supabase
-          .channel("history_orders_realtime")
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "orders",
-              filter: `user_id=eq.${user.id}`,
-            },
-            () => checkAgentStatus(true),
-          )
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "agent_orders",
-              filter: `agent_id=eq.${user.id}`,
-            },
-            () => checkAgentStatus(true),
-          );
+        // Register every callback before subscribing. Supabase Realtime does
+        // not allow adding postgres_changes callbacks after subscribe().
+        channel.on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "orders",
+            filter: `user_id=eq.${user.id}`,
+          },
+          () => checkAgentStatus(true),
+        );
+
+        channel.on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "agent_orders",
+            filter: `agent_id=eq.${user.id}`,
+          },
+          () => checkAgentStatus(true),
+        );
 
         if (isAssignedSuperAgent) {
-          historyChannel.on(
+          channel.on(
             "postgres_changes",
             {
               event: "*",
@@ -167,7 +172,8 @@ export default function HistoryScreen({ navigation }) {
           );
         }
 
-        historyChannel.subscribe();
+        historyChannel = channel;
+        channel.subscribe();
       } catch (error) {
         console.error("Error setting up orders realtime subscriptions:", error);
       }
@@ -176,7 +182,11 @@ export default function HistoryScreen({ navigation }) {
     setupRealtimeSubscriptions();
 
     return () => {
-      if (historyChannel) supabase.removeChannel(historyChannel);
+      cancelled = true;
+      if (historyChannel) {
+        supabase.removeChannel(historyChannel);
+        historyChannel = null;
+      }
     };
   }, []);
 
@@ -186,14 +196,18 @@ export default function HistoryScreen({ navigation }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user) {
-        setIsSuperAgentUser(isSuperAgent(user));
-        const { data: wallet, error } = await supabase
-          .from("agent_wallet")
-          .select("*")
-          .eq("agent_id", user.id)
-          .single();
-
-        const agentStatus = !error && wallet !== null;
+        const superAgentStatus = isSuperAgent(user);
+        setIsSuperAgentUser(superAgentStatus);
+        const normalizedRole = String(
+          user.user_metadata?.role || user.app_metadata?.role || "",
+        ).toLowerCase();
+        const agentStatus =
+          normalizedRole === "agent" ||
+          normalizedRole === "sub_agent" ||
+          Boolean(
+            user.user_metadata?.super_agent_id ||
+            user.user_metadata?.superAgentId,
+          );
         setIsAgent(agentStatus);
 
         // Fetch transactions after determining agent status
@@ -476,101 +490,160 @@ export default function HistoryScreen({ navigation }) {
           <View style={styles.transactionList}>
             {transactions.map((transaction) => (
               <TouchableOpacity
-                key={transaction.id}
-                style={styles.transactionCard}
+                key={`${transaction.orderType}-${transaction.id}`}
+                style={[
+                  styles.transactionCard,
+                  isSuperAgentUser &&
+                    transaction.isSubAgentTransaction && {
+                      ...styles.superAgentTransactionCard,
+                    },
+                ]}
                 onPress={() => navigation.navigate("Receipt", { transaction })}
               >
                 <View style={styles.transactionLeft}>
                   <Text style={styles.transactionTitle}>
                     {transaction.orderType === "agent"
-                      ? `Agent Service - ${
-                          transaction.displayName || "Customer"
+                      ? `${transaction.isSubAgentTransaction ? "Sub-agent order" : "Agent Service"} - ${
+                          transaction.isSubAgentTransaction
+                            ? transaction.subAgentBusinessName || "Sub-agent"
+                            : transaction.displayName || "Customer"
                         }`
                       : transaction.offer_title || "Purchase"}
                   </Text>
                   <Text style={styles.transactionDesc}>
                     {transaction.orderType === "agent"
-                      ? `${transaction.isSubAgentTransaction ? "Sub-agent: " : "Phone: "}${transaction.isSubAgentTransaction ? transaction.agent_id || "N/A" : transaction.displayPhone || "N/A"}`
+                      ? transaction.isSubAgentTransaction
+                        ? `${transaction.network || "Data"} · ${
+                            transaction.recipient_phone ||
+                            "Recipient unavailable"
+                          }`
+                        : `Phone: ${transaction.displayPhone || "N/A"}`
                       : (transaction.network
                           ? `${transaction.network.toUpperCase()} - `
                           : "") + (transaction.data_amount || "Data Bundle")}
                   </Text>
                   {transaction.isSubAgentTransaction && (
-                    <>
-                      <Text style={styles.transactionDesc}>
-                        Sub-agent: {transaction.subAgentBusinessName || "N/A"}
-                      </Text>
-                      <Text style={styles.transactionDesc}>
-                        Base Ghc{" "}
-                        {Number(transaction.admin_share || 0).toFixed(2)} | Tier
-                        Ghc{" "}
-                        {Number(transaction.super_agent_share || 0).toFixed(2)}
-                      </Text>
-                    </>
+                    <View style={styles.settlementBreakdown}>
+                      <View style={styles.breakdownHeader}>
+                        <View>
+                          <Text style={styles.breakdownEyebrow}>
+                            Super Agent settlement
+                          </Text>
+                          <Text style={styles.breakdownSubAgent}>
+                            {transaction.subAgentBusinessName || "Sub-agent"}
+                          </Text>
+                        </View>
+                        <View style={styles.breakdownStatus}>
+                          <Text style={styles.breakdownStatusText}>
+                            {getStatusText(
+                              transaction.jehuca_order_status ||
+                                transaction.status,
+                            )}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.breakdownRows}>
+                        <View style={styles.breakdownRow}>
+                          <Text style={styles.breakdownLabel}>
+                            Customer payment
+                          </Text>
+                          <Text style={styles.breakdownValue}>
+                            {formatGhc(transaction.amount)}
+                          </Text>
+                        </View>
+                        <View style={styles.breakdownRow}>
+                          <Text style={styles.breakdownLabel}>
+                            Amount received
+                          </Text>
+                          <Text style={styles.breakdownReceived}>
+                            {formatGhc(transaction.super_agent_share)}
+                          </Text>
+                        </View>
+                        <View style={styles.breakdownRow}>
+                          <Text style={styles.breakdownLabel}>
+                            Paystack transaction fee
+                          </Text>
+                          <Text style={styles.breakdownFee}>
+                            {formatGhc(transaction.transaction_fee)}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.breakdownFooter}>
+                        <Text style={styles.breakdownFooterLabel}>
+                          Fee is kept by the platform
+                        </Text>
+                        <Text style={styles.breakdownFooterValue}>
+                          {formatGhc(transaction.main_account_amount)}
+                        </Text>
+                      </View>
+                    </View>
                   )}
                   <Text style={styles.transactionDate}>
                     {formatDate(transaction.created_at)}
                   </Text>
                 </View>
-                <View style={styles.transactionRight}>
-                  <Text
-                    style={[
-                      styles.transactionAmount,
-                      String(
-                        transaction.jehuca_order_status ||
-                          transaction.status ||
-                          "",
-                      ).toLowerCase() === "completed" &&
-                        styles.transactionAmountCompleted,
-                      String(
-                        transaction.jehuca_order_status ||
-                          transaction.status ||
-                          "",
-                      ).toLowerCase() === "processing" &&
-                        styles.transactionAmountProcessing,
-                      String(
-                        transaction.jehuca_order_status ||
-                          transaction.status ||
-                          "",
-                      ).toLowerCase() === "pending" &&
-                        styles.transactionAmountPending,
-                    ]}
-                  >
-                    {transaction.amount ? `Ghc ${transaction.amount}` : "N/A"}
-                  </Text>
-                  <View
-                    style={[
-                      styles.statusBadge,
-                      {
-                        backgroundColor: getStatusColor(
-                          transaction.jehuca_order_status || transaction.status,
-                        ),
-                      },
-                    ]}
-                  >
-                    <Text style={styles.statusText}>
-                      {getStatusText(
-                        transaction.jehuca_order_status || transaction.status,
-                      )}
+                {!(isSuperAgentUser && transaction.isSubAgentTransaction) && (
+                  <View style={styles.transactionRight}>
+                    <Text
+                      style={[
+                        styles.transactionAmount,
+                        String(
+                          transaction.jehuca_order_status ||
+                            transaction.status ||
+                            "",
+                        ).toLowerCase() === "completed" &&
+                          styles.transactionAmountCompleted,
+                        String(
+                          transaction.jehuca_order_status ||
+                            transaction.status ||
+                            "",
+                        ).toLowerCase() === "processing" &&
+                          styles.transactionAmountProcessing,
+                        String(
+                          transaction.jehuca_order_status ||
+                            transaction.status ||
+                            "",
+                        ).toLowerCase() === "pending" &&
+                          styles.transactionAmountPending,
+                      ]}
+                    >
+                      {transaction.amount ? `Ghc ${transaction.amount}` : "N/A"}
                     </Text>
+                    <View
+                      style={[
+                        styles.statusBadge,
+                        {
+                          backgroundColor: getStatusColor(
+                            transaction.jehuca_order_status ||
+                              transaction.status,
+                          ),
+                        },
+                      ]}
+                    >
+                      <Text style={styles.statusText}>
+                        {getStatusText(
+                          transaction.jehuca_order_status || transaction.status,
+                        )}
+                      </Text>
+                    </View>
                   </View>
-                  {isSuperAgentUser &&
-                    transaction.isSubAgentTransaction &&
-                    String(transaction.status).toLowerCase() === "held" && (
-                      <TouchableOpacity
-                        style={styles.reorderButton}
-                        onPress={() => reorderHeldOrder(transaction)}
-                        disabled={reorderingId === transaction.id}
-                      >
-                        <Ionicons name="refresh" size={14} color="#fff" />
-                        <Text style={styles.reorderButtonText}>
-                          {reorderingId === transaction.id
-                            ? "Retrying..."
-                            : "Reorder"}
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                </View>
+                )}
+                {isSuperAgentUser &&
+                  transaction.isSubAgentTransaction &&
+                  String(transaction.status).toLowerCase() === "held" && (
+                    <TouchableOpacity
+                      style={styles.reorderButton}
+                      onPress={() => reorderHeldOrder(transaction)}
+                      disabled={reorderingId === transaction.id}
+                    >
+                      <Ionicons name="refresh" size={14} color="#fff" />
+                      <Text style={styles.reorderButtonText}>
+                        {reorderingId === transaction.id
+                          ? "Retrying..."
+                          : "Reorder"}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
               </TouchableOpacity>
             ))}
           </View>
@@ -692,6 +765,12 @@ const styles = {
     shadowOpacity: 0.1,
     shadowRadius: 8,
   },
+  superAgentTransactionCard: {
+    flexDirection: "column",
+    alignItems: "stretch",
+    borderColor: "#d7e9df",
+    borderWidth: 1,
+  },
   transactionPlaceholder: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -763,6 +842,95 @@ const styles = {
   },
   transactionRight: {
     alignItems: "flex-end",
+  },
+  settlementBreakdown: {
+    backgroundColor: "#f4faf6",
+    borderColor: "#cfe8d8",
+    borderWidth: 1,
+    borderRadius: 16,
+    marginTop: 10,
+    padding: 12,
+    width: "100%",
+  },
+  breakdownHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  breakdownEyebrow: {
+    color: colors.secondary,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  breakdownSubAgent: {
+    color: colors.dark,
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 2,
+  },
+  breakdownStatus: {
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  breakdownStatusText: {
+    color: colors.white,
+    fontSize: 9,
+    fontWeight: "800",
+    textTransform: "uppercase",
+  },
+  breakdownRows: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  breakdownRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 4,
+  },
+  breakdownLabel: {
+    color: colors.secondary,
+    fontSize: 12,
+  },
+  breakdownValue: {
+    color: colors.dark,
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  breakdownReceived: {
+    color: colors.secondary,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  breakdownFee: {
+    color: colors.warning,
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  breakdownFooter: {
+    alignItems: "center",
+    borderTopColor: "#dcefe3",
+    borderTopWidth: 1,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 10,
+    paddingTop: 9,
+  },
+  breakdownFooterLabel: {
+    color: colors.secondary,
+    fontSize: 11,
+  },
+  breakdownFooterValue: {
+    color: colors.secondary,
+    fontSize: 12,
+    fontWeight: "800",
   },
   transactionAmount: {
     fontSize: 18,

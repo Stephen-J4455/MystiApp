@@ -24,7 +24,6 @@ export default function HomeScreen({ navigation }) {
   const [unreadCount, setUnreadCount] = useState(0);
   const [transactions, setTransactions] = useState([]);
   const [loadingTransactions, setLoadingTransactions] = useState(true);
-  const [agentBalance, setAgentBalance] = useState(0);
   const [ads, setAds] = useState([]);
   const [loadingAds, setLoadingAds] = useState(true);
   const [currentAdIndex, setCurrentAdIndex] = useState(0);
@@ -226,14 +225,15 @@ export default function HomeScreen({ navigation }) {
             )
             .subscribe();
 
-          // Subscribe to agent orders if user is agent
-          const { data: wallet } = await supabase
-            .from("agent_wallet")
-            .select("*")
-            .eq("agent_id", user.id)
-            .single();
-
-          if (wallet) {
+          // Subscribe to sub-agent orders using the role/assignment, not a wallet.
+          const normalizedRole = String(
+            user.user_metadata?.role || user.app_metadata?.role || "",
+          ).toLowerCase();
+          if (
+            normalizedRole === "agent" ||
+            normalizedRole === "sub_agent" ||
+            user.user_metadata?.super_agent_id
+          ) {
             agentOrdersSubscription = supabase
               .channel("home_agent_orders_realtime")
               .on(
@@ -352,22 +352,17 @@ export default function HomeScreen({ navigation }) {
       normalizedRole === "superagent" || normalizedRole === "super_agent";
     setIsSuperAgent(isSuperAgentUser);
 
-    // Check if user is an agent
+    // Check if user is a sub-agent using role and assignment metadata.
     if (user) {
       try {
-        const { data: wallet, error } = await supabase
-          .from("agent_wallet")
-          .select("*")
-          .eq("agent_id", user.id)
-          .single();
-
-        const walletExists = !error && wallet !== null;
         const agentStatus =
-          normalizedRole === "agent" || (walletExists && !isSuperAgentUser);
+          normalizedRole === "agent" ||
+          normalizedRole === "sub_agent" ||
+          Boolean(
+            user.user_metadata?.super_agent_id ||
+            user.user_metadata?.superAgentId,
+          );
         setIsAgent(agentStatus);
-        if (agentStatus && wallet) {
-          setAgentBalance(wallet.balance || 0);
-        }
 
         // Fetch data after determining agent status
         fetchRecentTransactions(agentStatus);
@@ -407,19 +402,14 @@ export default function HomeScreen({ navigation }) {
           normalizedRole === "superagent" || normalizedRole === "super_agent";
         setIsSuperAgent(isSuperAgentUser);
 
-        const { data: wallet, error } = await supabase
-          .from("agent_wallet")
-          .select("*")
-          .eq("agent_id", user.id)
-          .single();
-
-        const walletExists = !error && wallet !== null;
         const agentStatus =
-          normalizedRole === "agent" || (walletExists && !isSuperAgentUser);
+          normalizedRole === "agent" ||
+          normalizedRole === "sub_agent" ||
+          Boolean(
+            user.user_metadata?.super_agent_id ||
+            user.user_metadata?.superAgentId,
+          );
         setIsAgent(agentStatus);
-        if (agentStatus && wallet) {
-          setAgentBalance(wallet.balance || 0);
-        }
 
         if (refreshTransactions) {
           fetchRecentTransactions(agentStatus);
@@ -703,6 +693,27 @@ export default function HomeScreen({ navigation }) {
                         user.email?.split("@")[0] ||
                         "User"}
                     </Text>
+                    {isSuperAgent ? (
+                      <View style={[styles.roleBadge, styles.enterpriseBadge]}>
+                        <Ionicons
+                          name="business"
+                          size={11}
+                          color={colors.white}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={styles.roleBadgeText}>Enterprise</Text>
+                      </View>
+                    ) : isAgent ? (
+                      <View style={[styles.roleBadge, styles.agentBadge]}>
+                        <Ionicons
+                          name="people"
+                          size={11}
+                          color={colors.white}
+                          style={{ marginRight: 4 }}
+                        />
+                        <Text style={styles.roleBadgeText}>Agent</Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               )}
@@ -799,12 +810,12 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
-                    navigation.navigate("SuperAgentTopUpHistory");
+                    navigation.navigate("SuperAgentAnalytics");
                   }}
                 >
-                  <Ionicons name="wallet" size={18} color={colors.primary} />
+                  <Ionicons name="analytics" size={18} color={colors.primary} />
                   <Text style={styles.superAgentMenuText}>
-                    Sub-agent Top-up History
+                    Business Analytics
                   </Text>
                 </TouchableOpacity>
 
@@ -812,18 +823,17 @@ export default function HomeScreen({ navigation }) {
                   style={styles.superAgentMenuItem}
                   onPress={() => {
                     setMenuOpen(false);
-                    showSuccess(
-                      "Coming Soon",
-                      "AFA Registration feature will be available soon!",
-                    );
+                    navigation.navigate("AfaRegistration");
                   }}
                 >
                   <Ionicons
-                    name="person-add"
+                    name="shield-checkmark"
                     size={18}
-                    color={colors.primary}
+                    color={colors.secondary}
                   />
-                  <Text style={styles.superAgentMenuText}>AFA</Text>
+                  <Text style={styles.superAgentMenuText}>
+                    AFA Registration
+                  </Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -866,19 +876,19 @@ export default function HomeScreen({ navigation }) {
                   onPress={() => {
                     setMenuOpen(false);
                     const message =
-                      "Hi, I need help with the Mystiwan E-Business app";
-                    const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
+                      "Hi Admin, I need help with my Super Agent account on the Mystiwan E-Business app.";
+                    const whatsappUrl = `https://wa.me/message/45GU7PROOYDFE1?text=${encodeURIComponent(
                       message,
                     )}`;
                     Linking.openURL(whatsappUrl);
                   }}
                 >
                   <Ionicons
-                    name="help-circle-outline"
+                    name="logo-whatsapp"
                     size={18}
-                    color={colors.primary}
+                    color={colors.secondary}
                   />
-                  <Text style={styles.superAgentMenuText}>Help</Text>
+                  <Text style={styles.superAgentMenuText}>Contact Admin</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1169,14 +1179,13 @@ export default function HomeScreen({ navigation }) {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.actionButton}
-              onPress={() => {
-                showSuccess(
-                  "Coming Soon",
-                  "AFA Registration feature will be available soon!",
-                );
-              }}
+              onPress={() => navigation.navigate("AfaRegistration")}
             >
-              <Ionicons name="person-add" size={24} color={colors.primary} />
+              <Ionicons
+                name="shield-checkmark"
+                size={24}
+                color={colors.secondary}
+              />
               <Text style={styles.actionText}>AFA Reg</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -1362,6 +1371,11 @@ const styles = {
   userInfo: {
     marginLeft: 12,
   },
+  usernameContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexShrink: 1,
+  },
   welcomeText: {
     fontSize: 12,
     color: colors.dark,
@@ -1372,6 +1386,30 @@ const styles = {
     fontSize: 18,
     fontWeight: "700",
     color: colors.dark,
+    flexShrink: 1,
+  },
+  roleBadge: {
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    marginLeft: 8,
+    flexShrink: 0,
+  },
+  agentBadge: {
+    backgroundColor: colors.accent,
+  },
+  enterpriseBadge: {
+    backgroundColor: colors.secondary,
+  },
+  roleBadgeText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
   },
   headerActions: {
     flexDirection: "row",

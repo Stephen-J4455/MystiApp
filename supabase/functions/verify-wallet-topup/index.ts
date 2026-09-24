@@ -87,6 +87,21 @@ Deno.serve(async (req) => {
       );
     }
 
+    const userRole = String(
+      user.user_metadata?.role || user.app_metadata?.role || "",
+    ).toLowerCase();
+    if (userRole !== "superagent" && userRole !== "super_agent") {
+      return new Response(
+        JSON.stringify({
+          error: "Only Super Agents can fund an operational wallet",
+        }),
+        {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
     // Verify payment with Paystack
     const appEnv = (Deno.env.get("APP_ENV") || "").toLowerCase().trim();
     const paystackSecret =
@@ -290,10 +305,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    const userRole = String(
-      user.user_metadata?.role || user.app_metadata?.role || "",
-    ).toLowerCase();
-    if (userRole === "superagent" || userRole === "super_agent") {
+    {
       const { data: creditResult, error: creditError } =
         await supabaseAdmin.rpc("credit_super_agent_wallet", {
           p_super_agent_id: user.id,
@@ -332,120 +344,6 @@ Deno.serve(async (req) => {
         },
       );
     }
-
-    // Get or create agent_wallet
-    let { data: wallet, error: walletError } = await supabaseAdmin
-      .from("agent_wallet")
-      .select("*")
-      .eq("agent_id", user.id)
-      .single();
-
-    if (walletError && walletError.code !== "PGRST116") {
-      // PGRST116 is not found
-      console.error("Error fetching agent_wallet:", walletError);
-      return new Response(
-        JSON.stringify({
-          error: "Failed to fetch agent wallet",
-          details: walletError,
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
-    }
-
-    if (!wallet) {
-      // Create new wallet
-      const { data: newWallet, error: createError } = await supabaseAdmin
-        .from("agent_wallet")
-        .insert({
-          agent_id: user.id,
-          balance: 0,
-        })
-        .select()
-        .single();
-
-      if (createError) {
-        console.error("Failed to create agent_wallet:", createError);
-        return new Response(
-          JSON.stringify({
-            error: "Failed to create agent wallet",
-            details: createError,
-          }),
-          {
-            status: 500,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
-      }
-      wallet = newWallet;
-    }
-
-    // Update balance
-    const newBalance = (wallet.balance || 0) + existingTopup.amount;
-
-    const { error: balanceError } = await supabaseAdmin
-      .from("agent_wallet")
-      .update({ balance: newBalance })
-      .eq("agent_id", user.id);
-
-    if (balanceError) {
-      console.error("Failed to update agent_wallet balance:", balanceError);
-      return new Response(
-        JSON.stringify({
-          error: "Failed to update wallet balance",
-          details: balanceError,
-        }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
-    }
-
-    // Send notification to the user
-    try {
-      console.log("Sending push notification to user...");
-
-      await supabaseAuth.functions.invoke("send-notification", {
-        body: {
-          userId: user.id,
-          title: "Wallet Top-up Successful",
-          message: `Your wallet has been credited with GHS ${existingTopup.amount}. New balance: GHS ${newBalance}`,
-          type: "wallet_topup",
-        },
-      });
-    } catch (pushError) {
-      console.error("Error sending push notification to user:", pushError);
-    }
-
-    // Notify admins about the top-up
-    try {
-      console.log("Notifying admins about wallet top-up...");
-      await supabaseAuth.functions.invoke("send-notification", {
-        body: {
-          sendToAdmins: true,
-          title: "Agent Wallet Top-up",
-          message: `Agent ${user.email} topped up GHS ${existingTopup.amount}. New balance: GHS ${newBalance}`,
-          type: "wallet_topup",
-        },
-      });
-    } catch (adminNotifyError) {
-      console.error("Error notifying admins:", adminNotifyError);
-    }
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        message: "Wallet topup verified and balance updated successfully",
-        new_balance: newBalance,
-      }),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      },
-    );
   } catch (error) {
     console.error("Unexpected error:", error);
     return new Response(

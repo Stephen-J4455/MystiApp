@@ -92,10 +92,14 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
   const assignedSuperAgentId = String(
     user.user_metadata?.super_agent_id ||
       user.user_metadata?.superAgentId ||
+      user.app_metadata?.super_agent_id ||
+      user.app_metadata?.superAgentId ||
       "",
   ).trim();
 
-  const agentTier = String(user.user_metadata?.tier_name || "").trim();
+  const agentTier = String(
+    user.user_metadata?.tier_name || user.app_metadata?.tier_name || "",
+  ).trim();
 
   if (!assignedSuperAgentId) {
     return {
@@ -114,10 +118,29 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
       );
 
     if (!edgeError && edgeData && Array.isArray(edgeData.offers)) {
+      if (edgeData.migration_required) {
+        return {
+          offers: [],
+          agent_tier: edgeData.agent_tier || agentTier || null,
+          super_agent_id: assignedSuperAgentId,
+          error:
+            edgeData.error || "The assigned package database is not ready.",
+        };
+      }
+
       return {
         offers: edgeData.offers,
         agent_tier: edgeData.agent_tier || agentTier || null,
         super_agent_id: edgeData.super_agent_id || assignedSuperAgentId,
+      };
+    }
+
+    if (edgeError) {
+      return {
+        offers: [],
+        agent_tier: agentTier || null,
+        super_agent_id: assignedSuperAgentId,
+        error: edgeError.message || "Could not load assigned packages.",
       };
     }
   } catch (edgeErr) {
@@ -148,18 +171,20 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
     const publishedOffers = Array.isArray(offerRows) ? offerRows : [];
     const packageKeyOf = (row) =>
       `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+    const offerTier = (row) =>
+      String(row?.tier_name || row?.default_tier_name || "").trim();
 
     // Tier offers win; General (untiered) offers fill any bundle the tier does not cover
     const tierOffers = agentTier
       ? publishedOffers.filter(
-          (row) => normalizeKey(row?.tier_name) === normalizeKey(agentTier),
+          (row) => normalizeKey(offerTier(row)) === normalizeKey(agentTier),
         )
       : [];
 
     const coveredKeys = new Set(tierOffers.map(packageKeyOf));
 
     const generalOffers = publishedOffers.filter(
-      (row) => String(row?.tier_name || "").trim() === "",
+      (row) => offerTier(row) === "",
     );
 
     const selectedOffers = [...tierOffers];
@@ -189,7 +214,7 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
           : tierPrice;
 
         return {
-          id: catalogPackage?.id ? String(catalogPackage.id) : String(row.id),
+          id: String(row.id),
           superAgentOfferId: row.id,
           package_id: catalogPackage?.id ?? null,
           network: normalizeKey(row?.network),
@@ -204,7 +229,7 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
           price: tierPrice,
           base_price: basePrice,
           tier_extra: Math.max(0, tierPrice - basePrice),
-          tier_name: row?.tier_name || null,
+          tier_name: offerTier(row) || null,
           size: size !== null && size !== undefined ? size : null,
           dataSize:
             size !== null && size !== undefined

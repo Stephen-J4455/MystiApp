@@ -148,6 +148,7 @@ Deno.serve(async (req) => {
         payment_reference: reference,
         is_self: recipientPhone === (user.user_metadata?.phone || ""),
         data_amount: orderTitle,
+        buyer_type: "super_agent",
         offer_id: null,
         device_token: null,
         country_code: "GH",
@@ -207,6 +208,7 @@ Deno.serve(async (req) => {
           order_id: order.id,
           order_type: "regular",
           payment_reference: reference,
+          buyer_type: "super_agent",
           gross_amount: walletAmount,
           base_amount: Number(base_price || walletAmount),
           transaction_fee: Number(transaction_fee || 0),
@@ -617,6 +619,7 @@ Deno.serve(async (req) => {
         transaction_status: verifyData.data.status,
         channel: sharedOrderFields.channel,
         device_token: null,
+        buyer_type: "sub_agent",
         super_agent_id: resolvedSuperAgentId,
         admin_share: settlement.adminShare,
         super_agent_share: settlement.superAgentShare,
@@ -660,6 +663,7 @@ Deno.serve(async (req) => {
         payment_reference: reference,
         is_self: isSelfPurchase,
         data_amount: orderTitle,
+        buyer_type: "normal_user",
         // Normal-user package IDs come from Jehuca, not public.offers.
         // Keep this nullable unless a matching local offer was found so the
         // orders foreign key is not given an unrelated provider package ID.
@@ -802,6 +806,7 @@ Deno.serve(async (req) => {
         order_id: order.id,
         order_type: isAgentOrder ? "agent" : "regular",
         payment_reference: reference,
+        buyer_type: isAgentOrder ? "sub_agent" : "normal_user",
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
         paystack_transaction_status:
           sharedOrderFields.paystack_transaction_status,

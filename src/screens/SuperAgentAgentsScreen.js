@@ -92,7 +92,8 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         getEdgeFunctionName("super-agent-user-management"),
         {
           body: {
-            action: "listAgentsWithBalances",
+            action: "listUsers",
+            superAgentId,
           },
         },
       );
@@ -418,10 +419,6 @@ export default function SuperAgentAgentsScreen({ navigation }) {
                         "Business name not set"}
                     </Text>
                     <Text style={styles.agentMeta}>{agent.email}</Text>
-                    <Text style={styles.agentBalance}>
-                      Wallet balance: Ghc{" "}
-                      {Number(agent.wallet_balance || 0).toFixed(2)}
-                    </Text>
 
                     <Text style={styles.agentTierLabel}>
                       {savingTierAgentId === agent.id

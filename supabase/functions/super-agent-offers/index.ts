@@ -17,7 +17,7 @@ const normalizeRole = (user: any) => {
   if (normalized === "admin") return "Admin";
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
-  if (normalized === "agent") return "Agent";
+  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
 
   return role;
 };
@@ -827,9 +827,13 @@ Deno.serve(async (req) => {
       const assignedSuperAgentId = String(
         user.user_metadata?.super_agent_id ||
           user.user_metadata?.superAgentId ||
+          user.app_metadata?.super_agent_id ||
+          user.app_metadata?.superAgentId ||
           "",
       ).trim();
-      const agentTier = String(user.user_metadata?.tier_name || "").trim();
+      const agentTier = String(
+        user.user_metadata?.tier_name || user.app_metadata?.tier_name || "",
+      ).trim();
 
       if (!assignedSuperAgentId) {
         return new Response(
@@ -872,17 +876,19 @@ Deno.serve(async (req) => {
       const publishedOffers = (offerRows || []) as any[];
       const packageKeyOf = (row: any) =>
         `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+      const offerTier = (row: any) =>
+        String(row?.tier_name || row?.default_tier_name || "").trim();
 
       // Tier prices win; the super agent's untiered (General) offers fill any
       // bundle the tier does not cover. Bundles priced nowhere stay hidden.
       const tierOffers = agentTier
         ? publishedOffers.filter(
-            (row) => normalizeKey(row?.tier_name) === normalizeKey(agentTier),
+            (row) => normalizeKey(offerTier(row)) === normalizeKey(agentTier),
           )
         : [];
       const coveredKeys = new Set(tierOffers.map(packageKeyOf));
       const generalOffers = publishedOffers.filter(
-        (row) => String(row?.tier_name || "").trim() === "",
+        (row) => offerTier(row) === "",
       );
 
       const selectedOffers = [...tierOffers];
@@ -932,7 +938,7 @@ Deno.serve(async (req) => {
                   ? Number(catalogPackage.price) / 100
                   : Number(row?.price || 0)),
             ),
-            tier_name: row?.tier_name || null,
+            tier_name: offerTier(row) || null,
             package_id: catalogPackage?.id ?? null,
             type: catalogPackage?.type ?? null,
             size: size !== null && size !== undefined ? size : null,
