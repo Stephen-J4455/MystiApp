@@ -8,6 +8,7 @@ import {
   Switch,
   Animated,
   StatusBar,
+  Linking,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -457,6 +458,25 @@ export default function ProfileScreen({ navigation }) {
                 color={colors.primary}
               />
               <Text style={styles.appInfoText}>Privacy Policy</Text>
+              <Ionicons
+                name="chevron-forward"
+                size={16}
+                color={colors.secondary}
+              />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.appInfoItem}
+              onPress={() => {
+                const message =
+                  "Hi Admin, I need help with the Mystiwan E-Business app.";
+                const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
+                  message,
+                )}`;
+                Linking.openURL(whatsappUrl);
+              }}
+            >
+              <Ionicons name="logo-whatsapp" size={20} color="#25D366" />
+              <Text style={styles.appInfoText}>Contact Admin</Text>
               <Ionicons
                 name="chevron-forward"
                 size={16}
