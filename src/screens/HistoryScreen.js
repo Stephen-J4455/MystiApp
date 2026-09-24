@@ -13,6 +13,7 @@ import { supabase } from "../lib/supabase";
 import colors from "../components/theme";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
+import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { useNotification } from "../contexts/NotificationContext";
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
@@ -359,23 +360,16 @@ export default function HistoryScreen({ navigation }) {
       const reorderFunctionName = getEdgeFunctionName(
         "reorder-held-agent-order",
       );
-      let reorderResult = await supabase.functions.invoke(reorderFunctionName, {
-        body: { order_id: order.id },
-      });
-      if (
-        reorderResult.error &&
-        reorderFunctionName !== "reorder-held-agent-order"
-      ) {
-        reorderResult = await supabase.functions.invoke(
-          "reorder-held-agent-order",
-          { body: { order_id: order.id } },
-        );
-      }
-      const { data, error } = reorderResult;
+      const { data, error } = await supabase.functions.invoke(
+        reorderFunctionName,
+        { body: { order_id: order.id } },
+      );
       if (error || !data?.success) {
-        throw new Error(
-          data?.error || error?.message || "Could not reorder held order",
+        const message = await getEdgeFunctionErrorMessage(
+          error,
+          data?.error || "Could not reorder held order.",
         );
+        throw new Error(message);
       }
       showSuccess("Order Reordered", "The package was sent to Jehucal.");
       await checkAgentStatus(true);

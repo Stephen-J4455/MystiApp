@@ -9,14 +9,13 @@ import {
   View,
   Text,
   TouchableOpacity,
-  ScrollView,
   StyleSheet,
   TextInput,
   Modal,
-  StatusBar,
-  KeyboardAvoidingView,
   Platform,
+  StatusBar,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase, getPaystackPublicKey } from "../lib/supabase";
@@ -489,9 +488,11 @@ export default function WalletTopUpScreen({ navigation }) {
         >
           <Ionicons name="arrow-back" size={20} color="#333" />
         </TouchableOpacity>
-        <KeyboardAvoidingView
-          style={styles.flex}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        <KeyboardAwareScrollView
+          style={styles.content}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
         >
           <View style={styles.header}>
             <Text style={styles.title}>
@@ -507,12 +508,7 @@ export default function WalletTopUpScreen({ navigation }) {
               Ghc {currentBalance.toFixed(2)}
             </Text>
           </View>
-          <ScrollView
-            style={styles.content}
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
+          <View>
             <Text style={styles.sectionTitle}>Quick Select</Text>
             <View style={styles.amountGrid}>
               {predefinedAmounts.map((preset) => (
@@ -581,8 +577,8 @@ export default function WalletTopUpScreen({ navigation }) {
                 <Text style={styles.payButtonText}>Proceed to Pay</Text>
               )}
             </TouchableOpacity>
-          </ScrollView>
-        </KeyboardAvoidingView>
+          </View>
+        </KeyboardAwareScrollView>
         {Platform.OS !== "web" && (
           <Modal
             visible={paystackModalVisible}

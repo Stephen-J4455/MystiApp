@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -25,7 +26,9 @@ const getPackageDescriptor = (pkg) => {
   if (!pkg) return "";
   const type = String(pkg.type || "").trim();
   const size =
-    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+    pkg.size !== undefined &&
+    pkg.size !== null &&
+    String(pkg.size).trim() !== ""
       ? `${pkg.size}GB`
       : "";
   if (size && !type.toUpperCase().includes(size.toUpperCase())) {
@@ -49,15 +52,20 @@ const findPricingRowForPackage = (rows, pkg) => {
   const desc = getPackageDescriptor(pkg).toUpperCase();
   const type = String(pkg.type || "").toUpperCase();
   const sizeStr =
-    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+    pkg.size !== undefined &&
+    pkg.size !== null &&
+    String(pkg.size).trim() !== ""
       ? `${pkg.size}GB`.toUpperCase()
       : "";
 
   return (
     rows.find((row) => {
       if (String(row.network || "").toUpperCase() !== net) return false;
-      const rowType = String(row.type || "").trim().toUpperCase();
-      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase()) return true;
+      const rowType = String(row.type || "")
+        .trim()
+        .toUpperCase();
+      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase())
+        return true;
       if (rowType === desc) return true;
       if (
         sizeStr &&
@@ -122,9 +130,8 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
     const offersByKey = {};
     (offers || []).forEach((offer) => {
-      offersByKey[
-        offerKey(offer.tier_name, offer.network, offer.data_value)
-      ] = offer;
+      offersByKey[offerKey(offer.tier_name, offer.network, offer.data_value)] =
+        offer;
     });
 
     const inputs = {};
@@ -487,9 +494,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           <TextInput
             style={styles.priceInput}
             value={priceInputs[inputKey] ?? ""}
-            onChangeText={(text) =>
-              handlePriceChange(tier.id, pkgKey, text)
-            }
+            onChangeText={(text) => handlePriceChange(tier.id, pkgKey, text)}
             placeholder="0.00"
             placeholderTextColor="#9AA5AF"
             keyboardType="decimal-pad"
@@ -532,7 +537,9 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         </View>
 
         {filteredPackages.length === 0 ? (
-          <Text style={styles.tierEmptyText}>No packages match this filter.</Text>
+          <Text style={styles.tierEmptyText}>
+            No packages match this filter.
+          </Text>
         ) : (
           filteredPackages.map((pkg) => renderPackageRow(tier, pkg))
         )}
@@ -549,7 +556,8 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             <ActivityIndicator size="small" color="#fff" />
           ) : (
             <Text style={styles.saveTierText}>
-              Save {tier.name} Prices{changedCount > 0 ? ` (${changedCount})` : ""}
+              Save {tier.name} Prices
+              {changedCount > 0 ? ` (${changedCount})` : ""}
             </Text>
           )}
         </TouchableOpacity>
@@ -591,12 +599,17 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      <ScrollView
+      <KeyboardAwareScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         <View style={styles.infoCard}>
-          <Ionicons name="information-circle" size={20} color={colors.primary} />
+          <Ionicons
+            name="information-circle"
+            size={20}
+            color={colors.primary}
+          />
           <Text style={styles.infoText}>
             Every bundle starts at the admin base price. Adjust the amounts to
             set what your agents pay in this tier, then save. Fields you leave
@@ -688,7 +701,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         ) : (
           tiers.map((tier) => renderTierSection(tier))
         )}
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 }

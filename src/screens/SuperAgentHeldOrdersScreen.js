@@ -11,6 +11,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
+import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 
@@ -50,21 +51,17 @@ export default function SuperAgentHeldOrdersScreen({ navigation }) {
       const reorderFunctionName = getEdgeFunctionName(
         "reorder-held-agent-order",
       );
-      let reorderResult = await supabase.functions.invoke(reorderFunctionName, {
-        body: { order_id: order.id },
-      });
-      if (
-        reorderResult.error &&
-        reorderFunctionName !== "reorder-held-agent-order"
-      ) {
-        reorderResult = await supabase.functions.invoke(
-          "reorder-held-agent-order",
-          { body: { order_id: order.id } },
+      const { data, error } = await supabase.functions.invoke(
+        reorderFunctionName,
+        { body: { order_id: order.id } },
+      );
+      if (error || !data?.success) {
+        const message = await getEdgeFunctionErrorMessage(
+          error,
+          data?.error || "Could not reorder this held order.",
         );
+        throw new Error(message);
       }
-      const { data, error } = reorderResult;
-      if (error || !data?.success)
-        throw new Error(data?.error || error?.message || "Retry failed");
       showSuccess(
         "Order Reordered",
         "The held order was sent to the provider.",

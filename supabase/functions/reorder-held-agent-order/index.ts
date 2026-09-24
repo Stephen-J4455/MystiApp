@@ -74,16 +74,14 @@ Deno.serve(async (req) => {
     if (orderError || !order)
       return respond({ error: "Held order not found" }, 404);
 
-    let providerPackageId = String(
-      order.provider_package_id || order.offer_id || "",
-    );
+    let providerPackageId = String(order.provider_package_id || "");
     const title = String(order.offer_title || "").toUpperCase();
     const inferredSize = Number(title.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0);
     let providerSize = Number(order.provider_size || inferredSize);
     let providerType = String(order.provider_type || "")
       .trim()
       .toUpperCase();
-    const network = String(order.network || "")
+    let network = String(order.network || "")
       .trim()
       .toUpperCase();
     const baseAmount = Number(order.base_amount || 0);
@@ -96,7 +94,69 @@ Deno.serve(async (req) => {
       return normalized.split(/[(-]/)[0].trim();
     };
 
-    if (!providerPackageId || !providerSize || !phone) {
+    if (order.offer_id !== null && order.offer_id !== undefined) {
+      const { data: localOffer, error: localOfferError } = await admin
+        .from("super_agent_offers")
+        .select("id, network, data_value")
+        .eq("id", order.offer_id)
+        .maybeSingle();
+
+      if (localOfferError) {
+        console.error(
+          "[Reorder] Failed to load the original Super Agent offer:",
+          localOfferError,
+        );
+      } else if (localOffer) {
+        const descriptor = String(localOffer.data_value || "")
+          .trim()
+          .toUpperCase();
+        const offerNetwork = String(localOffer.network || network)
+          .trim()
+          .toUpperCase();
+        const catalogResponse = await fetch(
+          "https://backend.jehucale-business.com/api/packages",
+          { headers: { "X-API-Key": apiKey } },
+        );
+        const catalogPayload = await catalogResponse.json();
+        const catalog = Array.isArray(catalogPayload?.payload)
+          ? catalogPayload.payload
+          : Array.isArray(catalogPayload)
+            ? catalogPayload
+            : [];
+        const catalogMatch = catalog.find((item: any) => {
+          const itemNetwork = String(item?.network || "")
+            .trim()
+            .toUpperCase();
+          const itemType = String(item?.type || "")
+            .trim()
+            .toUpperCase();
+          const itemSize = Number(item?.size || 0);
+          const itemDescriptor = itemSize
+            ? `${itemType}${itemType.includes(`${itemSize}GB`) ? "" : ` - ${itemSize}GB`}`
+            : itemType;
+          return (
+            itemNetwork === offerNetwork &&
+            (itemDescriptor === descriptor ||
+              String(item?.id || "").toUpperCase() === descriptor)
+          );
+        });
+
+        if (catalogMatch) {
+          providerPackageId = String(catalogMatch.id || "");
+          providerType = normalizeProviderType(
+            String(catalogMatch.type || providerType),
+          );
+          providerSize = Number(catalogMatch.size || providerSize);
+          network = offerNetwork;
+        } else {
+          // Older orders sometimes stored the local Super Agent offer ID in
+          // provider_package_id. Never send that local ID to Jehuca.
+          providerPackageId = "";
+        }
+      }
+    }
+
+    if (!providerPackageId || !providerSize || !providerType || !phone) {
       const { data: pricingRows, error: pricingError } = await admin
         .from("package_pricing")
         .select("package_id, network, type, size, base_price")

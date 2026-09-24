@@ -6,11 +6,10 @@ import {
   TouchableOpacity,
   StyleSheet,
   Image,
-  KeyboardAvoidingView,
-  Platform,
   ActivityIndicator,
   StatusBar,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
@@ -55,7 +54,7 @@ export default function ResetPasswordScreen({ navigation }) {
 
       if (!sessionData?.session) {
         throw new Error(
-          "No active session found. Please request a new password reset link."
+          "No active session found. Please request a new password reset link.",
         );
       }
 
@@ -75,7 +74,7 @@ export default function ResetPasswordScreen({ navigation }) {
 
       showSuccess(
         "Password Updated",
-        "Your password has been successfully reset"
+        "Your password has been successfully reset",
       );
 
       setStatusMessage("Success! Redirecting...");
@@ -117,10 +116,7 @@ export default function ResetPasswordScreen({ navigation }) {
         backgroundColor="transparent"
         barStyle="dark-content"
       />
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
         <View style={styles.content}>
           <Image
             source={require("../../assets/mystiwan.png")}

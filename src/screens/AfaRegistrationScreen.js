@@ -1,10 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
   Modal,
   Platform,
-  ScrollView,
   StatusBar,
   StyleSheet,
   Text,
@@ -12,6 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { WebView } from "react-native-webview";
@@ -279,284 +278,266 @@ export default function AfaRegistrationScreen({ navigation }) {
         </View>
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      <KeyboardAwareScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
       >
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-        >
-          <View style={styles.hero}>
-            <View style={styles.heroIcon}>
-              <Ionicons
-                name="shield-checkmark"
-                size={30}
-                color={colors.white}
+        <View style={styles.hero}>
+          <View style={styles.heroIcon}>
+            <Ionicons name="shield-checkmark" size={30} color={colors.white} />
+          </View>
+          <View style={styles.heroCopy}>
+            <Text style={styles.heroTitle}>
+              {activeRegistration
+                ? "Registration Active"
+                : "Register with confidence"}
+            </Text>
+            <Text style={styles.heroText}>
+              {activeRegistration
+                ? `${registrations.length} request${registrations.length !== 1 ? "s" : ""} recorded · ${new Date(activeRegistration.paid_at || activeRegistration.created_at).toLocaleDateString()}`
+                : "Submit your valid identity details and complete the official AFA registration payment."}
+            </Text>
+          </View>
+        </View>
+
+        {activeRegistration && (
+          <View style={styles.activeCard}>
+            <View style={styles.activeTopRow}>
+              <View style={styles.activeIdentity}>
+                <View style={styles.activeAvatar}>
+                  <Text style={styles.activeAvatarText}>
+                    {activeRegistration.full_name.charAt(0).toUpperCase()}
+                  </Text>
+                </View>
+                <View style={styles.activeIdentityCopy}>
+                  <Text style={styles.activeName}>
+                    {activeRegistration.full_name}
+                  </Text>
+                  <Text style={styles.activePhone}>
+                    {activeRegistration.phone}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.activeStatus}>
+                <View style={styles.activeDot} />
+                <Text style={styles.activeStatusText}>Active</Text>
+              </View>
+            </View>
+            <View style={styles.activeDivider} />
+            <View style={styles.activeInfoGrid}>
+              <ActiveInfo
+                icon="id-card-outline"
+                label="ID number"
+                value={activeRegistration.id_number}
+              />
+              <ActiveInfo
+                icon="shield-checkmark-outline"
+                label="ID type"
+                value={activeRegistration.id_type}
+              />
+              <ActiveInfo
+                icon="cash-outline"
+                label="Paid amount"
+                value={`GHS ${Number(activeRegistration.fee_amount).toFixed(2)}`}
+              />
+              <ActiveInfo
+                icon="card-outline"
+                label="Payment"
+                value={
+                  activeRegistration.payment_method === "wallet"
+                    ? "Wallet"
+                    : "Paystack"
+                }
               />
             </View>
-            <View style={styles.heroCopy}>
-              <Text style={styles.heroTitle}>
-                {activeRegistration
-                  ? "Registration Active"
-                  : "Register with confidence"}
-              </Text>
-              <Text style={styles.heroText}>
-                {activeRegistration
-                  ? `${registrations.length} request${registrations.length !== 1 ? "s" : ""} recorded · ${new Date(activeRegistration.paid_at || activeRegistration.created_at).toLocaleDateString()}`
-                  : "Submit your valid identity details and complete the official AFA registration payment."}
+            <View style={styles.activeReference}>
+              <Text style={styles.activeReferenceLabel}>PAYMENT REFERENCE</Text>
+              <Text style={styles.activeReferenceValue} numberOfLines={1}>
+                {activeRegistration.payment_reference}
               </Text>
             </View>
+            <TouchableOpacity
+              style={styles.requestAnotherButton}
+              onPress={() => {
+                setRequestingAnother(true);
+                setForm(initialForm);
+              }}
+              disabled={!settings?.is_enabled}
+            >
+              <View style={styles.requestAnotherIcon}>
+                <Ionicons name="add" size={20} color={colors.secondary} />
+              </View>
+              <View style={styles.requestAnotherCopy}>
+                <Text style={styles.requestAnotherTitle}>
+                  Request another registration
+                </Text>
+                <Text style={styles.requestAnotherText}>
+                  Create a new request with separate details and payment
+                </Text>
+              </View>
+              <Ionicons
+                name="chevron-forward"
+                size={19}
+                color={colors.secondary}
+              />
+            </TouchableOpacity>
           </View>
+        )}
 
-          {activeRegistration && (
-            <View style={styles.activeCard}>
-              <View style={styles.activeTopRow}>
-                <View style={styles.activeIdentity}>
-                  <View style={styles.activeAvatar}>
-                    <Text style={styles.activeAvatarText}>
-                      {activeRegistration.full_name.charAt(0).toUpperCase()}
-                    </Text>
-                  </View>
-                  <View style={styles.activeIdentityCopy}>
-                    <Text style={styles.activeName}>
-                      {activeRegistration.full_name}
-                    </Text>
-                    <Text style={styles.activePhone}>
-                      {activeRegistration.phone}
-                    </Text>
-                  </View>
-                </View>
-                <View style={styles.activeStatus}>
-                  <View style={styles.activeDot} />
-                  <Text style={styles.activeStatusText}>Active</Text>
-                </View>
-              </View>
-              <View style={styles.activeDivider} />
-              <View style={styles.activeInfoGrid}>
-                <ActiveInfo
-                  icon="id-card-outline"
-                  label="ID number"
-                  value={activeRegistration.id_number}
-                />
-                <ActiveInfo
-                  icon="shield-checkmark-outline"
-                  label="ID type"
-                  value={activeRegistration.id_type}
-                />
-                <ActiveInfo
-                  icon="cash-outline"
-                  label="Paid amount"
-                  value={`GHS ${Number(activeRegistration.fee_amount).toFixed(2)}`}
-                />
-                <ActiveInfo
-                  icon="card-outline"
-                  label="Payment"
-                  value={
-                    activeRegistration.payment_method === "wallet"
-                      ? "Wallet"
-                      : "Paystack"
-                  }
-                />
-              </View>
-              <View style={styles.activeReference}>
-                <Text style={styles.activeReferenceLabel}>
-                  PAYMENT REFERENCE
-                </Text>
-                <Text style={styles.activeReferenceValue} numberOfLines={1}>
-                  {activeRegistration.payment_reference}
+        {(requestingAnother || !activeRegistration) && settings?.is_enabled && (
+          <>
+            <View style={styles.feeCard}>
+              <View>
+                <Text style={styles.feeLabel}>REGISTRATION FEE</Text>
+                <Text style={styles.feeNote}>
+                  {isSuperAgent
+                    ? "Paid from your Super Agent wallet"
+                    : "Pay securely to the platform account"}
                 </Text>
               </View>
-              <TouchableOpacity
-                style={styles.requestAnotherButton}
-                onPress={() => {
-                  setRequestingAnother(true);
-                  setForm(initialForm);
-                }}
-                disabled={!settings?.is_enabled}
-              >
-                <View style={styles.requestAnotherIcon}>
-                  <Ionicons name="add" size={20} color={colors.secondary} />
-                </View>
-                <View style={styles.requestAnotherCopy}>
-                  <Text style={styles.requestAnotherTitle}>
-                    Request another registration
-                  </Text>
-                  <Text style={styles.requestAnotherText}>
-                    Create a new request with separate details and payment
-                  </Text>
-                </View>
-                <Ionicons
-                  name="chevron-forward"
-                  size={19}
-                  color={colors.secondary}
-                />
-              </TouchableOpacity>
+              <Text style={styles.feeAmount}>
+                GHS {Number(settings.registration_fee).toFixed(2)}
+              </Text>
             </View>
-          )}
 
-          {(requestingAnother || !activeRegistration) &&
-            settings?.is_enabled && (
-              <>
-                <View style={styles.feeCard}>
-                  <View>
-                    <Text style={styles.feeLabel}>REGISTRATION FEE</Text>
-                    <Text style={styles.feeNote}>
-                      {isSuperAgent
-                        ? "Paid from your Super Agent wallet"
-                        : "Pay securely to the platform account"}
+            <View style={styles.formCard}>
+              <View style={styles.formHeaderRow}>
+                <View style={styles.formHeaderCopy}>
+                  <Text style={styles.sectionTitle}>
+                    {activeRegistration
+                      ? "New registration request"
+                      : "Personal details"}
+                  </Text>
+                  <Text style={styles.sectionSubtitle}>
+                    Enter the details and payment for this request.
+                  </Text>
+                </View>
+                {activeRegistration && requestingAnother ? (
+                  <TouchableOpacity
+                    style={styles.closeFormButton}
+                    onPress={() => {
+                      setRequestingAnother(false);
+                      setForm(initialForm);
+                    }}
+                  >
+                    <Ionicons name="close" size={20} color={colors.secondary} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+              <Field
+                label="Full name"
+                icon="person-outline"
+                value={form.fullName}
+                onChangeText={(v) => updateField("fullName", v)}
+                placeholder="Enter your full legal name"
+              />
+              <Field
+                label="Phone number"
+                icon="call-outline"
+                value={form.phone}
+                onChangeText={(v) => updateField("phone", v)}
+                placeholder="e.g. 0244000000"
+                keyboardType="phone-pad"
+              />
+              <Text style={styles.label}>ID type</Text>
+              <View style={styles.idTypeRow}>
+                {["National ID", "Voters ID"].map((type) => (
+                  <TouchableOpacity
+                    key={type}
+                    style={[
+                      styles.idTypeButton,
+                      form.idType === type && styles.idTypeButtonActive,
+                    ]}
+                    onPress={() => updateField("idType", type)}
+                  >
+                    <Ionicons
+                      name={
+                        form.idType === type
+                          ? "radio-button-on"
+                          : "radio-button-off"
+                      }
+                      size={17}
+                      color={
+                        form.idType === type ? colors.secondary : colors.border
+                      }
+                    />
+                    <Text
+                      style={[
+                        styles.idTypeText,
+                        form.idType === type && styles.idTypeTextActive,
+                      ]}
+                    >
+                      {type}
                     </Text>
-                  </View>
-                  <Text style={styles.feeAmount}>
-                    GHS {Number(settings.registration_fee).toFixed(2)}
-                  </Text>
-                </View>
-
-                <View style={styles.formCard}>
-                  <View style={styles.formHeaderRow}>
-                    <View style={styles.formHeaderCopy}>
-                      <Text style={styles.sectionTitle}>
-                        {activeRegistration
-                          ? "New registration request"
-                          : "Personal details"}
-                      </Text>
-                      <Text style={styles.sectionSubtitle}>
-                        Enter the details and payment for this request.
-                      </Text>
-                    </View>
-                    {activeRegistration && requestingAnother ? (
-                      <TouchableOpacity
-                        style={styles.closeFormButton}
-                        onPress={() => {
-                          setRequestingAnother(false);
-                          setForm(initialForm);
-                        }}
-                      >
-                        <Ionicons
-                          name="close"
-                          size={20}
-                          color={colors.secondary}
-                        />
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                  <Field
-                    label="Full name"
-                    icon="person-outline"
-                    value={form.fullName}
-                    onChangeText={(v) => updateField("fullName", v)}
-                    placeholder="Enter your full legal name"
-                  />
-                  <Field
-                    label="Phone number"
-                    icon="call-outline"
-                    value={form.phone}
-                    onChangeText={(v) => updateField("phone", v)}
-                    placeholder="e.g. 0244000000"
-                    keyboardType="phone-pad"
-                  />
-                  <Text style={styles.label}>ID type</Text>
-                  <View style={styles.idTypeRow}>
-                    {["National ID", "Voters ID"].map((type) => (
-                      <TouchableOpacity
-                        key={type}
-                        style={[
-                          styles.idTypeButton,
-                          form.idType === type && styles.idTypeButtonActive,
-                        ]}
-                        onPress={() => updateField("idType", type)}
-                      >
-                        <Ionicons
-                          name={
-                            form.idType === type
-                              ? "radio-button-on"
-                              : "radio-button-off"
-                          }
-                          size={17}
-                          color={
-                            form.idType === type
-                              ? colors.secondary
-                              : colors.border
-                          }
-                        />
-                        <Text
-                          style={[
-                            styles.idTypeText,
-                            form.idType === type && styles.idTypeTextActive,
-                          ]}
-                        >
-                          {type}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                  <Field
-                    label="ID number"
-                    icon="id-card-outline"
-                    value={form.idNumber}
-                    onChangeText={(v) => updateField("idNumber", v)}
-                    placeholder="Enter ID number"
-                    autoCapitalize="characters"
-                  />
-                  <Field
-                    label="Town / City"
-                    icon="location-outline"
-                    value={form.townCity}
-                    onChangeText={(v) => updateField("townCity", v)}
-                    placeholder="Enter your town or city"
-                  />
-                  <Field
-                    label="Occupation"
-                    icon="briefcase-outline"
-                    value={form.occupation}
-                    onChangeText={(v) => updateField("occupation", v)}
-                    placeholder="Enter your occupation"
-                  />
-                  <Field
-                    label="Additional information (optional)"
-                    icon="information-circle-outline"
-                    value={form.additionalInfo}
-                    onChangeText={(v) => updateField("additionalInfo", v)}
-                    placeholder="Any additional information"
-                    multiline
-                  />
-                </View>
-
-                <TouchableOpacity
-                  style={[styles.payButton, submitting && styles.disabled]}
-                  onPress={submitRegistration}
-                  disabled={submitting}
-                >
-                  <Ionicons
-                    name={isSuperAgent ? "wallet" : "shield-checkmark"}
-                    size={20}
-                    color={colors.white}
-                  />
-                  <Text style={styles.payButtonText}>
-                    {submitting
-                      ? "Processing..."
-                      : isSuperAgent
-                        ? "Register from Wallet"
-                        : "Register & Pay"}
-                  </Text>
-                </TouchableOpacity>
-              </>
-            )}
-
-          {!settings?.is_enabled && !activeRegistration && (
-            <View style={styles.unavailable}>
-              <Ionicons name="time-outline" size={30} color={colors.warning} />
-              <Text style={styles.unavailableTitle}>
-                Registration temporarily unavailable
-              </Text>
-              <Text style={styles.unavailableText}>
-                The admin has not enabled AFA registration yet. Please check
-                back later.
-              </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Field
+                label="ID number"
+                icon="id-card-outline"
+                value={form.idNumber}
+                onChangeText={(v) => updateField("idNumber", v)}
+                placeholder="Enter ID number"
+                autoCapitalize="characters"
+              />
+              <Field
+                label="Town / City"
+                icon="location-outline"
+                value={form.townCity}
+                onChangeText={(v) => updateField("townCity", v)}
+                placeholder="Enter your town or city"
+              />
+              <Field
+                label="Occupation"
+                icon="briefcase-outline"
+                value={form.occupation}
+                onChangeText={(v) => updateField("occupation", v)}
+                placeholder="Enter your occupation"
+              />
+              <Field
+                label="Additional information (optional)"
+                icon="information-circle-outline"
+                value={form.additionalInfo}
+                onChangeText={(v) => updateField("additionalInfo", v)}
+                placeholder="Any additional information"
+                multiline
+              />
             </View>
-          )}
-        </ScrollView>
-      </KeyboardAvoidingView>
+
+            <TouchableOpacity
+              style={[styles.payButton, submitting && styles.disabled]}
+              onPress={submitRegistration}
+              disabled={submitting}
+            >
+              <Ionicons
+                name={isSuperAgent ? "wallet" : "shield-checkmark"}
+                size={20}
+                color={colors.white}
+              />
+              <Text style={styles.payButtonText}>
+                {submitting
+                  ? "Processing..."
+                  : isSuperAgent
+                    ? "Register from Wallet"
+                    : "Register & Pay"}
+              </Text>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {!settings?.is_enabled && !activeRegistration && (
+          <View style={styles.unavailable}>
+            <Ionicons name="time-outline" size={30} color={colors.warning} />
+            <Text style={styles.unavailableTitle}>
+              Registration temporarily unavailable
+            </Text>
+            <Text style={styles.unavailableText}>
+              The admin has not enabled AFA registration yet. Please check back
+              later.
+            </Text>
+          </View>
+        )}
+      </KeyboardAwareScrollView>
 
       {paymentVisible && pendingRegistration && Platform.OS !== "web" && (
         <Modal visible animationType="slide">

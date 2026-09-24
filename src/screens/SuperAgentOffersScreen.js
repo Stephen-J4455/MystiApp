@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -27,7 +28,9 @@ const getPackageDescriptor = (pkg) => {
   if (!pkg) return "";
   const type = String(pkg.type || "").trim();
   const size =
-    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+    pkg.size !== undefined &&
+    pkg.size !== null &&
+    String(pkg.size).trim() !== ""
       ? `${pkg.size}GB`
       : "";
   if (size && !type.toUpperCase().includes(size.toUpperCase())) {
@@ -51,15 +54,20 @@ const findPricingRowForPackage = (rows, pkg) => {
   const desc = getPackageDescriptor(pkg).toUpperCase();
   const type = String(pkg.type || "").toUpperCase();
   const sizeStr =
-    pkg.size !== undefined && pkg.size !== null && String(pkg.size).trim() !== ""
+    pkg.size !== undefined &&
+    pkg.size !== null &&
+    String(pkg.size).trim() !== ""
       ? `${pkg.size}GB`.toUpperCase()
       : "";
 
   return (
     rows.find((row) => {
       if (String(row.network || "").toUpperCase() !== net) return false;
-      const rowType = String(row.type || "").trim().toUpperCase();
-      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase()) return true;
+      const rowType = String(row.type || "")
+        .trim()
+        .toUpperCase();
+      if (pkg.id && rowType === String(pkg.id).trim().toUpperCase())
+        return true;
       if (rowType === desc) return true;
       if (
         sizeStr &&
@@ -316,7 +324,10 @@ export default function SuperAgentOffersScreen({ navigation }) {
         updates: { price: value },
       });
 
-      showSuccess("Price updated", `${offer.title} now costs ${formatGhc(value)}.`);
+      showSuccess(
+        "Price updated",
+        `${offer.title} now costs ${formatGhc(value)}.`,
+      );
       await loadData({ showSpinner: false });
     } catch (priceError) {
       console.error("Error updating offer price:", priceError);
@@ -426,7 +437,9 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
   const renderOfferRow = (offer) => {
     const offerNet = String(offer.network || "").toUpperCase();
-    const offerVal = String(offer.data_value || "").trim().toUpperCase();
+    const offerVal = String(offer.data_value || "")
+      .trim()
+      .toUpperCase();
 
     const pkg =
       (packages || []).find((p) => {
@@ -502,7 +515,9 @@ export default function SuperAgentOffersScreen({ navigation }) {
             <TouchableOpacity
               style={[
                 styles.actionChip,
-                offer.is_active ? styles.actionChipPause : styles.actionChipPlay,
+                offer.is_active
+                  ? styles.actionChipPause
+                  : styles.actionChipPlay,
                 (isSaving || isToggling) && styles.actionChipDisabled,
               ]}
               onPress={() => handleToggleActive(offer)}
@@ -569,12 +584,17 @@ export default function SuperAgentOffersScreen({ navigation }) {
         </TouchableOpacity>
       </View>
 
-      <ScrollView
+      <KeyboardAwareScrollView
         contentContainerStyle={styles.content}
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       >
         <View style={styles.infoCard}>
-          <Ionicons name="information-circle" size={20} color={colors.primary} />
+          <Ionicons
+            name="information-circle"
+            size={20}
+            color={colors.primary}
+          />
           <Text style={styles.infoText}>
             These are the prices your sub-agents pay. New offers start at the
             admin base price for the bundle — change it to set your own margin.
@@ -748,11 +768,15 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
         {offerGroups.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Ionicons name="pricetags-outline" size={40} color={colors.primary} />
+            <Ionicons
+              name="pricetags-outline"
+              size={40}
+              color={colors.primary}
+            />
             <Text style={styles.emptyTitle}>No offers yet</Text>
             <Text style={styles.emptyText}>
-              Create your first offer above, or set prices for every bundle in
-              a tier from Tier Management.
+              Create your first offer above, or set prices for every bundle in a
+              tier from Tier Management.
             </Text>
           </View>
         ) : (
@@ -768,7 +792,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
             </View>
           ))
         )}
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 }

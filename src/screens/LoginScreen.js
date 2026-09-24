@@ -6,11 +6,10 @@ import {
   TouchableOpacity,
   StyleSheet,
   Image,
-  KeyboardAvoidingView,
-  Platform,
   ActivityIndicator,
   StatusBar,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import * as WebBrowser from "expo-web-browser";
@@ -55,7 +54,7 @@ export default function LoginScreen({ navigation }) {
           console.log("Email not confirmed, user needs to confirm email");
           showError(
             "Email Confirmation Required",
-            "Please check your email and confirm your account before signing in."
+            "Please check your email and confirm your account before signing in.",
           );
         } else {
           console.log("Login complete, auth state should change");
@@ -75,7 +74,8 @@ export default function LoginScreen({ navigation }) {
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: "https://sffgznknlmqxtikkyhwu.supabase.co/auth/v1/callback",
+          redirectTo:
+            "https://sffgznknlmqxtikkyhwu.supabase.co/auth/v1/callback",
           skipBrowserRedirect: false,
         },
       });
@@ -86,7 +86,7 @@ export default function LoginScreen({ navigation }) {
         console.log("Opening Google OAuth URL...");
         const result = await WebBrowser.openAuthSessionAsync(
           data.url,
-          "mystiwanebusiness://"
+          "mystiwanebusiness://",
         );
 
         console.log("WebBrowser result:", result.type);
@@ -145,9 +145,7 @@ export default function LoginScreen({ navigation }) {
         backgroundColor="transparent"
         barStyle="dark-content"
       />
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
         <View style={styles.content}>
           <Image
             source={require("../../assets/mystiwan.png")}
@@ -197,7 +195,8 @@ export default function LoginScreen({ navigation }) {
               />
               <TouchableOpacity
                 style={styles.eyeIcon}
-                onPress={() => setShowPassword(!showPassword)}>
+                onPress={() => setShowPassword(!showPassword)}
+              >
                 <Ionicons
                   name={showPassword ? "eye-off-outline" : "eye-outline"}
                   size={20}
@@ -210,14 +209,16 @@ export default function LoginScreen({ navigation }) {
           <TouchableOpacity
             style={styles.button}
             onPress={handleLogin}
-            disabled={loading}>
+            disabled={loading}
+          >
             <Text style={styles.buttonText}>
               {loading ? "Signing In..." : "Sign In"}
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
-            onPress={() => navigation.navigate("ForgotPassword")}>
+            onPress={() => navigation.navigate("ForgotPassword")}
+          >
             <Text style={styles.forgotPassword}>Forgot Password?</Text>
           </TouchableOpacity>
 
@@ -230,7 +231,8 @@ export default function LoginScreen({ navigation }) {
           <TouchableOpacity
             style={[styles.googleButton, googleLoading && { opacity: 0.6 }]}
             onPress={handleGoogleSignIn}
-            disabled={googleLoading || loading}>
+            disabled={googleLoading || loading}
+          >
             {googleLoading ? (
               <ActivityIndicator color={colors.primary} />
             ) : (

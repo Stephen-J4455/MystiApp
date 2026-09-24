@@ -71,6 +71,7 @@ Deno.serve(async (req) => {
     const {
       reference,
       offer_id,
+      provider_package_id,
       wallet_order,
       package_name,
       package_size,
@@ -603,7 +604,7 @@ Deno.serve(async (req) => {
       const agentOrderData = {
         agent_id: user.id,
         offer_id: localOfferId,
-        provider_package_id: String(offer_id),
+        provider_package_id: String(provider_package_id || offer_id),
         provider_type: normalizedProviderType,
         provider_size: normalizedProviderSize,
         offer_title: orderTitle,

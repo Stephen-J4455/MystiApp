@@ -6,10 +6,9 @@ import {
   TouchableOpacity,
   StyleSheet,
   Image,
-  KeyboardAvoidingView,
-  Platform,
   StatusBar,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
@@ -63,10 +62,7 @@ export default function ForgotPasswordScreen({ navigation }) {
         backgroundColor="transparent"
         barStyle="dark-content"
       />
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-      >
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
         <View style={styles.content}>
           <Image
             source={require("../../assets/mystiwan.png")}

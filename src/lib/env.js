@@ -1,6 +1,8 @@
+import Constants from "expo-constants";
+
 export const APP_ENV = (
-  process.env.EXPO_PUBLIC_APP_ENV ||
   process.env.APP_ENV ||
+  Constants.expoConfig?.extra?.appEnv ||
   "development"
 ).toLowerCase();
 export const SUPABASE_URL = "https://sffgznknlmqxtikkyhwu.supabase.co";

@@ -29,6 +29,7 @@ import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { getPaystackPublicKey } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 
 import {
   loadSubAgentPackages,
@@ -187,6 +188,7 @@ export default function DataScreen({ navigation, route }) {
             reference: response.reference,
             user_id: user.id,
             offer_id: selectedBundle.id,
+            provider_package_id: selectedBundle.package_id || selectedBundle.id,
             package_name: selectedBundle.name,
             package_type: selectedBundle.type || null,
             package_size: selectedBundle.dataSize || null,
@@ -1635,94 +1637,198 @@ export default function DataScreen({ navigation, route }) {
           onRequestClose={() => setRecipientModalVisible(false)}
         >
           <View style={styles.recipientModalOverlay}>
-            <View style={styles.recipientModalCard}>
-              <View style={styles.recipientModalHeader}>
-                <View>
-                  <Text style={styles.recipientModalTitle}>
-                    Who is this data for?
-                  </Text>
-                  <Text style={styles.recipientModalSubtitle}>
-                    {selectedBundle.name}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  onPress={() => setRecipientModalVisible(false)}
-                  style={styles.recipientModalClose}
-                >
-                  <Ionicons name="close" size={22} color={colors.secondary} />
-                </TouchableOpacity>
-              </View>
+            <KeyboardAvoidingView
+              style={styles.recipientModalAvoidingView}
+              behavior="padding"
+            >
+              <View style={styles.recipientModalCard}>
+                <View style={styles.recipientModalContent}>
+                  <View style={styles.recipientModalHeader}>
+                    <View>
+                      <Text style={styles.recipientModalTitle}>
+                        Who is this data for?
+                      </Text>
+                      <Text style={styles.recipientModalSubtitle}>
+                        {selectedBundle.name}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => setRecipientModalVisible(false)}
+                      style={styles.recipientModalClose}
+                    >
+                      <Ionicons
+                        name="close"
+                        size={22}
+                        color={colors.secondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
 
-              <View style={styles.purchaseTypeButtons}>
-                <TouchableOpacity
-                  style={[
-                    styles.purchaseTypeButton,
-                    purchaseType === "self" && styles.purchaseTypeButtonActive,
-                  ]}
-                  onPress={() => setPurchaseType("self")}
-                >
-                  <Ionicons
-                    name="person"
-                    size={18}
-                    color={
-                      purchaseType === "self" ? colors.white : colors.primary
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.purchaseTypeButtonText,
-                      purchaseType === "self" &&
-                        styles.purchaseTypeButtonTextActive,
-                    ]}
+                  <View style={styles.purchaseTypeButtons}>
+                    <TouchableOpacity
+                      style={[
+                        styles.purchaseTypeButton,
+                        purchaseType === "self" &&
+                          styles.purchaseTypeButtonActive,
+                      ]}
+                      onPress={() => setPurchaseType("self")}
+                    >
+                      <Ionicons
+                        name="person"
+                        size={18}
+                        color={
+                          purchaseType === "self"
+                            ? colors.white
+                            : colors.primary
+                        }
+                      />
+                      <Text
+                        style={[
+                          styles.purchaseTypeButtonText,
+                          purchaseType === "self" &&
+                            styles.purchaseTypeButtonTextActive,
+                        ]}
+                      >
+                        For Myself
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.purchaseTypeButton,
+                        purchaseType === "others" &&
+                          styles.purchaseTypeButtonActive,
+                      ]}
+                      onPress={() => setPurchaseType("others")}
+                    >
+                      <Ionicons
+                        name="people"
+                        size={18}
+                        color={
+                          purchaseType === "others"
+                            ? colors.white
+                            : colors.primary
+                        }
+                      />
+                      <Text
+                        style={[
+                          styles.purchaseTypeButtonText,
+                          purchaseType === "others" &&
+                            styles.purchaseTypeButtonTextActive,
+                        ]}
+                      >
+                        For Others
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {purchaseType === "self" && (
+                    <View style={styles.userPhoneContainer}>
+                      <Ionicons
+                        name="phone-portrait"
+                        size={20}
+                        color={colors.primary}
+                      />
+                      <Text style={styles.userPhoneText}>
+                        Data will be sent to:{" "}
+                        {userPhone || "your profile phone"}
+                      </Text>
+                    </View>
+                  )}
+
+                  {purchaseType === "others" && (
+                    <>
+                      <Text style={styles.phoneInputLabel}>
+                        Recipient Phone Number
+                      </Text>
+                      <View style={styles.phoneInputWrapper}>
+                        <Ionicons
+                          name="call"
+                          size={20}
+                          color={colors.secondary}
+                          style={styles.phoneIcon}
+                        />
+                        <TextInput
+                          style={styles.phoneInput}
+                          placeholder="Enter phone number (e.g., 0532973455)"
+                          placeholderTextColor={colors.secondary}
+                          value={recipientPhone}
+                          onChangeText={setRecipientPhone}
+                          keyboardType="phone-pad"
+                          maxLength={13}
+                        />
+                      </View>
+                    </>
+                  )}
+
+                  <TouchableOpacity
+                    style={styles.recipientContinueButton}
+                    onPress={continueNormalPurchase}
                   >
-                    For Myself
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.purchaseTypeButton,
-                    purchaseType === "others" &&
-                      styles.purchaseTypeButtonActive,
-                  ]}
-                  onPress={() => setPurchaseType("others")}
-                >
-                  <Ionicons
-                    name="people"
-                    size={18}
-                    color={
-                      purchaseType === "others" ? colors.white : colors.primary
-                    }
-                  />
-                  <Text
-                    style={[
-                      styles.purchaseTypeButtonText,
-                      purchaseType === "others" &&
-                        styles.purchaseTypeButtonTextActive,
-                    ]}
-                  >
-                    For Others
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              {purchaseType === "self" && (
-                <View style={styles.userPhoneContainer}>
-                  <Ionicons
-                    name="phone-portrait"
-                    size={20}
-                    color={colors.primary}
-                  />
-                  <Text style={styles.userPhoneText}>
-                    Data will be sent to: {userPhone || "your profile phone"}
-                  </Text>
+                    <Text style={styles.recipientContinueText}>
+                      Continue to Payment
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-              )}
+              </View>
+            </KeyboardAvoidingView>
+          </View>
+        </Modal>
+      )}
 
-              {purchaseType === "others" && (
-                <>
-                  <Text style={styles.phoneInputLabel}>
-                    Recipient Phone Number
-                  </Text>
+      {isAgent && selectedBundle && recipientModalVisible && (
+        <Modal
+          visible={recipientModalVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setRecipientModalVisible(false)}
+        >
+          <View style={styles.recipientModalOverlay}>
+            <KeyboardAvoidingView
+              style={styles.recipientModalAvoidingView}
+              behavior="padding"
+            >
+              <View style={styles.recipientModalCard}>
+                <View style={styles.recipientModalContent}>
+                  <View style={styles.recipientModalHeader}>
+                    <View>
+                      <Text style={styles.recipientModalTitle}>
+                        Recipient Details
+                      </Text>
+                      <Text style={styles.recipientModalSubtitle}>
+                        {selectedBundle.name}
+                      </Text>
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => setRecipientModalVisible(false)}
+                      style={styles.recipientModalClose}
+                    >
+                      <Ionicons
+                        name="close"
+                        size={22}
+                        color={colors.secondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+
+                  <Text style={styles.phoneInputLabel}>Recipient Name</Text>
+                  <View style={styles.phoneInputWrapper}>
+                    <Ionicons
+                      name="person"
+                      size={20}
+                      color={colors.secondary}
+                      style={styles.phoneIcon}
+                    />
+                    <TextInput
+                      style={styles.phoneInput}
+                      placeholder="Enter recipient name"
+                      placeholderTextColor={colors.secondary}
+                      value={recipientName}
+                      onChangeText={setRecipientName}
+                      autoFocus
+                    />
+                  </View>
+
+                  <Text style={styles.phoneInputLabel}>Phone Number</Text>
                   <View style={styles.phoneInputWrapper}>
                     <Ionicons
                       name="call"
@@ -1740,94 +1846,18 @@ export default function DataScreen({ navigation, route }) {
                       maxLength={13}
                     />
                   </View>
-                </>
-              )}
 
-              <TouchableOpacity
-                style={styles.recipientContinueButton}
-                onPress={continueNormalPurchase}
-              >
-                <Text style={styles.recipientContinueText}>
-                  Continue to Payment
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
-      )}
-
-      {isAgent && selectedBundle && recipientModalVisible && (
-        <Modal
-          visible={recipientModalVisible}
-          transparent
-          animationType="slide"
-          onRequestClose={() => setRecipientModalVisible(false)}
-        >
-          <View style={styles.recipientModalOverlay}>
-            <View style={styles.recipientModalCard}>
-              <View style={styles.recipientModalHeader}>
-                <View>
-                  <Text style={styles.recipientModalTitle}>
-                    Recipient Details
-                  </Text>
-                  <Text style={styles.recipientModalSubtitle}>
-                    {selectedBundle.name}
-                  </Text>
+                  <TouchableOpacity
+                    style={styles.recipientContinueButton}
+                    onPress={continueAgentPurchase}
+                  >
+                    <Text style={styles.recipientContinueText}>
+                      Continue to Payment
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity
-                  onPress={() => setRecipientModalVisible(false)}
-                  style={styles.recipientModalClose}
-                >
-                  <Ionicons name="close" size={22} color={colors.secondary} />
-                </TouchableOpacity>
               </View>
-
-              <Text style={styles.phoneInputLabel}>Recipient Name</Text>
-              <View style={styles.phoneInputWrapper}>
-                <Ionicons
-                  name="person"
-                  size={20}
-                  color={colors.secondary}
-                  style={styles.phoneIcon}
-                />
-                <TextInput
-                  style={styles.phoneInput}
-                  placeholder="Enter recipient name"
-                  placeholderTextColor={colors.secondary}
-                  value={recipientName}
-                  onChangeText={setRecipientName}
-                  autoFocus
-                />
-              </View>
-
-              <Text style={styles.phoneInputLabel}>Phone Number</Text>
-              <View style={styles.phoneInputWrapper}>
-                <Ionicons
-                  name="call"
-                  size={20}
-                  color={colors.secondary}
-                  style={styles.phoneIcon}
-                />
-                <TextInput
-                  style={styles.phoneInput}
-                  placeholder="Enter phone number (e.g., 0532973455)"
-                  placeholderTextColor={colors.secondary}
-                  value={recipientPhone}
-                  onChangeText={setRecipientPhone}
-                  keyboardType="phone-pad"
-                  maxLength={13}
-                />
-              </View>
-
-              <TouchableOpacity
-                style={styles.recipientContinueButton}
-                onPress={continueAgentPurchase}
-              >
-                <Text style={styles.recipientContinueText}>
-                  Continue to Payment
-                </Text>
-              </TouchableOpacity>
-            </View>
+            </KeyboardAvoidingView>
           </View>
         </Modal>
       )}
@@ -2160,6 +2190,8 @@ export default function DataScreen({ navigation, route }) {
                           reference: message.data.reference,
                           user_id: user.id,
                           offer_id: selectedBundle.id,
+                          provider_package_id:
+                            selectedBundle.package_id || selectedBundle.id,
                           package_name: selectedBundle.name,
                           package_type: selectedBundle.type || null,
                           package_size: selectedBundle.dataSize || null,
@@ -2706,10 +2738,17 @@ const styles = StyleSheet.create({
     justifyContent: "flex-end",
     backgroundColor: "rgba(0, 0, 0, 0.45)",
   },
+  recipientModalAvoidingView: {
+    width: "100%",
+    maxHeight: "90%",
+  },
   recipientModalCard: {
+    overflow: "hidden",
     backgroundColor: colors.white,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
+  },
+  recipientModalContent: {
     padding: 24,
     paddingBottom: 32,
   },

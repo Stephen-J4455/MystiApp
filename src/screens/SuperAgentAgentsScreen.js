@@ -1,13 +1,13 @@
 import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
+import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
@@ -32,7 +32,7 @@ const normalizeRole = (user) => {
   if (normalized === "admin") return "Admin";
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
-  if (normalized === "agent") return "Agent";
+  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
 
   return role;
 };
@@ -100,7 +100,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
       if (error) throw error;
 
-      const assignedAgents = (data?.agents || []).filter((member) => {
+      const assignedAgents = (data?.users || []).filter((member) => {
         const role = normalizeRole(member);
         const assignedSuperAgentId =
           member.user_metadata?.super_agent_id ||
@@ -272,7 +272,11 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         <Text style={styles.title}>Sub-Agents</Text>
       </View>
 
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
+      <KeyboardAwareScrollView
+        style={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Create Sub-Agent</Text>
 
@@ -471,7 +475,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
             </View>
           )}
         </View>
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 }

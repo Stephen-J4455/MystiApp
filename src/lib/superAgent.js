@@ -14,7 +14,7 @@ export function normalizeRole(role) {
   if (normalized === "admin") return "Admin";
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
-  if (normalized === "agent") return "Agent";
+  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
 
   return value;
 }
@@ -73,7 +73,12 @@ export function canViewAssignedAgent(currentUser, targetUser) {
   if (!isSuperAgent(currentUser)) return false;
 
   const currentUserId = currentUser.id;
-  const targetSuperAgentId = targetUser?.user_metadata?.super_agent_id || null;
+  const targetSuperAgentId =
+    targetUser?.user_metadata?.super_agent_id ||
+    targetUser?.user_metadata?.superAgentId ||
+    targetUser?.app_metadata?.super_agent_id ||
+    targetUser?.app_metadata?.superAgentId ||
+    null;
 
   return targetSuperAgentId === currentUserId;
 }
@@ -85,7 +90,12 @@ export function filterAssignedAgents(currentUser, agents = []) {
   if (!isSuperAgent(currentUser)) return [];
 
   return agents.filter((agent) => {
-    const superAgentId = agent?.user_metadata?.super_agent_id || null;
+    const superAgentId =
+      agent?.user_metadata?.super_agent_id ||
+      agent?.user_metadata?.superAgentId ||
+      agent?.app_metadata?.super_agent_id ||
+      agent?.app_metadata?.superAgentId ||
+      null;
     return superAgentId === currentUser.id;
   });
 }

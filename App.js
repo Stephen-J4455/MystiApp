@@ -1,18 +1,12 @@
 import React, { useEffect, useState, useRef } from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  Linking,
-  Platform,
-  Animated,
-  Image,
-  StyleSheet,
-} from "react-native";
+import { Linking, Platform } from "react-native";
 import * as Notifications from "expo-notifications";
+import * as SplashScreen from "expo-splash-screen";
 import Constants from "expo-constants";
+import { KeyboardProvider } from "react-native-keyboard-controller";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
@@ -43,7 +37,10 @@ import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
 import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
 import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
 import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
-import colors from "./src/components/theme";
+
+SplashScreen.preventAutoHideAsync().catch(() => {
+  // The splash module is unavailable on web.
+});
 
 const Stack = createNativeStackNavigator();
 
@@ -63,75 +60,10 @@ const normalizeUserRole = (user) => {
   return role;
 };
 
-function SplashLoading() {
-  const pulse = useRef(new Animated.Value(0.92)).current;
-  const dots = useRef(new Animated.Value(0.3)).current;
-
-  useEffect(() => {
-    const pulseAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0.92,
-          duration: 900,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    const dotsAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(dots, {
-          toValue: 1,
-          duration: 700,
-          useNativeDriver: true,
-        }),
-        Animated.timing(dots, {
-          toValue: 0.3,
-          duration: 700,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-
-    pulseAnimation.start();
-    dotsAnimation.start();
-
-    return () => {
-      pulseAnimation.stop();
-      dotsAnimation.stop();
-    };
-  }, [pulse, dots]);
-
-  return (
-    <View style={styles.splashContainer}>
-      <Animated.View
-        style={[styles.splashLogoWrap, { transform: [{ scale: pulse }] }]}
-      >
-        <Image
-          source={require("./assets/mystiwan.png")}
-          style={styles.splashLogo}
-        />
-      </Animated.View>
-      <Text style={styles.splashTitle}>Mystiwan E-Business</Text>
-      <Animated.View style={[styles.splashDots, { opacity: dots }]}>
-        <View style={styles.splashDot} />
-        <View style={styles.splashDot} />
-        <View style={styles.splashDot} />
-      </Animated.View>
-    </View>
-  );
-}
-
 export default function App() {
   const [user, setUser] = useState(null);
   const [userRole, setUserRole] = useState(null);
   const [isAgent, setIsAgent] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [authInitialized, setAuthInitialized] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const navigationRef = useRef(null);
@@ -307,8 +239,14 @@ export default function App() {
         console.log("Registering push notifications for user:", user.id);
         const token = await registerForPushNotifications();
         if (token) {
-          await savePushToken(token, user.id);
-          console.log("Push notifications registered successfully");
+          const saved = await savePushToken(token, user.id);
+          if (saved) {
+            console.log("Push notifications registered successfully");
+          } else {
+            console.error(
+              "Push token was obtained but could not be saved. Check user_push_tokens permissions.",
+            );
+          }
         } else {
           const isExpoGo = Constants?.appOwnership === "expo";
           console.log(
@@ -349,149 +287,113 @@ export default function App() {
     };
   }, [user]);
 
-  // Set loading to false only when both version is checked and auth is initialized
+  // Keep Expo's native splash visible until the app is ready to render.
   useEffect(() => {
-    if (versionChecked && authInitialized) {
-      setLoading(false);
-    }
-  }, [versionChecked, authInitialized]);
+    const splashCanHide = versionChecked && (!canEnterApp || authInitialized);
 
-  if (loading && canEnterApp) {
-    return <SplashLoading />;
-  }
+    if (splashCanHide) {
+      SplashScreen.hideAsync().catch(() => {
+        // SplashScreen is a no-op on web.
+      });
+    }
+  }, [versionChecked, canEnterApp, authInitialized]);
 
   return (
-    <NotificationProvider>
-      {canEnterApp ? (
-        <NavigationContainer ref={navigationRef}>
-          <Stack.Navigator
-            screenOptions={{ headerShown: false }}
-            initialRouteName={
-              isResettingPassword ? "ResetPassword" : user ? "Home" : "Login"
-            }
-          >
-            {user && !isResettingPassword ? (
-              <>
-                <Stack.Screen name="Home" component={HomeScreen} />
-                <Stack.Screen name="Profile" component={ProfileScreen} />
-                <Stack.Screen
-                  name="PrivacyPolicy"
-                  component={PrivacyPolicyScreen}
-                />
-                <Stack.Screen
-                  name="Notifications"
-                  component={NotificationsScreen}
-                />
-                <Stack.Screen name="Data" component={DataScreen} />
-                <Stack.Screen
-                  name="SuperAgentManagement"
-                  component={SuperAgentManagementScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentOffers"
-                  component={SuperAgentOffersScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentTierManagement"
-                  component={SuperAgentTierManagementScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentAgents"
-                  component={SuperAgentAgentsScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentPaystack"
-                  component={SuperAgentPaystackScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentAnalytics"
-                  component={SuperAgentAnalyticsScreen}
-                />
-                <Stack.Screen
-                  name="SuperAgentHeldOrders"
-                  component={SuperAgentHeldOrdersScreen}
-                />
-                <Stack.Screen name="Receipt" component={ReceiptScreen} />
-                <Stack.Screen name="History" component={HistoryScreen} />
-                <Stack.Screen
-                  name="WalletTopUp"
-                  component={WalletTopUpScreen}
-                />
-                <Stack.Screen
-                  name="AfaRegistration"
-                  component={AfaRegistrationScreen}
-                />
-              </>
-            ) : (
-              <>
-                <Stack.Screen name="Login" component={LoginScreen} />
-                <Stack.Screen name="Signup" component={SignupScreen} />
-                <Stack.Screen
-                  name="ForgotPassword"
-                  component={ForgotPasswordScreen}
-                />
-                <Stack.Screen
-                  name="ResetPassword"
-                  component={ResetPasswordScreen}
-                  initialParams={{ isResetting: isResettingPassword }}
-                />
-              </>
-            )}
-          </Stack.Navigator>
-        </NavigationContainer>
-      ) : null}
-      <UpdateNotification
-        visible={updateModal.visible}
-        title={updateModal.title}
-        message={updateModal.message}
-        downloadUrl={updateModal.downloadUrl}
-        releaseNotes={updateModal.releaseNotes}
-        onDownload={handleDownload}
-      />
-    </NotificationProvider>
+    <KeyboardProvider preload={false} statusBarTranslucent>
+      <SafeAreaProvider>
+        <NotificationProvider>
+          {canEnterApp ? (
+            <NavigationContainer ref={navigationRef}>
+              <Stack.Navigator
+                screenOptions={{ headerShown: false }}
+                initialRouteName={
+                  isResettingPassword
+                    ? "ResetPassword"
+                    : user
+                      ? "Home"
+                      : "Login"
+                }
+              >
+                {user && !isResettingPassword ? (
+                  <>
+                    <Stack.Screen name="Home" component={HomeScreen} />
+                    <Stack.Screen name="Profile" component={ProfileScreen} />
+                    <Stack.Screen
+                      name="PrivacyPolicy"
+                      component={PrivacyPolicyScreen}
+                    />
+                    <Stack.Screen
+                      name="Notifications"
+                      component={NotificationsScreen}
+                    />
+                    <Stack.Screen name="Data" component={DataScreen} />
+                    <Stack.Screen
+                      name="SuperAgentManagement"
+                      component={SuperAgentManagementScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentOffers"
+                      component={SuperAgentOffersScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentTierManagement"
+                      component={SuperAgentTierManagementScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentAgents"
+                      component={SuperAgentAgentsScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentPaystack"
+                      component={SuperAgentPaystackScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentAnalytics"
+                      component={SuperAgentAnalyticsScreen}
+                    />
+                    <Stack.Screen
+                      name="SuperAgentHeldOrders"
+                      component={SuperAgentHeldOrdersScreen}
+                    />
+                    <Stack.Screen name="Receipt" component={ReceiptScreen} />
+                    <Stack.Screen name="History" component={HistoryScreen} />
+                    <Stack.Screen
+                      name="WalletTopUp"
+                      component={WalletTopUpScreen}
+                    />
+                    <Stack.Screen
+                      name="AfaRegistration"
+                      component={AfaRegistrationScreen}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <Stack.Screen name="Login" component={LoginScreen} />
+                    <Stack.Screen name="Signup" component={SignupScreen} />
+                    <Stack.Screen
+                      name="ForgotPassword"
+                      component={ForgotPasswordScreen}
+                    />
+                    <Stack.Screen
+                      name="ResetPassword"
+                      component={ResetPasswordScreen}
+                      initialParams={{ isResetting: isResettingPassword }}
+                    />
+                  </>
+                )}
+              </Stack.Navigator>
+            </NavigationContainer>
+          ) : null}
+          <UpdateNotification
+            visible={updateModal.visible}
+            title={updateModal.title}
+            message={updateModal.message}
+            downloadUrl={updateModal.downloadUrl}
+            releaseNotes={updateModal.releaseNotes}
+            onDownload={handleDownload}
+          />
+        </NotificationProvider>
+      </SafeAreaProvider>
+    </KeyboardProvider>
   );
 }
-
-const styles = StyleSheet.create({
-  splashContainer: {
-    flex: 1,
-    backgroundColor: colors.light,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  splashLogoWrap: {
-    width: 130,
-    height: 130,
-    borderRadius: 65,
-    backgroundColor: colors.white,
-    alignItems: "center",
-    justifyContent: "center",
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  splashLogo: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-  },
-  splashTitle: {
-    marginTop: 20,
-    fontSize: 20,
-    fontWeight: "700",
-    color: colors.primary,
-  },
-  splashDots: {
-    flexDirection: "row",
-    marginTop: 14,
-  },
-  splashDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.primary,
-    marginHorizontal: 4,
-  },
-});
