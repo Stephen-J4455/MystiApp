@@ -29,8 +29,12 @@ export default function ForgotPasswordScreen({ navigation }) {
 
     setLoading(true);
     try {
-      // Redirect to web page that handles both mobile app and web reset
-      const redirectUrl = "https://stephen-j4455.github.io/mystiwanpasswordreset/reset-password.html";
+      // Redirect to the web page that handles both mobile app and web reset.
+      // Vercel injects this value at build time; native builds fall back to the
+      // public Vercel URL.
+      const redirectUrl = process.env.EXPO_PUBLIC_WEB_URL
+        ? `${process.env.EXPO_PUBLIC_WEB_URL.replace(/\/$/, "")}/reset-password.html`
+        : "https://your-vercel-domain.example/reset-password.html";
 
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
         redirectTo: redirectUrl,
@@ -41,7 +45,7 @@ export default function ForgotPasswordScreen({ navigation }) {
       } else {
         showSuccess(
           "Reset Email Sent",
-          "Check your email for password reset instructions"
+          "Check your email for password reset instructions",
         );
         navigation.goBack(); // Go back to login
       }

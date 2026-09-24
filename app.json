@@ -54,7 +54,7 @@
       "bundler": "metro"
     },
     "extra": {
-      "appEnv": "development",
+      "appEnv": "production",
       "eas": {
         "projectId": "a1e1f30e-434e-4ae3-94f6-1f06eaa00de8"
       }

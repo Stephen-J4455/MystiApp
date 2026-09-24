@@ -1,21 +1,10 @@
-import { createClient } from "@supabase/supabase-js";
-import { supabase, SUPABASE_URL } from "../lib/supabase.js";
+import { supabase } from "../lib/supabase.js";
 import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
+import { getEdgeFunctionName } from "../lib/env.js";
 
-const SERVICE_ROLE_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmZmd6bmtubG1xeHRpa2t5aHd1Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0Njk3MTQ3MSwiZXhwIjoyMDYyNTQ3NDcxfQ.GlKnfveTDERNeMVyTPuHlI6ssMCj9G1X1KQnOe9YlYU";
-
-const JEHUCA_CATALOG_URL = "https://backend.jehucale-business.com/api/packages";
-const JEHUCA_API_KEY =
-  "jahucal_1789940895638_ctm65irrpx8lzs376zbbwl_4wo9faazdf5igzwfgvv19t";
-
-// Admin client for operations requiring service role fallback (bypassing RLS & auth admin)
-const adminClient = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession: false,
-  },
-});
+// Client-side fallbacks use the authenticated anon client. Privileged work is
+// performed by Supabase Edge Functions, never with a browser-exposed service key.
+const adminClient = supabase;
 
 const normalizeKey = (val) =>
   String(val || "")
@@ -45,17 +34,10 @@ export const fetchCatalogPackages = async () => {
     // Edge function failed, proceed to direct fetch
   }
 
-  // 2. Direct fetch from Jehuca API
-  try {
-    const response = await fetch(JEHUCA_CATALOG_URL, {
-      headers: { "X-API-Key": JEHUCA_API_KEY },
-    });
-    const json = await response.json();
-    return Array.isArray(json?.payload) ? json.payload : [];
-  } catch (err) {
-    console.warn("Direct Jehuca catalog fetch failed:", err);
-    return [];
-  }
+  // 2. If the Edge Function is unavailable, return an empty catalog. The
+  // provider API key must not be shipped in a Vercel/browser bundle.
+  console.warn("Provider catalog Edge Function unavailable");
+  return [];
 };
 
 const findCatalogPackageForOffer = (catalog, offer) => {

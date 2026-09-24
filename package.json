@@ -7,7 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "build": "expo export --platform web",
+    "build": "expo export --platform web && node scripts/copy-web-assets.js",
     "deploy": "gh-pages -d dist",
     "deploy:test": "pwsh supabase/scripts/deploy.ps1 -Env test",
     "deploy:prod": "pwsh supabase/scripts/deploy.ps1 -Env production",
