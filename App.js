@@ -234,47 +234,46 @@ export default function App() {
     let notificationSubscription = null;
 
     const setupNotifications = async () => {
-      // Only register for push notifications if user is logged in
-      if (user) {
-        console.log("Registering push notifications for user:", user.id);
-        const token = await registerForPushNotifications();
-        if (token) {
-          const saved = await savePushToken(token, user.id);
-          if (saved) {
-            console.log("Push notifications registered successfully");
-          } else {
-            console.error(
-              "Push token was obtained but could not be saved. Check user_push_tokens permissions.",
-            );
-          }
+      // Browser push registration is unnecessary for the web app and adds
+      // permission/device work during startup.
+      if (Platform.OS === "web" || !user) return;
+
+      console.log("Registering push notifications for user:", user.id);
+      const token = await registerForPushNotifications();
+      if (token) {
+        const saved = await savePushToken(token, user.id);
+        if (saved) {
+          console.log("Push notifications registered successfully");
         } else {
-          const isExpoGo = Constants?.appOwnership === "expo";
-          console.log(
-            isExpoGo
-              ? "Push notification registration skipped: running in Expo Go (push notifications require a standalone build)"
-              : "Push notification registration skipped or failed: check console for details",
+          console.error(
+            "Push token was obtained but could not be saved. Check user_push_tokens permissions.",
           );
         }
-
-        // Setup notification listeners
-        notificationSubscription = setupNotificationListeners(
-          (notification) => {
-            console.log("Notification received in foreground:", {
-              title: notification.request.content.title,
-              body: notification.request.content.body,
-              data: notification.request.content.data,
-            });
-          },
-          (response) => {
-            console.log("Notification tapped:", {
-              title: response.notification.request.content.title,
-              body: response.notification.request.content.body,
-              data: response.notification.request.content.data,
-            });
-            // TODO: Handle navigation based on notification data type
-          },
+      } else {
+        const isExpoGo = Constants?.appOwnership === "expo";
+        console.log(
+          isExpoGo
+            ? "Push notification registration skipped: running in Expo Go (push notifications require a standalone build)"
+            : "Push notification registration skipped or failed: check console for details",
         );
       }
+
+      notificationSubscription = setupNotificationListeners(
+        (notification) => {
+          console.log("Notification received in foreground:", {
+            title: notification.request.content.title,
+            body: notification.request.content.body,
+            data: notification.request.content.data,
+          });
+        },
+        (response) => {
+          console.log("Notification tapped:", {
+            title: response.notification.request.content.title,
+            body: response.notification.request.content.body,
+            data: response.notification.request.content.data,
+          });
+        },
+      );
     };
 
     setupNotifications();

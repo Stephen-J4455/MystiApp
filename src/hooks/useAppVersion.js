@@ -8,8 +8,9 @@ const { getVersionStatus } = require("../lib/versionCheck");
 const APP_VERSION = Constants.expoConfig?.version || "1.0.0";
 
 export const useAppVersion = () => {
+  const isWeb = Platform.OS === "web";
   const [versionChecked, setVersionChecked] = useState(false);
-  const [canEnterApp, setCanEnterApp] = useState(false);
+  const [canEnterApp, setCanEnterApp] = useState(isWeb);
   const [updateModal, setUpdateModal] = useState({
     visible: false,
     title: "",
@@ -19,6 +20,12 @@ export const useAppVersion = () => {
   });
 
   useEffect(() => {
+    if (Platform.OS === "web") {
+      setCanEnterApp(true);
+      setVersionChecked(true);
+      return;
+    }
+
     checkAppVersion();
   }, []);
 

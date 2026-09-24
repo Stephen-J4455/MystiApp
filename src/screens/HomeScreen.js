@@ -364,20 +364,21 @@ export default function HomeScreen({ navigation }) {
           );
         setIsAgent(agentStatus);
 
-        // Fetch data after determining agent status
-        fetchRecentTransactions(agentStatus);
-        fetchAds(agentStatus);
+        // Fetch independent home data in parallel instead of serializing two
+        // network requests before the home content can settle.
+        await Promise.all([
+          fetchRecentTransactions(agentStatus),
+          fetchAds(agentStatus),
+        ]);
       } catch (error) {
         console.error("Error checking agent status:", error);
         setIsAgent(false);
         // Fetch data even if agent check fails
-        fetchRecentTransactions(false);
-        fetchAds(false);
+        await Promise.all([fetchRecentTransactions(false), fetchAds(false)]);
       }
     } else {
       setIsAgent(false);
-      fetchRecentTransactions(false);
-      fetchAds(false);
+      await Promise.all([fetchRecentTransactions(false), fetchAds(false)]);
     }
   };
 
