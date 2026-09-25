@@ -1,0 +1,26 @@
+{
+  "name": "Mystiwan E-Business",
+  "short_name": "Mystiwan",
+  "description": "Manage your Mystiwan E-Business account securely and conveniently.",
+  "lang": "en",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#006769",
+  "background_color": "#FFFFFF",
+  "icons": [
+    {
+      "src": "/assets/pwa-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/pwa-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

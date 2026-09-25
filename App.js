@@ -16,6 +16,7 @@ import {
   setupNotificationListeners,
 } from "./src/services/notifications";
 import UpdateNotification from "./src/components/UpdateNotification";
+import InstallAppBanner from "./src/components/InstallAppBanner";
 import LoginScreen from "./src/screens/LoginScreen";
 import SignupScreen from "./src/screens/SignupScreen";
 import ForgotPasswordScreen from "./src/screens/ForgotPasswordScreen";
@@ -391,6 +392,7 @@ export default function App() {
             releaseNotes={updateModal.releaseNotes}
             onDownload={handleDownload}
           />
+          <InstallAppBanner />
         </NotificationProvider>
       </SafeAreaProvider>
     </KeyboardProvider>
