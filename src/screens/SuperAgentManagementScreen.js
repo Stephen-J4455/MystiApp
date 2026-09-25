@@ -97,42 +97,71 @@ export default function SuperAgentManagementScreen({ navigation }) {
             color={colors.primary}
           />
           <Text style={styles.infoBannerText}>
-            Admin sets the base price for every bundle. Use Tier Management to
-            set what your agents pay per tier, then assign offers from there.
+            {String(
+              user?.user_metadata?.super_agent_badge ||
+                user?.app_metadata?.super_agent_badge ||
+                "enterprise",
+            ).toLowerCase() === "pro"
+              ? "Your Pro badge includes analytics, orders, AFA registration, wallet top-ups, and transaction access. Contact an administrator for Enterprise management tools."
+              : "Admin sets the base price for every bundle. Use Tier Management to set what your agents pay per tier, then assign offers from there."}
           </Text>
         </View>
 
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentOffers")}
-        >
-          <Ionicons name="pricetag" size={20} color="#fff" />
-          <Text style={styles.actionText}>Manage Offers</Text>
-        </TouchableOpacity>
+        {String(
+          user?.user_metadata?.super_agent_badge ||
+            user?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "pro" && (
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => navigation.navigate("SuperAgentOffers")}
+          >
+            <Ionicons name="pricetag" size={20} color="#fff" />
+            <Text style={styles.actionText}>Manage Offers</Text>
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentAgents")}
-        >
-          <Ionicons name="people" size={20} color="#fff" />
-          <Text style={styles.actionText}>Manage Agents</Text>
-        </TouchableOpacity>
+        {String(
+          user?.user_metadata?.super_agent_badge ||
+            user?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "pro" && (
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => navigation.navigate("SuperAgentAgents")}
+          >
+            <Ionicons name="people" size={20} color="#fff" />
+            <Text style={styles.actionText}>Manage Agents</Text>
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentTierManagement")}
-        >
-          <Ionicons name="layers" size={20} color="#fff" />
-          <Text style={styles.actionText}>Manage Tiers</Text>
-        </TouchableOpacity>
+        {String(
+          user?.user_metadata?.super_agent_badge ||
+            user?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "pro" && (
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => navigation.navigate("SuperAgentTierManagement")}
+          >
+            <Ionicons name="layers" size={20} color="#fff" />
+            <Text style={styles.actionText}>Manage Tiers</Text>
+          </TouchableOpacity>
+        )}
 
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentPaystack")}
-        >
-          <Ionicons name="card" size={20} color="#fff" />
-          <Text style={styles.actionText}>Paystack Settings</Text>
-        </TouchableOpacity>
+        {String(
+          user?.user_metadata?.super_agent_badge ||
+            user?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "pro" && (
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => navigation.navigate("SuperAgentPaystack")}
+          >
+            <Ionicons name="card" size={20} color="#fff" />
+            <Text style={styles.actionText}>Paystack Settings</Text>
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity
           style={styles.actionButton}

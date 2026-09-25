@@ -88,6 +88,22 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+    const badge = String(
+      user.user_metadata?.super_agent_badge ||
+        user.app_metadata?.super_agent_badge ||
+        "enterprise",
+    ).toLowerCase();
+    if (badge !== "enterprise") {
+      return new Response(
+        JSON.stringify({
+          error: "The Pro badge does not include Tier Management access",
+        }),
+        {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
 
     const body = await req.json().catch(() => ({}));
     const { action, superAgentId, tier } = body;

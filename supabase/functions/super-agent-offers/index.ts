@@ -178,6 +178,24 @@ Deno.serve(async (req) => {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+    if (userRole === "SuperAgent") {
+      const badge = String(
+        user.user_metadata?.super_agent_badge ||
+          user.app_metadata?.super_agent_badge ||
+          "enterprise",
+      ).toLowerCase();
+      if (badge !== "enterprise") {
+        return new Response(
+          JSON.stringify({
+            error: "The Pro badge does not include Offer Management access",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+    }
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
 
@@ -899,6 +917,49 @@ Deno.serve(async (req) => {
         selectedOffers.push(row);
       });
 
+      const { data: activePricingRows, error: activePricingError } =
+        await supabaseAdmin
+          .from("package_pricing")
+          .select("package_id, network, type, size, is_active")
+          .eq("is_active", true);
+
+      if (activePricingError) {
+        if (isMissingDatabaseObject(activePricingError)) {
+          return new Response(
+            JSON.stringify({
+              offers: [],
+              agent_tier: agentTier || null,
+              migration_required: true,
+              error: "The package pricing table is not available yet.",
+            }),
+            {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            },
+          );
+        }
+        throw activePricingError;
+      }
+
+      const activePackageIds = new Set(
+        (activePricingRows || [])
+          .map((row: any) => String(row?.package_id || "").trim())
+          .filter(Boolean),
+      );
+      const activePricingKeys = new Set(
+        (activePricingRows || []).map((row: any) => {
+          const descriptor = normalizeKey(row?.type);
+          const size = row?.size;
+          const descriptorWithSize =
+            size !== null &&
+            size !== undefined &&
+            !descriptor.includes(`${size}GB`)
+              ? `${descriptor} - ${size}GB`
+              : descriptor;
+          return `${normalizeKey(row?.network)}::${descriptorWithSize}`;
+        }),
+      );
+
       let catalog: any[] = [];
       try {
         catalog = await fetchCatalogPackages();
@@ -910,8 +971,20 @@ Deno.serve(async (req) => {
       }
 
       const networkFilter = normalizeKey(body?.network);
+      const enabledOffers = selectedOffers.filter((row: any) => {
+        const networkKey = normalizeKey(row?.network);
+        const descriptorKey = normalizeKey(row?.data_value);
+        const offerPackageId = String(row?.package_id || "").trim();
+        const catalogPackage = findCatalogPackageForOffer(catalog, row);
+        const catalogPackageId = String(catalogPackage?.id || "").trim();
+        return (
+          (offerPackageId && activePackageIds.has(offerPackageId)) ||
+          (catalogPackageId && activePackageIds.has(catalogPackageId)) ||
+          activePricingKeys.has(`${networkKey}::${descriptorKey}`)
+        );
+      });
 
-      const packages = selectedOffers
+      const packages = enabledOffers
         .filter(
           (row) =>
             !networkFilter || normalizeKey(row?.network) === networkFilter,

@@ -29,6 +29,7 @@ export default function HomeScreen({ navigation }) {
   const [currentAdIndex, setCurrentAdIndex] = useState(0);
   const [viewedAds, setViewedAds] = useState(new Set()); // Track viewed ads for impressions
   const [menuOpen, setMenuOpen] = useState(false);
+  const [isEnterpriseSuperAgent, setIsEnterpriseSuperAgent] = useState(true);
   const adsScrollViewRef = useRef(null);
   const autoScrollIntervalRef = useRef(null);
   const adRefs = useRef({}); // Refs for each ad component
@@ -351,6 +352,14 @@ export default function HomeScreen({ navigation }) {
     const isSuperAgentUser =
       normalizedRole === "superagent" || normalizedRole === "super_agent";
     setIsSuperAgent(isSuperAgentUser);
+    setIsEnterpriseSuperAgent(
+      !isSuperAgentUser ||
+        String(
+          user?.user_metadata?.super_agent_badge ||
+            user?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "pro",
+    );
 
     // Check if user is a sub-agent using role and assignment metadata.
     if (user) {
@@ -402,6 +411,14 @@ export default function HomeScreen({ navigation }) {
         const isSuperAgentUser =
           normalizedRole === "superagent" || normalizedRole === "super_agent";
         setIsSuperAgent(isSuperAgentUser);
+        setIsEnterpriseSuperAgent(
+          !isSuperAgentUser ||
+            String(
+              user?.user_metadata?.super_agent_badge ||
+                user?.app_metadata?.super_agent_badge ||
+                "enterprise",
+            ).toLowerCase() !== "pro",
+        );
 
         const agentStatus =
           normalizedRole === "agent" ||
@@ -688,34 +705,65 @@ export default function HomeScreen({ navigation }) {
               {user && (
                 <View style={styles.userInfo}>
                   <Text style={styles.welcomeText}>Welcome back,</Text>
-                  <View style={styles.usernameContainer}>
-                    <Text style={styles.usernameText}>
-                      {user.user_metadata?.full_name ||
-                        user.email?.split("@")[0] ||
-                        "User"}
-                    </Text>
-                    {isSuperAgent ? (
-                      <View style={[styles.roleBadge, styles.enterpriseBadge]}>
-                        <Ionicons
-                          name="business"
-                          size={11}
-                          color={colors.white}
-                          style={{ marginRight: 4 }}
-                        />
-                        <Text style={styles.roleBadgeText}>Enterprise</Text>
-                      </View>
-                    ) : isAgent ? (
-                      <View style={[styles.roleBadge, styles.agentBadge]}>
-                        <Ionicons
-                          name="people"
-                          size={11}
-                          color={colors.white}
-                          style={{ marginRight: 4 }}
-                        />
-                        <Text style={styles.roleBadgeText}>Agent</Text>
-                      </View>
-                    ) : null}
-                  </View>
+                  <Text
+                    style={styles.usernameText}
+                    numberOfLines={2}
+                    ellipsizeMode="tail"
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.8}
+                  >
+                    {user.user_metadata?.full_name ||
+                      user.email?.split("@")[0] ||
+                      "User"}
+                  </Text>
+                  {isSuperAgent ? (
+                    <View
+                      style={[
+                        styles.roleBadge,
+                        String(
+                          user?.user_metadata?.super_agent_badge ||
+                            user?.app_metadata?.super_agent_badge ||
+                            "enterprise",
+                        ).toLowerCase() === "pro"
+                          ? styles.proBadge
+                          : styles.enterpriseBadge,
+                      ]}
+                    >
+                      <Ionicons
+                        name={
+                          String(
+                            user?.user_metadata?.super_agent_badge ||
+                              user?.app_metadata?.super_agent_badge ||
+                              "enterprise",
+                          ).toLowerCase() === "pro"
+                            ? "flash"
+                            : "business"
+                        }
+                        size={11}
+                        color={colors.white}
+                        style={{ marginRight: 4 }}
+                      />
+                      <Text style={styles.roleBadgeText}>
+                        {String(
+                          user?.user_metadata?.super_agent_badge ||
+                            user?.app_metadata?.super_agent_badge ||
+                            "enterprise",
+                        ).toLowerCase() === "pro"
+                          ? "Pro"
+                          : "Enterprise"}
+                      </Text>
+                    </View>
+                  ) : isAgent ? (
+                    <View style={[styles.roleBadge, styles.agentBadge]}>
+                      <Ionicons
+                        name="people"
+                        size={11}
+                        color={colors.white}
+                        style={{ marginRight: 4 }}
+                      />
+                      <Text style={styles.roleBadgeText}>Agent</Text>
+                    </View>
+                  ) : null}
                 </View>
               )}
             </TouchableOpacity>
@@ -761,40 +809,52 @@ export default function HomeScreen({ navigation }) {
               <View style={styles.superAgentMenuCard}>
                 <Text style={styles.superAgentMenuTitle}>Super Agent Menu</Text>
 
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentTierManagement");
-                  }}
-                >
-                  <Ionicons name="layers" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Tier Management</Text>
-                </TouchableOpacity>
+                {isEnterpriseSuperAgent && (
+                  <TouchableOpacity
+                    style={styles.superAgentMenuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      navigation.navigate("SuperAgentTierManagement");
+                    }}
+                  >
+                    <Ionicons name="layers" size={18} color={colors.primary} />
+                    <Text style={styles.superAgentMenuText}>
+                      Tier Management
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentOffers");
-                  }}
-                >
-                  <Ionicons name="business" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>
-                    Offer Management
-                  </Text>
-                </TouchableOpacity>
+                {isEnterpriseSuperAgent && (
+                  <TouchableOpacity
+                    style={styles.superAgentMenuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      navigation.navigate("SuperAgentOffers");
+                    }}
+                  >
+                    <Ionicons
+                      name="business"
+                      size={18}
+                      color={colors.primary}
+                    />
+                    <Text style={styles.superAgentMenuText}>
+                      Offer Management
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentAgents");
-                  }}
-                >
-                  <Ionicons name="people" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Agents</Text>
-                </TouchableOpacity>
+                {isEnterpriseSuperAgent && (
+                  <TouchableOpacity
+                    style={styles.superAgentMenuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      navigation.navigate("SuperAgentAgents");
+                    }}
+                  >
+                    <Ionicons name="people" size={18} color={colors.primary} />
+                    <Text style={styles.superAgentMenuText}>Agents</Text>
+                  </TouchableOpacity>
+                )}
 
                 <TouchableOpacity
                   style={styles.superAgentMenuItem}
@@ -837,18 +897,20 @@ export default function HomeScreen({ navigation }) {
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentPaystack");
-                  }}
-                >
-                  <Ionicons name="card" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>
-                    Paystack Sub-Account
-                  </Text>
-                </TouchableOpacity>
+                {isEnterpriseSuperAgent && (
+                  <TouchableOpacity
+                    style={styles.superAgentMenuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      navigation.navigate("SuperAgentPaystack");
+                    }}
+                  >
+                    <Ionicons name="card" size={18} color={colors.primary} />
+                    <Text style={styles.superAgentMenuText}>
+                      Paystack Sub-Account
+                    </Text>
+                  </TouchableOpacity>
+                )}
 
                 <TouchableOpacity
                   style={styles.superAgentMenuItem}
@@ -1353,8 +1415,10 @@ const styles = {
     alignItems: "center",
   },
   profileContainer: {
+    flex: 1,
     flexDirection: "row",
     alignItems: "center",
+    marginRight: 10,
   },
   avatarContainer: {
     width: 45,
@@ -1370,12 +1434,9 @@ const styles = {
     shadowRadius: 4,
   },
   userInfo: {
+    flex: 1,
+    minWidth: 0,
     marginLeft: 12,
-  },
-  usernameContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexShrink: 1,
   },
   welcomeText: {
     fontSize: 12,
@@ -1387,20 +1448,23 @@ const styles = {
     fontSize: 18,
     fontWeight: "700",
     color: colors.dark,
-    flexShrink: 1,
+    width: "100%",
   },
   roleBadge: {
-    alignSelf: "center",
+    alignSelf: "flex-start",
     flexDirection: "row",
     alignItems: "center",
     borderRadius: 999,
     paddingHorizontal: 8,
     paddingVertical: 3,
-    marginLeft: 8,
+    marginTop: 4,
     flexShrink: 0,
   },
   agentBadge: {
     backgroundColor: colors.accent,
+  },
+  proBadge: {
+    backgroundColor: colors.danger || "#b91c1c",
   },
   enterpriseBadge: {
     backgroundColor: colors.secondary,

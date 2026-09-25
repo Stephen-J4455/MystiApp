@@ -53,6 +53,19 @@ export default function SuperAgentPaystackScreen({ navigation }) {
           navigation.replace("Home");
           return;
         }
+        const badge = String(
+          user.user_metadata?.super_agent_badge ||
+            user.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase();
+        if (badge !== "enterprise") {
+          showError(
+            "Enterprise access",
+            "Paystack Sub-Account is not included in the Pro badge.",
+          );
+          navigation.replace("Home");
+          return;
+        }
 
         // Fetch banks first
         await fetchBanks();

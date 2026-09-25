@@ -185,6 +185,18 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
   const handleCreateSubAgent = async () => {
     if (!currentUser) return;
+    const badge = String(
+      currentUser.user_metadata?.super_agent_badge ||
+        currentUser.app_metadata?.super_agent_badge ||
+        "enterprise",
+    ).toLowerCase();
+    if (badge !== "enterprise") {
+      showError(
+        "Pro access",
+        "Creating sub-agents requires the Enterprise badge.",
+      );
+      return;
+    }
 
     const { fullName, businessName, email, phone, password, tierName } = form;
 
@@ -277,120 +289,142 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Create Sub-Agent</Text>
+        {String(
+          currentUser?.user_metadata?.super_agent_badge ||
+            currentUser?.app_metadata?.super_agent_badge ||
+            "enterprise",
+        ).toLowerCase() !== "enterprise" ? (
+          <View style={styles.card}>
+            <View style={styles.restrictedIcon}>
+              <Ionicons name="lock-closed" size={28} color="#9a3412" />
+            </View>
+            <Text style={styles.restrictedTitle}>
+              Enterprise badge required
+            </Text>
+            <Text style={styles.restrictedText}>
+              The Pro badge does not include creating sub-agents. Contact an
+              administrator to upgrade this account.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.card}>
+            <Text style={styles.sectionTitle}>Create Sub-Agent</Text>
 
-          <Text style={styles.label}>Full Name</Text>
-          <TextInput
-            placeholder="Enter full name"
-            value={form.fullName}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, fullName: value }))
-            }
-            style={styles.input}
-          />
+            <Text style={styles.label}>Full Name</Text>
+            <TextInput
+              placeholder="Enter full name"
+              value={form.fullName}
+              onChangeText={(value) =>
+                setForm((prev) => ({ ...prev, fullName: value }))
+              }
+              style={styles.input}
+            />
 
-          <Text style={styles.label}>Business Name</Text>
-          <TextInput
-            placeholder="Enter business name"
-            value={form.businessName}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, businessName: value }))
-            }
-            style={styles.input}
-          />
+            <Text style={styles.label}>Business Name</Text>
+            <TextInput
+              placeholder="Enter business name"
+              value={form.businessName}
+              onChangeText={(value) =>
+                setForm((prev) => ({ ...prev, businessName: value }))
+              }
+              style={styles.input}
+            />
 
-          <Text style={styles.label}>Email Address</Text>
-          <TextInput
-            placeholder="Enter email address"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            value={form.email}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, email: value }))
-            }
-            style={styles.input}
-          />
+            <Text style={styles.label}>Email Address</Text>
+            <TextInput
+              placeholder="Enter email address"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              value={form.email}
+              onChangeText={(value) =>
+                setForm((prev) => ({ ...prev, email: value }))
+              }
+              style={styles.input}
+            />
 
-          <Text style={styles.label}>Phone Number</Text>
-          <TextInput
-            placeholder="Enter phone number"
-            keyboardType="phone-pad"
-            value={form.phone}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, phone: value }))
-            }
-            style={styles.input}
-          />
+            <Text style={styles.label}>Phone Number</Text>
+            <TextInput
+              placeholder="Enter phone number"
+              keyboardType="phone-pad"
+              value={form.phone}
+              onChangeText={(value) =>
+                setForm((prev) => ({ ...prev, phone: value }))
+              }
+              style={styles.input}
+            />
 
-          <Text style={styles.label}>Password</Text>
-          <TextInput
-            placeholder="Enter login password"
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            value={form.password}
-            onChangeText={(value) =>
-              setForm((prev) => ({ ...prev, password: value }))
-            }
-            style={styles.input}
-          />
+            <Text style={styles.label}>Password</Text>
+            <TextInput
+              placeholder="Enter login password"
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              value={form.password}
+              onChangeText={(value) =>
+                setForm((prev) => ({ ...prev, password: value }))
+              }
+              style={styles.input}
+            />
 
-          <Text style={styles.label}>Tier Access</Text>
-          <Text style={styles.fieldHint}>
-            Sub-agents see the prices you set for their tier. General fills any
-            bundle your tier does not cover.
-          </Text>
-          <View style={styles.tierChipRow}>
-            <TouchableOpacity
-              style={[styles.tierChip, !form.tierName && styles.tierChipActive]}
-              onPress={() => setForm((prev) => ({ ...prev, tierName: "" }))}
-            >
-              <Text
-                style={[
-                  styles.tierChipText,
-                  !form.tierName && styles.tierChipTextActive,
-                ]}
-              >
-                General
-              </Text>
-            </TouchableOpacity>
-            {tiers.map((tier) => (
+            <Text style={styles.label}>Tier Access</Text>
+            <Text style={styles.fieldHint}>
+              Sub-agents see the prices you set for their tier. General fills
+              any bundle your tier does not cover.
+            </Text>
+            <View style={styles.tierChipRow}>
               <TouchableOpacity
-                key={`form-tier-${tier.id}`}
                 style={[
                   styles.tierChip,
-                  form.tierName === tier.name && styles.tierChipActive,
+                  !form.tierName && styles.tierChipActive,
                 ]}
-                onPress={() =>
-                  setForm((prev) => ({ ...prev, tierName: tier.name }))
-                }
+                onPress={() => setForm((prev) => ({ ...prev, tierName: "" }))}
               >
                 <Text
                   style={[
                     styles.tierChipText,
-                    form.tierName === tier.name && styles.tierChipTextActive,
+                    !form.tierName && styles.tierChipTextActive,
                   ]}
                 >
-                  {tier.name}
+                  General
                 </Text>
               </TouchableOpacity>
-            ))}
-          </View>
+              {tiers.map((tier) => (
+                <TouchableOpacity
+                  key={`form-tier-${tier.id}`}
+                  style={[
+                    styles.tierChip,
+                    form.tierName === tier.name && styles.tierChipActive,
+                  ]}
+                  onPress={() =>
+                    setForm((prev) => ({ ...prev, tierName: tier.name }))
+                  }
+                >
+                  <Text
+                    style={[
+                      styles.tierChipText,
+                      form.tierName === tier.name && styles.tierChipTextActive,
+                    ]}
+                  >
+                    {tier.name}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
 
-          <TouchableOpacity
-            style={[
-              styles.primaryButton,
-              creatingAgent && styles.disabledButton,
-            ]}
-            onPress={handleCreateSubAgent}
-            disabled={creatingAgent}
-          >
-            <Text style={styles.primaryButtonText}>
-              {creatingAgent ? "Creating..." : "Create Sub-Agent"}
-            </Text>
-          </TouchableOpacity>
-        </View>
+            <TouchableOpacity
+              style={[
+                styles.primaryButton,
+                creatingAgent && styles.disabledButton,
+              ]}
+              onPress={handleCreateSubAgent}
+              disabled={creatingAgent}
+            >
+              <Text style={styles.primaryButtonText}>
+                {creatingAgent ? "Creating..." : "Create Sub-Agent"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Assigned Agents</Text>
@@ -565,6 +599,29 @@ const styles = StyleSheet.create({
   },
   disabledButton: {
     opacity: 0.7,
+  },
+  restrictedIcon: {
+    alignSelf: "center",
+    width: 58,
+    height: 58,
+    borderRadius: 18,
+    backgroundColor: "#ffedd5",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 14,
+  },
+  restrictedTitle: {
+    color: colors.dark,
+    fontSize: 18,
+    fontWeight: "800",
+    textAlign: "center",
+  },
+  restrictedText: {
+    color: colors.textSecondary || "#667085",
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: "center",
+    marginTop: 7,
   },
   primaryButtonText: {
     color: colors.white,

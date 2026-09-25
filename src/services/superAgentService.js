@@ -198,8 +198,55 @@ export const loadSubAgentPackages = async ({ user, network = null }) => {
 
     const catalog = await fetchCatalogPackages();
     const networkFilter = network ? normalizeKey(network) : null;
+    const { data: activePricingRows, error: activePricingError } =
+      await adminClient
+        .from("package_pricing")
+        .select("package_id, network, type")
+        .eq("is_active", true);
+
+    if (activePricingError) {
+      console.warn(
+        "Could not load active package pricing:",
+        activePricingError,
+      );
+      return {
+        offers: [],
+        agent_tier: agentTier || null,
+        error: "Could not load enabled packages.",
+      };
+    }
+
+    const activePricingKeys = new Set(
+      (activePricingRows || []).map((row) => {
+        const descriptor = normalizeKey(row?.type);
+        const rowSize = row?.size;
+        const descriptorWithSize =
+          rowSize !== null &&
+          rowSize !== undefined &&
+          !descriptor.includes(`${rowSize}GB`)
+            ? `${descriptor} - ${rowSize}GB`
+            : descriptor;
+        return `${normalizeKey(row?.network)}::${descriptorWithSize}`;
+      }),
+    );
+    const activePackageIds = new Set(
+      (activePricingRows || [])
+        .map((row) => String(row?.package_id || ""))
+        .filter(Boolean),
+    );
 
     const mappedPackages = selectedOffers
+      .filter((row) => {
+        const rowPackageId = String(row?.package_id || "");
+        const catalogPackage = findCatalogPackageForOffer(catalog, row);
+        const catalogPackageId = String(catalogPackage?.id || "");
+        const rowKey = `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+        return (
+          (rowPackageId && activePackageIds.has(rowPackageId)) ||
+          (catalogPackageId && activePackageIds.has(catalogPackageId)) ||
+          activePricingKeys.has(rowKey)
+        );
+      })
       .filter(
         (row) => !networkFilter || normalizeKey(row?.network) === networkFilter,
       )
@@ -540,59 +587,30 @@ export const createSubAgent = async ({
   const cleanPhone = String(phone || "").trim() || null;
   const cleanTier = String(tierName || "").trim() || null;
 
-  // 1. Try edge function first
-  try {
-    const { data: edgeData, error: edgeError } =
-      await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-user-management"),
-        {
-          body: {
-            action: "createSubAgent",
-            userData: {
-              email: cleanEmail,
-              password: cleanPassword,
-              full_name: cleanFullName,
-              business_name: cleanBusinessName,
-              phone: cleanPhone,
-              tier_name: cleanTier,
-            },
-          },
-        },
-      );
-
-    if (!edgeError && edgeData && !edgeData.error && edgeData.user) {
-      return edgeData;
-    }
-  } catch (e) {
-    // proceed to direct fallback
-  }
-
-  // 2. Direct fallback via adminClient
-  try {
-    const { data: createdUser, error: createError } =
-      await adminClient.auth.admin.createUser({
-        email: cleanEmail,
-        password: cleanPassword,
-        user_metadata: {
+  const { data, error } = await supabase.functions.invoke(
+    getEdgeFunctionName("super-agent-user-management"),
+    {
+      body: {
+        action: "createSubAgent",
+        userData: {
+          email: cleanEmail,
+          password: cleanPassword,
           full_name: cleanFullName,
           business_name: cleanBusinessName,
           phone: cleanPhone,
-          role: "Agent",
-          super_agent_id: superAgentId,
           tier_name: cleanTier,
         },
-        email_confirm: true,
-      });
+      },
+    },
+  );
 
-    if (createError) throw createError;
-
-    return {
-      user: createdUser.user,
-    };
-  } catch (err) {
-    console.error("Direct createSubAgent error:", err);
-    throw err;
+  if (error) throw error;
+  if (!data || data.error || !data.user) {
+    throw new Error(
+      data?.error || "Unable to create this sub-agent right now.",
+    );
   }
+  return data;
 };
 
 /**

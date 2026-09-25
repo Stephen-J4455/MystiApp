@@ -708,9 +708,33 @@ export default function DataScreen({ navigation, route }) {
           }
         });
 
-        const filteredOffers = (catalogOffers || []).filter(
-          (pkg) => pkg.network?.toUpperCase() === network.toUpperCase(),
-        );
+        const filteredOffers = (catalogOffers || []).filter((pkg) => {
+          if (pkg.network?.toUpperCase() !== network.toUpperCase()) {
+            return false;
+          }
+          const pkgType = String(pkg.type || "")
+            .trim()
+            .toUpperCase();
+          const pkgSize =
+            pkg.size !== undefined && pkg.size !== null ? `${pkg.size}GB` : "";
+          const pkgDescriptor =
+            pkgSize && !pkgType.includes(pkgSize)
+              ? `${pkgType} - ${pkgSize}`.toUpperCase()
+              : (pkgType || pkgSize).toUpperCase();
+          return (pricingRows || []).some((row) => {
+            if (row.package_id && String(row.package_id) === String(pkg.id)) {
+              return true;
+            }
+            const rowType = String(row.type || "")
+              .trim()
+              .toUpperCase();
+            return (
+              String(row.network || "").toUpperCase() ===
+                String(pkg.network || "").toUpperCase() &&
+              (rowType === pkgType || rowType === pkgDescriptor)
+            );
+          });
+        });
         const mappedBundles = filteredOffers.map((pkg) => {
           const rawType = String(pkg.type || "").trim();
           const size =

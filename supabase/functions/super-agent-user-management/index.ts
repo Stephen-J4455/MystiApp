@@ -266,6 +266,22 @@ Deno.serve(async (req) => {
           },
         );
       }
+      const badge = String(
+        user.user_metadata?.super_agent_badge ||
+          user.app_metadata?.super_agent_badge ||
+          "enterprise",
+      ).toLowerCase();
+      if (badge !== "enterprise") {
+        return new Response(
+          JSON.stringify({
+            error: "The Pro badge does not include sub-agent creation access",
+          }),
+          {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
 
       const email = String(userData?.email || "").trim();
       const password = String(userData?.password || "").trim();
