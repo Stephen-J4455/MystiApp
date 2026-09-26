@@ -6,6 +6,95 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+const JEHUCA_PACKAGES_URL =
+  "https://backend.jehucale-business.com/api/packages";
+
+/**
+ * Looks up the live provider price for a package from the Jehuca catalog.
+ *
+ * This is deliberately fetched server-side rather than trusted from the client:
+ * the API cost snapshot decides what the business is recorded as paying, so a
+ * tampered client must not be able to inflate or deflate it.
+ *
+ * Returns the price in MAJOR units (the provider reports pesewas, e.g. 500 for
+ * Ghc 5.00) or null when the catalog is unreachable / the package is missing.
+ */
+const fetchProviderPrice = async (packageId?: string | null) => {
+  const id = String(packageId || "").trim();
+  if (!id) return null;
+
+  const apiKey = Deno.env.get("JEHUCA_API_KEY");
+  if (!apiKey) return null;
+
+  try {
+    const response = await fetch(JEHUCA_PACKAGES_URL, {
+      method: "GET",
+      headers: { "X-API-Key": apiKey },
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const list = Array.isArray(payload?.payload)
+      ? payload.payload
+      : Array.isArray(payload)
+        ? payload
+        : [];
+    const match = list.find(
+      (p: { id?: string | number }) => String(p?.id ?? "") === id,
+    );
+    const raw = Number(match?.price);
+    if (!Number.isFinite(raw) || raw < 0) return null;
+    return Number((raw / 100).toFixed(2));
+  } catch (error) {
+    console.warn("[resolve-api-cost] provider catalog lookup failed:", error);
+    return null;
+  }
+};
+
+/**
+ * Resolves and snapshots the effective provider cost for an order.
+ *
+ * Never throws: if the tier lookup fails we return nulls so a paid order is
+ * still created and dispatch-order's own guard handles the missing cost.
+ */
+const resolveOrderApiCost = async (
+  client: ReturnType<typeof createClient>,
+  {
+    audience,
+    network,
+    type,
+    packageId,
+    fallback,
+  }: {
+    audience: "super_agent" | "normal_user";
+    network: string;
+    type: string;
+    packageId?: string | null;
+    fallback: number;
+  },
+) => {
+  try {
+    const { data, error } = await client.rpc("resolve_api_cost", {
+      p_audience: audience,
+      p_network: network,
+      p_type: type,
+      p_package_id: packageId || null,
+      p_live_cost: await fetchProviderPrice(packageId),
+      p_fallback: fallback,
+    });
+    if (error) throw error;
+
+    const cost = Number(data?.[0]?.api_cost);
+    return {
+      apiCost: Number.isFinite(cost) ? Number(cost.toFixed(2)) : null,
+      costSource: String(data?.[0]?.cost_source || "fallback"),
+      discount: Number(data?.[0]?.discount || 0),
+    };
+  } catch (error) {
+    console.error("[resolve-api-cost] failed:", error);
+    return { apiCost: null, costSource: "fallback", discount: 0 };
+  }
+};
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -155,9 +244,24 @@ Deno.serve(async (req) => {
         country_code: "GH",
       };
 
+      const walletOrderCost = await resolveOrderApiCost(supabaseAdmin, {
+        audience: "super_agent",
+        network: orderNetwork,
+        type: String(provider_type || package_name || ""),
+        packageId: provider_package_id || offer_id || null,
+        fallback: walletAmount,
+      });
+
       const { data: order, error: orderError } = await supabaseAdmin
         .from("orders")
-        .insert(orderData)
+        .insert({
+          ...orderData,
+          // A wallet order is a super-agent purchase, so it resolves against
+          // the super_agent discount tier. Snapshotted here because this order
+          // is created before the Paystack path's cost resolution runs.
+          api_cost: walletOrderCost.apiCost,
+          cost_source: walletOrderCost.costSource,
+        })
         .select()
         .single();
       if (orderError) {
@@ -578,6 +682,35 @@ Deno.serve(async (req) => {
         0,
     );
 
+    // Resolve the TRUE provider cost (live Jehuca price minus any admin
+    // discount) and snapshot it onto the order.
+    //
+    // A normal-user order has no settlement split, so `base_amount` is
+    // currently set to the customer price. That makes analytics report a gross
+    // profit of zero and lets the dispatch balance check under-check the funds
+    // we actually need. Snapshotting the real cost fixes both.
+    //
+    // The audience is chosen by who is buying: a super agent buying on wallet
+    // uses the super_agent pricing tier, everyone else the normal_user tier.
+    const costAudience = resolvedSuperAgentId ? "super_agent" : "normal_user";
+    const orderApiCost = await resolveOrderApiCost(supabaseAdmin, {
+      audience: costAudience,
+      network: orderNetwork,
+      type: normalizedProviderType,
+      packageId: provider_package_id || offer_id || null,
+      // Last resort: an agent order's base_amount is already the provider cost,
+      // and for a normal-user order the sale price bounds the cost.
+      fallback: isAgentOrder ? settlement.baseAmount : Number(orderAmount || 0),
+    });
+    const apiCostSnapshot = orderApiCost.apiCost;
+    const resolvedCostSource = orderApiCost.costSource;
+    console.log("[resolve-api-cost] order cost resolved:", {
+      audience: costAudience,
+      apiCost: apiCostSnapshot,
+      costSource: resolvedCostSource,
+      discount: orderApiCost.discount,
+    });
+
     const sharedOrderFields = {
       amount: orderAmount,
       network: orderNetwork,
@@ -621,6 +754,8 @@ Deno.serve(async (req) => {
         super_agent_share: settlement.superAgentShare,
         agent_net: settlement.agentNet,
         base_amount: settlement.baseAmount,
+        api_cost: apiCostSnapshot,
+        cost_source: resolvedCostSource,
         agent_markup: settlement.agentMarkup,
         transaction_fee: settlement.transactionFee,
         main_account_amount: settlement.adminShare,
@@ -664,6 +799,20 @@ Deno.serve(async (req) => {
         // Keep this nullable unless a matching local offer was found so the
         // orders foreign key is not given an unrelated provider package ID.
         offer_id: localOfferId,
+        // Persisted so the order can be dispatched to Jehuca later, including
+        // from the admin retry action when the provider account was unfunded
+        // at purchase time. Without these the provider request is not
+        // reconstructable after the fact.
+        provider_package_id: provider_package_id
+          ? String(provider_package_id)
+          : null,
+        provider_type: normalizedProviderType || null,
+        provider_size: normalizedProviderSize || null,
+        base_amount: orderAmount,
+        // The real provider cost, not the price the customer paid. Read back by
+        // dispatch-order for its balance check and by analytics for margin.
+        api_cost: apiCostSnapshot,
+        cost_source: resolvedCostSource,
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,
         paystack_transaction_status:
           sharedOrderFields.paystack_transaction_status,

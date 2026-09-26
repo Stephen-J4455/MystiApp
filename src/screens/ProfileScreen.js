@@ -29,6 +29,12 @@ export default function ProfileScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [isAgent, setIsAgent] = useState(false);
+  const [showPasswordSection, setShowPasswordSection] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
   const [recentTransactions, setRecentTransactions] = useState([]);
   const [agentStats, setAgentStats] = useState({
     totalOrders: 0,
@@ -267,6 +273,74 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
+  const resetPasswordForm = () => {
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setPasswordError("");
+  };
+
+  const handleChangePassword = async () => {
+    if (passwordSaving) return;
+
+    setPasswordError("");
+
+    if (!currentPassword) {
+      setPasswordError("Enter your current password.");
+      return;
+    }
+    if (!newPassword) {
+      setPasswordError("Enter a new password.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("The new passwords do not match.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setPasswordError("Use at least 8 characters.");
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setPasswordError("The new password must be different.");
+      return;
+    }
+
+    setPasswordSaving(true);
+    try {
+      // Re-authenticate first: Supabase requires the current password to be
+      // proven before it will set a new one.
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: user?.email,
+        password: currentPassword,
+      });
+      if (signInError) {
+        setPasswordError("Your current password is incorrect.");
+        setPasswordSaving(false);
+        return;
+      }
+
+      const { error } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
+      if (error) throw error;
+
+      resetPasswordForm();
+      setShowPasswordSection(false);
+      showSuccess(
+        "Password updated",
+        "Use your new password the next time you sign in.",
+      );
+    } catch (error) {
+      console.error("Error changing password:", error);
+      setPasswordError(
+        error.message || "Could not change your password. Please try again.",
+      );
+    } finally {
+      setPasswordSaving(false);
+    }
+  };
+
   const handleUpdatePreferences = async (enabled) => {
     try {
       const { error } = await supabase.auth.updateUser({
@@ -445,6 +519,102 @@ export default function ProfileScreen({ navigation }) {
                 }}
               />
             </View>
+          </View>
+
+          <View style={styles.preferenceSection}>
+            <Text style={styles.sectionTitle}>Security</Text>
+            {!showPasswordSection ? (
+              <TouchableOpacity
+                style={styles.appInfoItem}
+                onPress={() => {
+                  resetPasswordForm();
+                  setShowPasswordSection(true);
+                }}
+              >
+                <Ionicons
+                  name="lock-closed-outline"
+                  size={20}
+                  color={colors.primary}
+                />
+                <Text style={styles.appInfoText}>Change password</Text>
+                <Ionicons
+                  name="chevron-forward"
+                  size={16}
+                  color={colors.secondary}
+                />
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.passwordForm}>
+                <View style={styles.inputContainer}>
+                  <Text style={styles.label}>Current password</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={currentPassword}
+                    onChangeText={setCurrentPassword}
+                    placeholder="Enter your current password"
+                    placeholderTextColor={colors.secondary}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    textContentType="password"
+                  />
+                </View>
+                <View style={styles.inputContainer}>
+                  <Text style={styles.label}>New password</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={newPassword}
+                    onChangeText={setNewPassword}
+                    placeholder="At least 8 characters"
+                    placeholderTextColor={colors.secondary}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    textContentType="newPassword"
+                  />
+                </View>
+                <View style={styles.inputContainer}>
+                  <Text style={styles.label}>Confirm new password</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={confirmPassword}
+                    onChangeText={setConfirmPassword}
+                    placeholder="Re-enter the new password"
+                    placeholderTextColor={colors.secondary}
+                    secureTextEntry
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    textContentType="newPassword"
+                  />
+                </View>
+
+                {passwordError ? (
+                  <Text style={styles.passwordError}>{passwordError}</Text>
+                ) : null}
+
+                <View style={styles.editButtons}>
+                  <TouchableOpacity
+                    style={[styles.button, styles.cancelButton]}
+                    onPress={() => {
+                      resetPasswordForm();
+                      setShowPasswordSection(false);
+                    }}
+                    disabled={passwordSaving}
+                  >
+                    <Text style={styles.cancelButtonText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.button, styles.saveButton]}
+                    onPress={handleChangePassword}
+                    disabled={passwordSaving}
+                  >
+                    <Text style={styles.buttonText}>
+                      {passwordSaving ? "Saving..." : "Update"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
           </View>
 
           <View style={styles.appInfoSection}>
@@ -740,6 +910,15 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
+  },
+  passwordForm: {
+    marginTop: 16,
+  },
+  passwordError: {
+    color: "#b42318",
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 14,
   },
   preferenceItem: {
     flexDirection: "row",

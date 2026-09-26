@@ -41,10 +41,19 @@ import {
   getTransactionChargeAmount,
 } from "../lib/paymentSettings";
 
+// Tab order for the data-type switcher. The key must match the value returned
+// by getBundleFamily in the component.
+const BUNDLE_FAMILY_ORDER = [
+  { key: "everyday", label: "Everyday", icon: "flash-outline" },
+  { key: "ishare", label: "iShare", icon: "people-outline" },
+  { key: "big_time", label: "Big Time", icon: "trending-up-outline" },
+];
+
 export default function DataScreen({ navigation, route }) {
   const { network } = route.params;
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [bundles, setBundles] = useState([]);
+  const [activeFamily, setActiveFamily] = useState(null);
   const [loading, setLoading] = useState(true);
   const [paystackModalVisible, setPaystackModalVisible] = useState(false);
   const [directPaystackRequested, setDirectPaystackRequested] = useState(false);
@@ -119,52 +128,30 @@ export default function DataScreen({ navigation, route }) {
     };
   }, [selectedBundle, superAgentId, paymentChargeSettings]);
 
-  const dispatchProviderOrder = useCallback(
-    async (bundle, phone) => {
-      const functionName = getEdgeFunctionName("make-orders");
-      const rawSize = Number(
-        bundle.size || String(bundle.dataSize || "").match(/[\d.]+/)?.[0] || 0,
-      );
-      const rawType = String(bundle.type || bundle.name || "").toUpperCase();
-      const providerType = rawType.includes("BIG TIME")
-        ? "BIG TIME"
-        : rawType.includes("ISHARE")
-          ? "ISHARE"
-          : rawType.split(/[(-]/)[0].trim();
-      const packageRequest = {
-        packageId: String(bundle.package_id || bundle.id),
-        size: Math.round(rawSize * 1000),
-        network: String(bundle.network || network).toUpperCase(),
-        type: providerType,
-        phone: String(phone || "").replace(/\s+/g, ""),
-      };
+  const dispatchProviderOrder = useCallback(async (orderId, orderType) => {
+    const functionName = getEdgeFunctionName("dispatch-order");
+    console.log("[Purchase] Calling edge function:", functionName);
+    const { data, error } = await supabase.functions.invoke(functionName, {
+      body: { order_id: orderId, order_type: orderType },
+    });
 
-      console.log("[Purchase] Calling edge function:", functionName);
-      const { data, error } = await supabase.functions.invoke(functionName, {
-        body: { packages: [packageRequest] },
-      });
+    console.log("[Jehuca debug] dispatch-order:", {
+      function: functionName,
+      order_id: orderId,
+      order_type: orderType,
+      response: data || null,
+      error: error?.message || null,
+    });
 
-      const debugPayload = {
-        function: functionName,
-        request: { packages: [packageRequest] },
-        response: data || null,
-        error: error?.message || null,
-        accepted: Boolean(
-          !error &&
-          data?.status === true &&
-          (data?.payload?.orderId || data?.payload?.orders?.length),
-        ),
-      };
-
-      console.log("[Jehuca debug] make-orders:", debugPayload);
-      return {
-        data,
-        error,
-        accepted: debugPayload.accepted,
-      };
-    },
-    [network],
-  );
+    return {
+      data,
+      error,
+      // The edge function reports a queued order as deferred rather than
+      // failed, so the customer keeps a confirmed receipt.
+      deferred: Boolean(!error && data?.deferred),
+      dispatched: Boolean(!error && data?.success && !data?.deferred),
+    };
+  }, []);
 
   // Paystack payment handlers
   const handlePaymentSuccess = useCallback(
@@ -238,48 +225,58 @@ export default function DataScreen({ navigation, route }) {
             return;
           }
 
+          const orderType = data.is_agent_order ? "agent" : "regular";
           const providerResult = await dispatchProviderOrder(
-            selectedBundle,
-            isAgent
-              ? recipientPhone
-              : purchaseType === "self"
-                ? userPhone
-                : recipientPhone,
+            data.order.id,
+            orderType,
           );
 
-          if (providerResult.error || !providerResult.accepted) {
-            showError(
-              "Provider Order Failed",
-              "Payment was verified, but Jehucal did not accept the order. Contact support with the payment reference.",
+          if (providerResult.deferred) {
+            // The payment succeeded but the provider could not be reached
+            // (usually the admin's provider account is out of funds). The
+            // order is queued and the admin can send it once they top up, so
+            // tell the customer it is being processed rather than showing a
+            // failure they cannot act on.
+            showSuccess(
+              "Order Received",
+              data.deferred_reason === "insufficient_api_balance"
+                ? "Your order is confirmed and is being processed. It will be delivered shortly."
+                : "Your order is confirmed and is queued for delivery.",
             );
+            navigation.navigate("Receipt", {
+              transaction: {
+                id: data.order.id,
+                status: "pending",
+                offer_title: selectedBundle.name,
+                network: network,
+                data_amount: selectedBundle.name,
+                amount: data.order.amount,
+                created_at: data.order.created_at,
+                payment_reference: data.order.payment_reference,
+                user_name:
+                  user.user_metadata?.full_name ||
+                  user.email?.split("@")[0] ||
+                  "N/A",
+                user_email: user.email,
+                phone: isAgent
+                  ? recipientPhone.trim().replace(/\s+/g, "")
+                  : purchaseType === "self"
+                    ? userPhone
+                    : recipientPhone.trim().replace(/\s+/g, ""),
+                country_code: "GH",
+                orderType: "user",
+              },
+            });
             return;
           }
 
-          const providerOrderId =
-            providerResult.data?.payload?.orderId ||
-            providerResult.data?.orderId ||
-            providerResult.data?.payload?.orders?.[0]?.id ||
-            null;
-          const providerStatus =
-            providerResult.data?.payload?.orders?.[0]?.status ||
-            providerResult.data?.status ||
-            "accepted";
-          await supabase
-            .from(data.is_agent_order ? "agent_orders" : "orders")
-            .update({
-              jehuca_order_id: providerOrderId,
-              jehuca_order_status: providerStatus,
-              jehuca_response: providerResult.data || null,
-            })
-            .eq("id", data.order.id);
-          await supabase
-            .from("payment_transactions")
-            .update({
-              jehuca_order_id: providerOrderId,
-              jehuca_order_status: providerStatus,
-              jehuca_response: providerResult.data || null,
-            })
-            .eq("payment_reference", data.order.payment_reference);
+          if (!providerResult.dispatched) {
+            showError(
+              "Order Queued",
+              "Your payment went through and the order is saved. Our team will complete the delivery shortly.",
+            );
+            return;
+          }
 
           showSuccess(
             "Purchase Successful!",
@@ -288,7 +285,7 @@ export default function DataScreen({ navigation, route }) {
           navigation.navigate("Receipt", {
             transaction: {
               id: data.order.id,
-              status: data.order.status,
+              status: "processing",
               offer_title: selectedBundle.name,
               network: network,
               data_amount: selectedBundle.name,
@@ -807,9 +804,10 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
-  const bundlesByNetwork = useMemo(() => {
+  // Groups bundles by network and sorts each group by ascending price.
+  const groupBundlesByNetwork = useCallback((list) => {
     const grouped = {};
-    bundles.forEach((bundle) => {
+    list.forEach((bundle) => {
       const networkName = bundle.name.split(" — ")[0]?.trim() || "Other";
       if (!grouped[networkName]) {
         grouped[networkName] = [];
@@ -834,7 +832,63 @@ export default function DataScreen({ navigation, route }) {
     });
 
     return grouped;
+  }, []);
+
+  // Provider family shown as a tab. The type strings are free-form
+  // (e.g. "MTN 1GB - Daily"), so the family is inferred the same way the
+  // provider API groups them: BIG TIME, ISHARE, everything else.
+  const getBundleFamily = (bundle) => {
+    const type = String(bundle?.type || "").toUpperCase();
+    if (type.includes("BIG TIME")) return "big_time";
+    if (type.includes("ISHARE")) return "ishare";
+    return "everyday";
+  };
+
+  const bundleFamilies = useMemo(() => {
+    const families = new Map();
+    bundles.forEach((bundle) => {
+      const family = getBundleFamily(bundle);
+      const existing = families.get(family) || { key: family, count: 0 };
+      existing.count += 1;
+      families.set(family, existing);
+    });
+
+    // Stable, meaningful order rather than Map insertion order.
+    return BUNDLE_FAMILY_ORDER.filter((family) => families.has(family.key)).map(
+      (family) => families.get(family.key),
+    );
   }, [bundles]);
+
+  // A single family means there is nothing to switch between, so the tab strip
+  // is hidden entirely rather than showing one pointless tab.
+  const showFamilyTabs = bundleFamilies.length > 1;
+
+  const activeFamilyKey = useMemo(() => {
+    if (!showFamilyTabs) return null;
+    const stillExists = bundleFamilies.some(
+      (family) => family.key === activeFamily,
+    );
+    if (stillExists) return activeFamily;
+    return bundleFamilies[0]?.key || null;
+  }, [activeFamily, bundleFamilies, showFamilyTabs]);
+
+  // Reset the active tab when the network changes so a family that does not
+  // exist on the new network never shows an empty list.
+  useEffect(() => {
+    setActiveFamily(null);
+  }, [network, isAgent]);
+
+  const visibleBundles = useMemo(() => {
+    if (!showFamilyTabs || !activeFamilyKey) return bundles;
+    return bundles.filter(
+      (bundle) => getBundleFamily(bundle) === activeFamilyKey,
+    );
+  }, [bundles, showFamilyTabs, activeFamilyKey]);
+
+  const visibleBundlesByNetwork = useMemo(
+    () => groupBundlesByNetwork(visibleBundles),
+    [visibleBundles, groupBundlesByNetwork],
+  );
 
   const handlePurchaseForSelf = async (bundle) => {
     try {
@@ -1081,41 +1135,32 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
 
-      const providerResult = await dispatchProviderOrder(bundle, phone);
-      if (providerResult.error || !providerResult.accepted) {
-        showError(
-          "Provider Order Failed",
-          "Wallet debited, but the data provider did not accept the order.",
+      const providerResult = await dispatchProviderOrder(
+        data.order.id,
+        "regular",
+      );
+
+      if (!providerResult.dispatched) {
+        // The wallet was already debited, so the order is recorded either way.
+        // A deferred dispatch means the provider could not be reached yet and
+        // the admin will retry it.
+        showSuccess(
+          providerResult.deferred ? "Order Queued" : "Purchase Saved",
+          providerResult.deferred
+            ? "Your wallet was debited and the order is queued for delivery."
+            : "Your wallet was debited and the order was saved. Our team will complete the delivery shortly.",
         );
-        return;
+      } else {
+        showSuccess(
+          "Purchase Successful!",
+          `${bundle.name} was purchased from your wallet.`,
+        );
       }
 
-      const providerOrderId =
-        providerResult.data?.payload?.orderId ||
-        providerResult.data?.orderId ||
-        providerResult.data?.payload?.orders?.[0]?.id ||
-        null;
-      const providerStatus =
-        providerResult.data?.payload?.orders?.[0]?.status ||
-        providerResult.data?.status ||
-        "accepted";
-      await supabase
-        .from("orders")
-        .update({
-          jehuca_order_id: providerOrderId,
-          jehuca_order_status: providerStatus,
-          jehuca_response: providerResult.data || null,
-        })
-        .eq("id", data.order.id);
-
-      showSuccess(
-        "Purchase Successful!",
-        `${bundle.name} was purchased from your wallet.`,
-      );
       navigation.navigate("Receipt", {
         transaction: {
           id: data.order.id,
-          status: data.order.status,
+          status: providerResult.dispatched ? "processing" : "pending",
           offer_title: data.order.offer_title,
           network,
           data_amount: data.order.data_amount,
@@ -1573,21 +1618,84 @@ export default function DataScreen({ navigation, route }) {
           </View>
         )}
 
+        {showFamilyTabs ? (
+          <View style={styles.familyTabsWrap}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.familyTabsContent}
+            >
+              {bundleFamilies.map((family) => {
+                const meta =
+                  BUNDLE_FAMILY_ORDER.find(
+                    (entry) => entry.key === family.key,
+                  ) || BUNDLE_FAMILY_ORDER[0];
+                const isActive = family.key === activeFamilyKey;
+                return (
+                  <TouchableOpacity
+                    key={family.key}
+                    style={[
+                      styles.familyTab,
+                      isActive && styles.familyTabActive,
+                    ]}
+                    onPress={() => setActiveFamily(family.key)}
+                    activeOpacity={0.85}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: isActive }}
+                    accessibilityLabel={`${meta.label} data, ${family.count} packages`}
+                  >
+                    <Ionicons
+                      name={meta.icon}
+                      size={14}
+                      color={isActive ? "#fff" : colors.primary}
+                    />
+                    <Text
+                      style={[
+                        styles.familyTabText,
+                        isActive && styles.familyTabTextActive,
+                      ]}
+                    >
+                      {meta.label}
+                    </Text>
+                    <View
+                      style={[
+                        styles.familyTabCount,
+                        isActive && styles.familyTabCountActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.familyTabCountText,
+                          isActive && styles.familyTabCountTextActive,
+                        ]}
+                      >
+                        {family.count}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        ) : null}
+
         <View style={styles.bundlesContainer}>
           {loading || !agentChecked ? (
             renderBundlePlaceholders()
-          ) : bundles.length === 0 ? (
+          ) : visibleBundles.length === 0 ? (
             <View style={styles.emptyContainer}>
               <Ionicons name="wifi" size={64} color={colors.tint} />
               <Text style={styles.emptyTitle}>No Data Bundles</Text>
               <Text style={styles.emptyMessage}>
-                {isAgent
-                  ? "Your super agent has not published packages for this network in your tier yet."
-                  : `No data bundles available for ${displayNetwork} at the moment.`}
+                {bundles.length > 0
+                  ? "No packages in this data type. Try another tab."
+                  : isAgent
+                    ? "Your super agent has not published packages for this network in your tier yet."
+                    : `No data bundles available for ${displayNetwork} at the moment.`}
               </Text>
             </View>
           ) : (
-            Object.entries(bundlesByNetwork).map(
+            Object.entries(visibleBundlesByNetwork).map(
               ([networkName, networkBundles]) => (
                 <View key={networkName} style={{ marginBottom: 20 }}>
                   {networkBundles.map((bundle) => (
@@ -2515,6 +2623,56 @@ const styles = StyleSheet.create({
   bundlesContainer: {
     paddingHorizontal: 20,
     paddingBottom: 20,
+  },
+  familyTabsWrap: {
+    marginTop: 18,
+  },
+  familyTabsContent: {
+    paddingHorizontal: 20,
+    gap: 9,
+    paddingBottom: 4,
+  },
+  familyTab: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#d9e7e5",
+    backgroundColor: colors.white,
+  },
+  familyTabActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary,
+  },
+  familyTabText: {
+    color: colors.primary,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  familyTabTextActive: {
+    color: "#fff",
+  },
+  familyTabCount: {
+    minWidth: 20,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 8,
+    alignItems: "center",
+    backgroundColor: "#eef4f3",
+  },
+  familyTabCountActive: {
+    backgroundColor: "rgba(255,255,255,0.25)",
+  },
+  familyTabCountText: {
+    color: colors.secondary,
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  familyTabCountTextActive: {
+    color: "#fff",
   },
   bundleCard: {
     borderRadius: 24,
