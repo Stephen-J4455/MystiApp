@@ -1,4 +1,214 @@
-﻿import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient } from "npm:@supabase/supabase-js@2";
+// ===========================================================================
+// IDENTITY HELPERS - INLINED, DUPLICATED ON PURPOSE
+// ===========================================================================
+// WHY THIS BLOCK IS HERE INSTEAD OF IMPORTED
+// -------------------------------------------
+// These functions are deployed through the Supabase dashboard's "Deploy with
+// upload file", which bundles ONLY the selected function folder. A relative
+// import of a shared module therefore fails to resolve:
+//
+//   Failed to bundle the function (reason: Module not found
+//   "file:///tmp/user_fn_.../_shared/auth.ts")
+//
+// (The CLI's `supabase functions deploy` bundles the whole directory and
+// would resolve it, but the dashboard is what is used here.) So the helpers
+// are inlined into every function that needs them and each function is
+// entirely self-contained. There is no _shared directory and no
+// cross-function import.
+//
+// WHAT IS AUTHORITATIVE
+// ---------------------
+// Role and ownership come from `public.user_profiles`, NOT from
+// `user_metadata`. `user_metadata` is writable by the user via
+// `supabase.auth.updateUser({ data: { role: 'admin' } })`, so any function
+// that trusts it has self-service privilege escalation. `app_metadata` is
+// service-role-only and safe. A missing profile row resolves to `sub_agent`,
+// so this fails CLOSED.
+//
+// UPDATING THESE HELPERS
+// ----------------------
+// There is no single source of truth any more. If the logic changes, update
+// the block in ALL 12 functions, then run the drift check to confirm:
+//
+//   node scripts/check-edge-identity-drift.cjs
+//
+// It compares the parsed token stream of every copy, so prettier's line
+// wrapping does not produce false positives, and a genuinely stale copy is
+// reported as DRIFT. Run it after any edit to this block. The functions are:
+//   admin-users, afa-registration, bulk-update-orders, cancel-admin-order,
+//   dispatch-order, paystack-subaccount, reorder-held-agent-order,
+//   super-agent-offers, super-agent-tier-management,
+//   super-agent-user-management, verify-payment, verify-wallet-topup
+//
+// Requires `createClient` to be imported from "npm:@supabase/supabase-js@2".
+
+type CanonicalRole = "admin" | "super_agent" | "sub_agent";
+
+interface Identity {
+  id: string;
+  role: CanonicalRole;
+  superAgentId: string | null;
+  email: string | null;
+  /** True when the profile row was missing and the default was assumed. */
+  profileMissing: boolean;
+  /** Present only for display/audit. Never authorize on this. */
+  displayName: string | null;
+}
+
+interface SupabaseClients {
+  url: string;
+  anonKey: string;
+  serviceRoleKey: string;
+  /** Client bound to the caller's token, used only for auth.getUser(). */
+  authClient: ReturnType<typeof createClient>;
+  /** Service-role client. Bypasses RLS - use for trusted reads/writes only. */
+  admin: ReturnType<typeof createClient>;
+}
+
+/**
+ * Canonical role vocabulary.
+ *
+ * The codebase historically mixed `admin`, `Admin`, `superagent`,
+ * `super_agent`, `agent` and `sub_agent`, and compared them with `===` against
+ * variously-cased values. That produced live authorization bugs in BOTH
+ * directions. Everything funnels through here so there is exactly one spelling
+ * to reason about.
+ */
+const normalizeRole = (value: unknown): CanonicalRole | null => {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  switch (normalized) {
+    case "admin":
+    case "administrator":
+    case "superadmin":
+    case "super_admin":
+      return "admin";
+    case "superagent":
+    case "super_agent":
+      return "super_agent";
+    case "agent":
+    case "subagent":
+    case "sub_agent":
+    case "user":
+    case "normal_user":
+    case "normaluser":
+      return "sub_agent";
+    default:
+      return null;
+  }
+};
+
+const identityIsAdmin = (identity: Identity) => identity.role === "admin";
+const identityIsSuperAgent = (identity: Identity) => identity.role === "super_agent";
+
+/**
+ * Creates the anon/auth clients. Kept separate from `resolveIdentity` so a
+ * function can fail fast on missing configuration with its own error shape.
+ */
+const getSupabaseClients = (
+  authorizationHeader: string,
+): SupabaseClients => {
+  const url = Deno.env.get("SUPABASE_URL") ?? "";
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? anonKey;
+
+  return {
+    url,
+    anonKey,
+    serviceRoleKey,
+    authClient: createClient(url, anonKey, {
+      global: { headers: { Authorization: authorizationHeader } },
+    }),
+    admin: createClient(url, serviceRoleKey),
+  };
+};
+
+/**
+ * Resolves the caller's identity from the token, then overrides role and
+ * ownership from `public.user_profiles`.
+ *
+ * WHY NOT user_metadata: that field is WRITABLE BY THE USER THEMSELVES via
+ * `supabase.auth.updateUser({ data: { role: 'admin' }})`, which persisted the
+ * value into `raw_user_meta_data`. Every function used to read role as
+ * `user_metadata.role || app_metadata.role`, so the FIRST term was
+ * attacker-controlled - self-service privilege escalation. `app_metadata` is
+ * service-role-only and safe.
+ *
+ * Throws only when the token itself is invalid - which callers should turn into
+ * a 401. A missing profile row is NOT an error; it resolves to `sub_agent` and
+ * sets `profileMissing` so the caller can log the drift.
+ */
+const resolveIdentity = async (
+  clients: SupabaseClients,
+): Promise<Identity> => {
+  const {
+    data: { user },
+    error,
+  } = await clients.authClient.auth.getUser();
+
+  if (error || !user) {
+    throw new Error(error?.message || "Not authenticated");
+  }
+
+  const email = user.email ?? null;
+
+  // Authoritative read. Uses the service-role client so the caller's own RLS
+  // visibility cannot hide their own role from an authorization check.
+  const { data: profile } = await clients.admin
+    .from("user_profiles")
+    .select("id, role, super_agent_id, full_name")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  const profileMissing = !profile;
+
+  // Fallback for accounts created before the on_auth_user_created trigger, or
+  // whose profile row was never created. `app_metadata` only.
+  const roleFromAppMetadata = normalizeRole(user.app_metadata?.role);
+  const role =
+    normalizeRole(profile?.role) ??
+    roleFromAppMetadata ??
+    // Fail closed. `sub_agent` is the trigger's default and the least
+    // privileged role, so an unknown user can only ever act on themselves.
+    "sub_agent";
+
+  // Ownership likewise comes from the profile. `user_metadata.super_agent_id`
+  // is user-writable, so reading it would let a sub-agent re-point themselves
+  // at another super agent and have their purchase debited from that wallet.
+  const superAgentId =
+    (profile?.super_agent_id as string | null | undefined) ??
+    (typeof user.app_metadata?.super_agent_id === "string"
+      ? user.app_metadata.super_agent_id
+      : null) ??
+    null;
+
+  return {
+    id: user.id,
+    role,
+    superAgentId,
+    email,
+    profileMissing,
+    displayName:
+      (profile?.full_name as string | null | undefined) ??
+      user.user_metadata?.full_name ??
+      null,
+  };
+};
+
+/**
+ * An order belongs to the caller when it is one of theirs. Admins bypass this.
+ * Preserved verbatim from `dispatch-order`'s existing rule so this helper
+ * changes only the SOURCE of role/ownership, not the semantics.
+ */
+const ownsResource = (
+  identity: Identity,
+  ownerId: string | null | undefined,
+): boolean => identityIsAdmin(identity) || (ownerId != null && ownerId === identity.id);
+
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -157,6 +367,28 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Role and super-agent ownership now resolve from `public.user_profiles`
+    // via the shared resolver. `user.user_metadata` is writable by the user
+    // through `supabase.auth.updateUser`, so the previous reads of
+    // `user_metadata.role` and `user_metadata.super_agent_id` were
+    // attacker-controlled: a sub-agent could grant themselves a role, or
+    // re-point `super_agent_id` at a richer super agent and have their
+    // purchase debited from that wallet.
+    const identity = await resolveIdentity({
+      url: supabaseUrl,
+      anonKey: supabaseAnonKey,
+      serviceRoleKey: supabaseServiceRoleKey,
+      authClient: supabaseAuth,
+      admin: supabaseAdmin,
+    });
+
+    if (identity.profileMissing) {
+      console.warn(
+        "[verify-payment] No user_profiles row; defaulted to sub_agent:",
+        identity.id,
+      );
+    }
+
     const {
       reference,
       offer_id,
@@ -164,6 +396,7 @@ Deno.serve(async (req) => {
       wallet_order,
       package_name,
       package_size,
+      package_type,
       provider_type,
       provider_size,
       recipient_phone,
@@ -184,11 +417,69 @@ Deno.serve(async (req) => {
       super_agent_id,
     });
 
+    // -------------------------------------------------------------------------
+    // Replay guard
+    // -------------------------------------------------------------------------
+    // `reference` is client-supplied and every downstream effect is keyed on
+    // it, so a repeated call re-runs the same debit and inserts a second
+    // order. Two real consequences: the wallet path calls
+    // `debit_super_agent_wallet` on every invocation (a replay debits twice
+    // for one purchase), and the Paystack path creates a second order row
+    // that is independently dispatchable (a replay buys data twice).
+    //
+    // Migration 20260926_008 adds partial UNIQUE indexes on
+    // orders/agent_orders.payment_reference, so the database is the final
+    // arbiter and concurrent replays cannot both win. This check is the fast
+    // path that returns the ORIGINAL order instead of a raw 500 from a
+    // constraint violation - so a double-tap is harmless rather than alarming.
+    const normalizedReference = String(reference || "").trim();
+    if (normalizedReference) {
+      const { data: existing } = await supabaseAdmin
+        .from("orders")
+        .select("id, status, jehuca_order_id")
+        .eq("payment_reference", normalizedReference)
+        .maybeSingle();
+
+      if (existing) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            duplicate: true,
+            already_processed: true,
+            is_agent_order: false,
+            order: existing,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+
+      const { data: existingAgent } = await supabaseAdmin
+        .from("agent_orders")
+        .select("id, status, jehuca_order_id")
+        .eq("payment_reference", normalizedReference)
+        .maybeSingle();
+
+      if (existingAgent) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            duplicate: true,
+            already_processed: true,
+            is_agent_order: true,
+            order: existingAgent,
+          }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        );
+      }
+    }
+
     if (wallet_order) {
-      const role = String(
-        user.user_metadata?.role || user.app_metadata?.role || "",
-      ).toLowerCase();
-      const isSuperAgent = role === "superagent" || role === "super_agent";
+      // Server-authoritative role from `user_profiles`, not `user_metadata`.
+      // The old check read `user.user_metadata?.role` first, and that field is
+      // writable by the user via `supabase.auth.updateUser` - so a sub-agent
+      // could set role='superagent' in their own metadata and then use the
+      // wallet path, which debits a wallet by `p_super_agent_id => user.id`.
+      const isSuperAgent = identity.role === "super_agent";
       const walletAmount = Number(amount);
 
       if (!isSuperAgent) {
@@ -222,6 +513,30 @@ Deno.serve(async (req) => {
         : package_name || `${orderNetwork} Data Bundle`;
       const recipientPhone =
         recipient_phone || user.user_metadata?.phone || null;
+
+      // Provider identity for this wallet order.
+      //
+      // These MUST be persisted: `dispatch-order` rejects any order that is
+      // missing a package id, size or type, and it does so BEFORE it contacts
+      // the provider. An order without them can never be delivered, yet the
+      // wallet has already been debited - so the customer pays for nothing and
+      // no error surfaces. The client sends these for the Paystack path; the
+      // wallet path was the gap.
+      const walletProviderPackageId = String(
+        provider_package_id || offer_id || "",
+      ).trim();
+      const walletProviderType = String(
+        provider_type || package_type || package_name || "",
+      )
+        .trim()
+        .toUpperCase();
+      let walletProviderSize = Number(provider_size || 0);
+      if (!Number.isFinite(walletProviderSize) || walletProviderSize <= 0) {
+        walletProviderSize = Number(
+          normalizedSize.match(/(\d+(?:\.\d+)?)/)?.[1] || 0,
+        );
+      }
+
       const orderData = {
         user_id: user.id,
         user_name:
@@ -238,7 +553,13 @@ Deno.serve(async (req) => {
         is_self: recipientPhone === (user.user_metadata?.phone || ""),
         data_amount: orderTitle,
         buyer_type: "super_agent",
+        // Deliberately null: the local offer FK must not be given an unrelated
+        // provider package id. The provider identity lives in the three
+        // provider_* columns instead.
         offer_id: null,
+        provider_package_id: walletProviderPackageId || null,
+        provider_type: walletProviderType || null,
+        provider_size: walletProviderSize || null,
         device_token: null,
         country_code: "GH",
       };
@@ -246,8 +567,13 @@ Deno.serve(async (req) => {
       const walletOrderCost = await resolveOrderApiCost(supabaseAdmin, {
         audience: "super_agent",
         network: orderNetwork,
-        type: String(provider_type || package_name || ""),
-        packageId: provider_package_id || offer_id || null,
+        type: walletProviderType || orderTitle,
+        // Use the real provider package id so the live catalog price can be
+        // fetched. Falling back to `offer_id` here (a local offer row id) would
+        // silently resolve no live price and leave api_cost as the gross sale
+        // amount, which under-states nothing but over-states the cost the
+        // platform actually owes.
+        packageId: walletProviderPackageId || null,
         fallback: walletAmount,
       });
 
@@ -508,16 +834,16 @@ Deno.serve(async (req) => {
       hasLocalOffer: Boolean(offer),
     });
 
-    const userRole = String(
-      user.user_metadata?.role || user.app_metadata?.role || "",
-    ).toLowerCase();
-    const assignedSuperAgentId =
-      user.user_metadata?.super_agent_id ||
-      user.user_metadata?.superAgentId ||
-      user.app_metadata?.super_agent_id ||
-      user.app_metadata?.superAgentId ||
-      null;
-    const resolvedSuperAgentId = assignedSuperAgentId || null;
+    // Ownership from the authoritative profile, never from user metadata.
+    //
+    // The previous chain began with `user.user_metadata.super_agent_id`,
+    // which the user can overwrite themselves. That let a sub-agent point
+    // themselves at a different super agent, so `debit_super_agent_wallet`
+    // would take the money from THAT agent's wallet to fund the sub-agent's
+    // own purchase. `user_profiles.super_agent_id` is server-managed and
+    // only admins write it.
+    const userRole = identity.role;
+    const resolvedSuperAgentId = identity.superAgentId;
     const isSubAgentOrder = Boolean(resolvedSuperAgentId);
 
     // Resolve the Paystack subaccount linked to the super agent (if any)
@@ -664,8 +990,18 @@ Deno.serve(async (req) => {
       );
     }
 
+    // Whether this purchase goes to `agent_orders` (the settlement-split
+    // table) rather than `orders`.
+    //
+    // The old second term compared a raw, un-cased `user_metadata.role`
+    // against the literal "Agent". That read was both user-writable and
+    // case-brittle: it missed "agent"/"sub_agent"/"Agent" spellings depending on
+    // how the account was created, so an agent with no assigned super agent
+    // could have their order written to the wrong table and silently lose the
+    // settlement split. `sub_agent` is the normalized spelling of both "agent"
+    // and "sub_agent".
     const isAgentOrder = Boolean(
-      resolvedSuperAgentId || user.user_metadata?.role === "Agent",
+      resolvedSuperAgentId || identity.role === "sub_agent",
     );
     const rawProviderType = String(
       provider_type || offer?.type || "",
@@ -743,6 +1079,12 @@ Deno.serve(async (req) => {
         recipient_name: null,
         status: "pending",
         transaction_status: verifyData.data.status,
+        // Persisted so the replay guard above can find this order, and so the
+        // partial unique index from migration 20260926_008 can reject a
+        // duplicate. Without this the column stays NULL, the guard's
+        // agent_orders branch matches nothing, and a replayed call would debit
+        // the super agent's wallet twice for a single purchase.
+        payment_reference: reference,
         channel: sharedOrderFields.channel,
         device_token: null,
         buyer_type: "sub_agent",

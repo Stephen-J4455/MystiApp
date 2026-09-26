@@ -97,24 +97,41 @@ try {
     if (-not $SkipFunctions) {
         # Test env uses -test suffix on all function names (e.g. health-test, verify-payment-test)
         $suffix = if ($Env.ToUpper() -eq "TEST") { "-test" } else { "" }
-        $functions = @(
-            "health${suffix}",
-            "paystack-subaccount${suffix}",
-            "send-notification${suffix}",
-            "super-agent-offers${suffix}",
-            "super-agent-tier-management${suffix}",
-            "super-agent-user-management${suffix}",
-            "verify-payment${suffix}",
-            "reorder-held-agent-order${suffix}",
-            "cancel-admin-order${suffix}",
-            "verify-wallet-topup${suffix}",
-            "afa-registration${suffix}",
-            "get-packages${suffix}",
-            "make-orders${suffix}",
-            "get-orders${suffix}",
-            "check-balance${suffix}",
-            "get-order-status${suffix}"
-        )
+        $functionsDir = Join-Path $repoRoot "supabase/functions"
+
+        # Discovered from the filesystem rather than a hardcoded list. The list
+        # had drifted and left admin-users, bulk-update-orders and
+        # dispatch-order undeployed. It also named "get-order-status", which is
+        # not a real folder.
+        #
+        # Every function is self-contained: the identity helpers and the
+        # invocation logger are INLINED into each index.ts. A relative import
+        # of a shared module would bundle fine via the CLI but FAIL through the
+        # dashboard's "Deploy with upload file", which only bundles the
+        # selected function folder:
+        #
+        #   Failed to bundle the function (reason: Module not found
+        #   "file:///tmp/user_fn_.../_shared/auth.ts")
+        #
+        # So there is deliberately no _shared directory, and no cross-function
+        # imports to resolve.
+        $functions = Get-ChildItem -Path $functionsDir -Directory |
+            Where-Object { $_.Name -notlike "_*" } |
+            Where-Object {
+                (Test-Path (Join-Path $_.FullName "index.ts")) -or
+                (Test-Path (Join-Path $_.FullName "index.js"))
+            } |
+            ForEach-Object { "$($_.Name)$suffix" } |
+            Sort-Object
+
+        if (-not $functions) {
+            throw "No edge functions found in $functionsDir"
+        }
+
+        Write-Host ""
+        Write-Host "Deploying $($functions.Count) edge function(s):" -ForegroundColor Cyan
+        $functions | ForEach-Object { Write-Host "  - $_" -ForegroundColor DarkGray }
+
         foreach ($fn in $functions) {
             Invoke-Step "Deploying edge function: $fn" "supabase functions deploy $fn --project-ref $projectId"
         }

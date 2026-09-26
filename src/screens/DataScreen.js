@@ -159,6 +159,17 @@ export default function DataScreen({ navigation, route }) {
       error: error?.message || null,
     });
 
+    // A 2xx that reports `deferred: true` is a QUEUED order: the provider
+    // could not be reached yet (usually an unfunded provider account) and the
+    // admin will retry it. A 4xx is a PERMANENT failure - the order is missing
+    // data it can never be dispatched with, so retrying will not help.
+    //
+    // These must not be collapsed into one another. Reporting a 4xx as
+    // "queued, we'll complete the delivery shortly" is how an undeliverable
+    // order ends up looking identical to a legitimately deferred one.
+    const status = Number(error?.status || error?.context?.status || 0);
+    const rejected = Boolean(error) && status >= 400 && status < 500;
+
     return {
       data,
       error,
@@ -166,6 +177,15 @@ export default function DataScreen({ navigation, route }) {
       // failed, so the customer keeps a confirmed receipt.
       deferred: Boolean(!error && data?.deferred),
       dispatched: Boolean(!error && data?.success && !data?.deferred),
+      // Undispatchable: needs a fix, not a retry. Surfaced so the caller can
+      // tell the customer their order cannot be delivered.
+      rejected,
+      status,
+      errorMessage:
+        data?.error ||
+        error?.context?.error ||
+        error?.message ||
+        "The provider could not accept this order.",
     };
   }, []);
 
@@ -246,6 +266,17 @@ export default function DataScreen({ navigation, route }) {
             orderType,
           );
 
+          if (providerResult.rejected) {
+            // Permanent failure, distinct from a queue state. Reporting this as
+            // "confirmed and being processed" would leave the customer with a
+            // paid order that can never be dispatched and no indication of it.
+            showError(
+              "Order Could Not Be Delivered",
+              `Your payment went through, but this order could not be sent to the provider. ${providerResult.errorMessage} Contact support with reference ${data.order.payment_reference}.`,
+            );
+            return;
+          }
+
           if (providerResult.deferred) {
             // The payment succeeded but the provider could not be reached
             // (usually the admin's provider account is out of funds). The
@@ -254,7 +285,11 @@ export default function DataScreen({ navigation, route }) {
             // failure they cannot act on.
             showSuccess(
               "Order Received",
-              data.deferred_reason === "insufficient_api_balance"
+              // The deferred reason comes from the DISPATCH response, not
+              // from verify-payment. Reading it off `data` meant it was always
+              // undefined, so every queued order claimed the balance message
+              // regardless of the actual reason.
+              providerResult.data?.reason === "insufficient_api_balance"
                 ? "Your order is confirmed and is being processed. It will be delivered shortly."
                 : "Your order is confirmed and is queued for delivery.",
             );
@@ -1118,6 +1153,17 @@ export default function DataScreen({ navigation, route }) {
           offer_id: bundle.id,
           package_name: bundle.name,
           package_size: bundle.dataSize || null,
+          // Provider identity. Without these the order cannot be dispatched:
+          // `dispatch-order` rejects any order missing a package id, size or
+          // type BEFORE it ever contacts the provider, so the wallet would be
+          // debited for an order that can never be delivered. Mirrors the
+          // Paystack path above.
+          provider_package_id: bundle.package_id || bundle.id,
+          package_type: bundle.type || null,
+          provider_type: bundle.type || null,
+          provider_size: Number(
+            String(bundle.dataSize || "").match(/[\d.]+/)?.[0] || 0,
+          ),
           recipient_phone: phone,
           amount: grossAmount,
           network,
@@ -1153,6 +1199,17 @@ export default function DataScreen({ navigation, route }) {
         data.order.id,
         "regular",
       );
+
+      if (providerResult.rejected) {
+        // The wallet was debited but the order cannot be dispatched - it is
+        // missing data no retry can supply. Say so instead of implying the
+        // data is on its way, so the customer does not silently lose the money.
+        showError(
+          "Order Could Not Be Delivered",
+          `Your wallet was debited, but this order could not be sent to the provider. ${providerResult.errorMessage} Contact support with reference ${data.order.payment_reference}.`,
+        );
+        return;
+      }
 
       if (!providerResult.dispatched) {
         // The wallet was already debited, so the order is recorded either way.
@@ -2373,50 +2430,67 @@ export default function DataScreen({ navigation, route }) {
                         return;
                       }
 
+                      // Must pass the order id and type, matching the
+                      // signature of dispatchProviderOrder. The previous call
+                      // here passed the bundle and a phone number, so the
+                      // function received order_id = NaN and a phone number as
+                      // order_type, and the edge function rejected every mobile
+                      // purchase with a 400 before contacting the provider.
                       const providerResult = await dispatchProviderOrder(
-                        selectedBundle,
-                        isAgent
-                          ? recipientPhone
-                          : purchaseType === "self"
-                            ? userPhone
-                            : recipientPhone,
+                        data.order.id,
+                        data.is_agent_order ? "agent" : "regular",
                       );
 
-                      if (providerResult.error || !providerResult.accepted) {
+                      if (providerResult.rejected) {
+                        // Permanent failure - the order cannot be dispatched.
+                        // Do not report this as a successful purchase.
                         showError(
-                          "Provider Order Failed",
-                          "Payment was verified, but Jehucal did not accept the order. Contact support with the payment reference.",
+                          "Order Could Not Be Delivered",
+                          providerResult.errorMessage,
                         );
                         return;
                       }
 
-                      const providerOrderId =
-                        providerResult.data?.payload?.orderId ||
-                        providerResult.data?.orderId ||
-                        providerResult.data?.payload?.orders?.[0]?.id ||
-                        null;
-                      await supabase
-                        .from(data.is_agent_order ? "agent_orders" : "orders")
-                        .update({
-                          jehuca_order_id: providerOrderId,
-                          jehuca_order_status:
-                            providerResult.data?.payload?.orders?.[0]?.status ||
-                            providerResult.data?.status ||
-                            "accepted",
-                          jehuca_response: providerResult.data || null,
-                        })
-                        .eq("id", data.order.id);
-                      await supabase
-                        .from("payment_transactions")
-                        .update({
-                          jehuca_order_id: providerOrderId,
-                          jehuca_order_status:
-                            providerResult.data?.payload?.orders?.[0]?.status ||
-                            providerResult.data?.status ||
-                            "accepted",
-                          jehuca_response: providerResult.data || null,
-                        })
-                        .eq("payment_reference", data.order.payment_reference);
+                      if (!providerResult.dispatched) {
+                        // Queued, not delivered. The payment is settled and the
+                        // admin can retry once the provider is reachable.
+                        showSuccess(
+                          "Order Queued",
+                          providerResult.deferred
+                            ? "Your order is confirmed and is queued for delivery."
+                            : "Your order is confirmed and is being processed. It will be delivered shortly.",
+                        );
+                        navigation.navigate("Receipt", {
+                          transaction: {
+                            id: data.order.id,
+                            status: "pending",
+                            offer_title: selectedBundle.name,
+                            network,
+                            data_amount: selectedBundle.name,
+                            amount: data.order.amount,
+                            created_at: data.order.created_at,
+                            payment_reference: data.order.payment_reference,
+                            user_email: userEmail,
+                            phone: isAgent
+                              ? recipientPhone
+                              : purchaseType === "self"
+                                ? userPhone
+                                : recipientPhone,
+                            country_code: "GH",
+                            orderType: "user",
+                          },
+                        });
+                        return;
+                      }
+
+                      // No client-side write-back of jehuca_order_id here.
+                      // `dispatch-order` already persists jehuca_order_id,
+                      // jehuca_order_status and jehuca_response on the order
+                      // row using the service role. Repeating it from the app
+                      // was a silent no-op: these tables are RLS-scoped and the
+                      // client only holds the anon key, so the update was
+                      // rejected while the code carried on as if it had
+                      // succeeded.
 
                       showSuccess(
                         "Purchase Successful!",
@@ -2426,7 +2500,7 @@ export default function DataScreen({ navigation, route }) {
                       navigation.navigate("Receipt", {
                         transaction: {
                           id: data.order.id,
-                          status: data.order.status,
+                          status: "processing",
                           offer_title: selectedBundle.name,
                           network: network,
                           data_amount: selectedBundle.name,

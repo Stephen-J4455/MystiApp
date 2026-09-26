@@ -147,6 +147,20 @@ Deno.serve(async (req) => {
       throw new Error("Missing required fields: title, message");
     }
 
+    // Bound the payload. These go to every registered device via FCM, so an
+    // unbounded title/message is a trivial way to fill the push tokens table
+    // and get the app rate-limited by FCM for everyone. Reject rather than
+    // silently truncate, so a caller that sends too much learns about it
+    // instead of shipping a mangled notification.
+    const MAX_TITLE = 120;
+    const MAX_MESSAGE = 1000;
+    if (String(title).length > MAX_TITLE) {
+      throw new Error(`title must be ${MAX_TITLE} characters or fewer`);
+    }
+    if (String(message).length > MAX_MESSAGE) {
+      throw new Error(`message must be ${MAX_MESSAGE} characters or fewer`);
+    }
+
     if (!userId && !sendToAdmins) {
       throw new Error("Either userId or sendToAdmins must be provided");
     }

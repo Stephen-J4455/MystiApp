@@ -8,7 +8,10 @@ import {
   TouchableOpacity,
   Platform,
 } from "react-native";
-import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import colors from "../components/theme";
 import { ThemedScreen } from "../components/ui";

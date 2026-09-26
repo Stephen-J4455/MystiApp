@@ -74,121 +74,121 @@ export default function SuperAgentManagementScreen({ navigation }) {
     <ThemedScreen style={styles.safeArea}>
       <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.backButton}
-        >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </TouchableOpacity>
-        <Text style={styles.title}>Super Agent</Text>
-      </View>
-
-      <ScrollView contentContainerStyle={styles.content}>
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Management Center</Text>
-          <Text style={styles.cardText}>
-            Welcome{user?.email ? `, ${user.email}` : ""}. Your super agent
-            tools are ready.
-          </Text>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.backButton}
+          >
+            <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          </TouchableOpacity>
+          <Text style={styles.title}>Super Agent</Text>
         </View>
 
-        <View style={styles.infoBanner}>
-          <Ionicons
-            name="information-circle"
-            size={20}
-            color={colors.primary}
-          />
-          <Text style={styles.infoBannerText}>
-            {String(
-              user?.user_metadata?.super_agent_badge ||
-                user?.app_metadata?.super_agent_badge ||
-                "enterprise",
-            ).toLowerCase() === "pro"
-              ? "Your Pro badge includes analytics, orders, AFA registration, wallet top-ups, and transaction access. Contact an administrator for Enterprise management tools."
-              : "Admin sets the base price for every bundle. Use Tier Management to set what your agents pay per tier, then assign offers from there."}
-          </Text>
-        </View>
+        <ScrollView contentContainerStyle={styles.content}>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Management Center</Text>
+            <Text style={styles.cardText}>
+              Welcome{user?.email ? `, ${user.email}` : ""}. Your super agent
+              tools are ready.
+            </Text>
+          </View>
 
-        {String(
-          user?.user_metadata?.super_agent_badge ||
-            user?.app_metadata?.super_agent_badge ||
-            "enterprise",
-        ).toLowerCase() !== "pro" && (
+          <View style={styles.infoBanner}>
+            <Ionicons
+              name="information-circle"
+              size={20}
+              color={colors.primary}
+            />
+            <Text style={styles.infoBannerText}>
+              {String(
+                user?.user_metadata?.super_agent_badge ||
+                  user?.app_metadata?.super_agent_badge ||
+                  "enterprise",
+              ).toLowerCase() === "pro"
+                ? "Your Pro badge includes analytics, orders, AFA registration, wallet top-ups, and transaction access. Contact an administrator for Enterprise management tools."
+                : "Admin sets the base price for every bundle. Use Tier Management to set what your agents pay per tier, then assign offers from there."}
+            </Text>
+          </View>
+
+          {String(
+            user?.user_metadata?.super_agent_badge ||
+              user?.app_metadata?.super_agent_badge ||
+              "enterprise",
+          ).toLowerCase() !== "pro" && (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate("SuperAgentOffers")}
+            >
+              <Ionicons name="pricetag" size={20} color="#fff" />
+              <Text style={styles.actionText}>Manage Offers</Text>
+            </TouchableOpacity>
+          )}
+
+          {String(
+            user?.user_metadata?.super_agent_badge ||
+              user?.app_metadata?.super_agent_badge ||
+              "enterprise",
+          ).toLowerCase() !== "pro" && (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate("SuperAgentAgents")}
+            >
+              <Ionicons name="people" size={20} color="#fff" />
+              <Text style={styles.actionText}>Manage Agents</Text>
+            </TouchableOpacity>
+          )}
+
+          {String(
+            user?.user_metadata?.super_agent_badge ||
+              user?.app_metadata?.super_agent_badge ||
+              "enterprise",
+          ).toLowerCase() !== "pro" && (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate("SuperAgentTierManagement")}
+            >
+              <Ionicons name="layers" size={20} color="#fff" />
+              <Text style={styles.actionText}>Manage Tiers</Text>
+            </TouchableOpacity>
+          )}
+
+          {String(
+            user?.user_metadata?.super_agent_badge ||
+              user?.app_metadata?.super_agent_badge ||
+              "enterprise",
+          ).toLowerCase() !== "pro" && (
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate("SuperAgentPaystack")}
+            >
+              <Ionicons name="card" size={20} color="#fff" />
+              <Text style={styles.actionText}>Paystack Settings</Text>
+            </TouchableOpacity>
+          )}
+
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentOffers")}
+            onPress={() => navigation.navigate("SuperAgentTransactions")}
           >
-            <Ionicons name="pricetag" size={20} color="#fff" />
-            <Text style={styles.actionText}>Manage Offers</Text>
+            <Ionicons name="receipt" size={20} color="#fff" />
+            <Text style={styles.actionText}>Transactions</Text>
           </TouchableOpacity>
-        )}
 
-        {String(
-          user?.user_metadata?.super_agent_badge ||
-            user?.app_metadata?.super_agent_badge ||
-            "enterprise",
-        ).toLowerCase() !== "pro" && (
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentAgents")}
+            onPress={() => navigation.navigate("SuperAgentHeldOrders")}
           >
-            <Ionicons name="people" size={20} color="#fff" />
-            <Text style={styles.actionText}>Manage Agents</Text>
+            <Ionicons name="refresh-circle" size={20} color="#fff" />
+            <Text style={styles.actionText}>Held Agent Orders</Text>
           </TouchableOpacity>
-        )}
 
-        {String(
-          user?.user_metadata?.super_agent_badge ||
-            user?.app_metadata?.super_agent_badge ||
-            "enterprise",
-        ).toLowerCase() !== "pro" && (
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentTierManagement")}
+            onPress={() => navigation.navigate("SuperAgentAnalytics")}
           >
-            <Ionicons name="layers" size={20} color="#fff" />
-            <Text style={styles.actionText}>Manage Tiers</Text>
+            <Ionicons name="analytics" size={20} color="#fff" />
+            <Text style={styles.actionText}>Business Analytics</Text>
           </TouchableOpacity>
-        )}
-
-        {String(
-          user?.user_metadata?.super_agent_badge ||
-            user?.app_metadata?.super_agent_badge ||
-            "enterprise",
-        ).toLowerCase() !== "pro" && (
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentPaystack")}
-          >
-            <Ionicons name="card" size={20} color="#fff" />
-            <Text style={styles.actionText}>Paystack Settings</Text>
-          </TouchableOpacity>
-        )}
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentTransactions")}
-        >
-          <Ionicons name="receipt" size={20} color="#fff" />
-          <Text style={styles.actionText}>Transactions</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentHeldOrders")}
-        >
-          <Ionicons name="refresh-circle" size={20} color="#fff" />
-          <Text style={styles.actionText}>Held Agent Orders</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.actionButton}
-          onPress={() => navigation.navigate("SuperAgentAnalytics")}
-        >
-          <Ionicons name="analytics" size={20} color="#fff" />
-          <Text style={styles.actionText}>Business Analytics</Text>
-        </TouchableOpacity>
-      </ScrollView>
+        </ScrollView>
       </SafeAreaView>
     </ThemedScreen>
   );

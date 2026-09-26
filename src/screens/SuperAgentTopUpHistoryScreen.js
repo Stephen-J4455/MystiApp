@@ -148,122 +148,129 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
     <ThemedScreen style={styles.safeArea}>
       <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.backButton}
-        >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </TouchableOpacity>
-        <View>
-          <Text style={styles.title}>Sub-agent top-ups</Text>
-          <Text style={styles.subtitle}>
-            {topUps.length} transaction{topUps.length === 1 ? "" : "s"}
-          </Text>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.backButton}
+          >
+            <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          </TouchableOpacity>
+          <View>
+            <Text style={styles.title}>Sub-agent top-ups</Text>
+            <Text style={styles.subtitle}>
+              {topUps.length} transaction{topUps.length === 1 ? "" : "s"}
+            </Text>
+          </View>
         </View>
-      </View>
 
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={styles.loadingText}>Loading top-up history...</Text>
-        </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={
-            topUps.length ? styles.content : styles.emptyContent
-          }
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={() => loadTopUps(true)}
-            />
-          }
-        >
-          {topUps.length === 0 ? (
-            <View style={styles.centered}>
-              <Ionicons name="wallet-outline" size={56} color={colors.border} />
-              <Text style={styles.emptyTitle}>No sub-agent top-ups yet</Text>
-              <Text style={styles.emptyText}>
-                Top-ups made by your assigned sub-agents will appear here.
-              </Text>
-            </View>
-          ) : (
-            topUps.map((topUp) => {
-              const status = String(topUp.status || "pending");
-              return (
-                <View key={topUp.id} style={styles.card}>
-                  <View style={styles.cardHeader}>
-                    <View style={styles.identity}>
-                      <Ionicons
-                        name="business-outline"
-                        size={22}
-                        color={colors.primary}
-                      />
-                      <View>
-                        <Text style={styles.businessName}>
-                          {topUp.businessName}
+        {loading ? (
+          <View style={styles.centered}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Loading top-up history...</Text>
+          </View>
+        ) : (
+          <ScrollView
+            contentContainerStyle={
+              topUps.length ? styles.content : styles.emptyContent
+            }
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={() => loadTopUps(true)}
+              />
+            }
+          >
+            {topUps.length === 0 ? (
+              <View style={styles.centered}>
+                <Ionicons
+                  name="wallet-outline"
+                  size={56}
+                  color={colors.border}
+                />
+                <Text style={styles.emptyTitle}>No sub-agent top-ups yet</Text>
+                <Text style={styles.emptyText}>
+                  Top-ups made by your assigned sub-agents will appear here.
+                </Text>
+              </View>
+            ) : (
+              topUps.map((topUp) => {
+                const status = String(topUp.status || "pending");
+                return (
+                  <View key={topUp.id} style={styles.card}>
+                    <View style={styles.cardHeader}>
+                      <View style={styles.identity}>
+                        <Ionicons
+                          name="business-outline"
+                          size={22}
+                          color={colors.primary}
+                        />
+                        <View>
+                          <Text style={styles.businessName}>
+                            {topUp.businessName}
+                          </Text>
+                          <Text style={styles.date}>
+                            {formatDate(topUp.created_at)}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text
+                        style={[
+                          styles.status,
+                          { color: getStatusColor(status) },
+                        ]}
+                      >
+                        {status.toUpperCase()}
+                      </Text>
+                    </View>
+                    <View style={styles.details}>
+                      <Text style={styles.amount}>
+                        Ghc {Number(topUp.amount || 0).toFixed(2)}
+                      </Text>
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Reference</Text>
+                        <Text style={styles.detailValue} numberOfLines={1}>
+                          {topUp.reference || "N/A"}
                         </Text>
-                        <Text style={styles.date}>
-                          {formatDate(topUp.created_at)}
+                      </View>
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Transaction ID</Text>
+                        <Text style={styles.detailValue} numberOfLines={1}>
+                          {topUp.paystack_transaction_id || "N/A"}
+                        </Text>
+                      </View>
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Payment</Text>
+                        <Text style={styles.detailValue}>
+                          {[topUp.channel, topUp.bank]
+                            .filter(Boolean)
+                            .join(" / ") || "N/A"}
+                        </Text>
+                      </View>
+                      <View style={styles.detailRow}>
+                        <Text style={styles.detailLabel}>Paid at</Text>
+                        <Text style={styles.detailValue}>
+                          {formatDate(topUp.paid_at)}
+                        </Text>
+                      </View>
+                      <View style={styles.splitDetails}>
+                        <Text style={styles.splitTitle}>Split details</Text>
+                        <Text style={styles.detailValue}>
+                          Subaccount: {topUp.split_subaccount_code || "N/A"}
+                        </Text>
+                        <Text style={styles.detailValue}>
+                          Charge:{" "}
+                          {topUp.split_percentage_charge !== null &&
+                          topUp.split_percentage_charge !== undefined
+                            ? `${Number(topUp.split_percentage_charge).toFixed(2)}%`
+                            : "N/A"}
                         </Text>
                       </View>
                     </View>
-                    <Text
-                      style={[styles.status, { color: getStatusColor(status) }]}
-                    >
-                      {status.toUpperCase()}
-                    </Text>
                   </View>
-                  <View style={styles.details}>
-                    <Text style={styles.amount}>
-                      Ghc {Number(topUp.amount || 0).toFixed(2)}
-                    </Text>
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Reference</Text>
-                      <Text style={styles.detailValue} numberOfLines={1}>
-                        {topUp.reference || "N/A"}
-                      </Text>
-                    </View>
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Transaction ID</Text>
-                      <Text style={styles.detailValue} numberOfLines={1}>
-                        {topUp.paystack_transaction_id || "N/A"}
-                      </Text>
-                    </View>
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Payment</Text>
-                      <Text style={styles.detailValue}>
-                        {[topUp.channel, topUp.bank]
-                          .filter(Boolean)
-                          .join(" / ") || "N/A"}
-                      </Text>
-                    </View>
-                    <View style={styles.detailRow}>
-                      <Text style={styles.detailLabel}>Paid at</Text>
-                      <Text style={styles.detailValue}>
-                        {formatDate(topUp.paid_at)}
-                      </Text>
-                    </View>
-                    <View style={styles.splitDetails}>
-                      <Text style={styles.splitTitle}>Split details</Text>
-                      <Text style={styles.detailValue}>
-                        Subaccount: {topUp.split_subaccount_code || "N/A"}
-                      </Text>
-                      <Text style={styles.detailValue}>
-                        Charge:{" "}
-                        {topUp.split_percentage_charge !== null &&
-                        topUp.split_percentage_charge !== undefined
-                          ? `${Number(topUp.split_percentage_charge).toFixed(2)}%`
-                          : "N/A"}
-                      </Text>
-                    </View>
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </ScrollView>
-      )}
+                );
+              })
+            )}
+          </ScrollView>
+        )}
       </SafeAreaView>
     </ThemedScreen>
   );

@@ -126,127 +126,134 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
     <ThemedScreen style={styles.safeArea}>
       <SafeAreaView style={styles.safeArea} edges={["top"]}>
         <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          style={styles.backButton}
-        >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </TouchableOpacity>
-        <View style={styles.headerCenter}>
-          <Text style={styles.title}>Transactions</Text>
-          <Text style={styles.subtitle}>
-            {transactions.length} transaction
-            {transactions.length !== 1 ? "s" : ""} found
-          </Text>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            style={styles.backButton}
+          >
+            <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          </TouchableOpacity>
+          <View style={styles.headerCenter}>
+            <Text style={styles.title}>Transactions</Text>
+            <Text style={styles.subtitle}>
+              {transactions.length} transaction
+              {transactions.length !== 1 ? "s" : ""} found
+            </Text>
+          </View>
         </View>
-      </View>
-      {transactions.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <Ionicons name="receipt-outline" size={64} color={colors.border} />
-          <Text style={styles.emptyTitle}>No Transactions Yet</Text>
-          <Text style={styles.emptyText}>
-            Transactions routed through your Paystack sub-account will appear
-            here.
-          </Text>
-        </View>
-      ) : (
-        <ScrollView contentContainerStyle={styles.content}>
-          {transactions.map((tx, i) => (
-            <View key={i} style={styles.txCard}>
-              <View style={styles.txHeader}>
-                <View style={styles.txIconWrap}>
-                  <Ionicons
-                    name={
-                      tx.source === "wallet_topup" ? "wallet" : "phone-portrait"
-                    }
-                    size={22}
-                    color={colors.primary}
-                  />
-                </View>
-                <View style={styles.txMeta}>
-                  <Text style={styles.txType}>
-                    {tx.source === "wallet_topup"
-                      ? "Wallet Top-up"
-                      : "Data Purchase"}
-                  </Text>
-                  <Text style={styles.txDate}>{fmt(tx.created_at)}</Text>
-                </View>
-                <View
-                  style={[styles.txStatus, { backgroundColor: tx.statusColor }]}
-                >
-                  <Text style={styles.txStatusText}>
-                    {String(
-                      tx.jehuca_order_status || tx.status || "unknown",
-                    ).toUpperCase()}
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.txBody}>
-                <View style={styles.txInfoRow}>
-                  <Text style={styles.txInfoLabel}>Reference</Text>
-                  <Text style={styles.txInfoValue} numberOfLines={1}>
-                    {tx.reference || tx.id?.toString().slice(0, 12)}
-                  </Text>
-                </View>
-                <View style={styles.txInfoRow}>
-                  <Text style={styles.txInfoLabel}>Amount</Text>
-                  <Text style={styles.txInfoValueBold}>{tx.amountDisplay}</Text>
-                </View>
-                {tx.paystack_transaction_id && (
-                  <View style={styles.txInfoRow}>
-                    <Text style={styles.txInfoLabel}>Paystack TX ID</Text>
-                    <Text style={styles.txInfoValue} numberOfLines={1}>
-                      {tx.paystack_transaction_id}
+        {transactions.length === 0 ? (
+          <View style={styles.emptyContainer}>
+            <Ionicons name="receipt-outline" size={64} color={colors.border} />
+            <Text style={styles.emptyTitle}>No Transactions Yet</Text>
+            <Text style={styles.emptyText}>
+              Transactions routed through your Paystack sub-account will appear
+              here.
+            </Text>
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.content}>
+            {transactions.map((tx, i) => (
+              <View key={i} style={styles.txCard}>
+                <View style={styles.txHeader}>
+                  <View style={styles.txIconWrap}>
+                    <Ionicons
+                      name={
+                        tx.source === "wallet_topup"
+                          ? "wallet"
+                          : "phone-portrait"
+                      }
+                      size={22}
+                      color={colors.primary}
+                    />
+                  </View>
+                  <View style={styles.txMeta}>
+                    <Text style={styles.txType}>
+                      {tx.source === "wallet_topup"
+                        ? "Wallet Top-up"
+                        : "Data Purchase"}
+                    </Text>
+                    <Text style={styles.txDate}>{fmt(tx.created_at)}</Text>
+                  </View>
+                  <View
+                    style={[
+                      styles.txStatus,
+                      { backgroundColor: tx.statusColor },
+                    ]}
+                  >
+                    <Text style={styles.txStatusText}>
+                      {String(
+                        tx.jehuca_order_status || tx.status || "unknown",
+                      ).toUpperCase()}
                     </Text>
                   </View>
-                )}
-                {tx.channel && (
+                </View>
+                <View style={styles.txBody}>
                   <View style={styles.txInfoRow}>
-                    <Text style={styles.txInfoLabel}>Channel</Text>
-                    <Text style={styles.txInfoValue}>{tx.channel}</Text>
+                    <Text style={styles.txInfoLabel}>Reference</Text>
+                    <Text style={styles.txInfoValue} numberOfLines={1}>
+                      {tx.reference || tx.id?.toString().slice(0, 12)}
+                    </Text>
                   </View>
-                )}
-                {tx.source === "data_purchase" && (
-                  <>
+                  <View style={styles.txInfoRow}>
+                    <Text style={styles.txInfoLabel}>Amount</Text>
+                    <Text style={styles.txInfoValueBold}>
+                      {tx.amountDisplay}
+                    </Text>
+                  </View>
+                  {tx.paystack_transaction_id && (
                     <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Sub-agent</Text>
-                      <Text style={styles.txInfoValue}>
-                        {tx.agent_id || "N/A"}
+                      <Text style={styles.txInfoLabel}>Paystack TX ID</Text>
+                      <Text style={styles.txInfoValue} numberOfLines={1}>
+                        {tx.paystack_transaction_id}
                       </Text>
                     </View>
+                  )}
+                  {tx.channel && (
                     <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Base share</Text>
-                      <Text style={styles.txInfoValue}>
-                        Ghc {Number(tx.base_amount || 0).toFixed(2)}
-                      </Text>
+                      <Text style={styles.txInfoLabel}>Channel</Text>
+                      <Text style={styles.txInfoValue}>{tx.channel}</Text>
                     </View>
-                    <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Transaction fee</Text>
-                      <Text style={styles.txInfoValue}>
-                        Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
-                      </Text>
-                    </View>
-                    <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Your share</Text>
-                      <Text style={styles.txInfoValue}>
-                        Ghc {Number(tx.super_agent_amount || 0).toFixed(2)}
-                      </Text>
-                    </View>
-                    {tx.jehuca_order_id && (
+                  )}
+                  {tx.source === "data_purchase" && (
+                    <>
                       <View style={styles.txInfoRow}>
-                        <Text style={styles.txInfoLabel}>Jehuca order</Text>
+                        <Text style={styles.txInfoLabel}>Sub-agent</Text>
                         <Text style={styles.txInfoValue}>
-                          {tx.jehuca_order_id}
+                          {tx.agent_id || "N/A"}
                         </Text>
                       </View>
-                    )}
-                  </>
-                )}
+                      <View style={styles.txInfoRow}>
+                        <Text style={styles.txInfoLabel}>Base share</Text>
+                        <Text style={styles.txInfoValue}>
+                          Ghc {Number(tx.base_amount || 0).toFixed(2)}
+                        </Text>
+                      </View>
+                      <View style={styles.txInfoRow}>
+                        <Text style={styles.txInfoLabel}>Transaction fee</Text>
+                        <Text style={styles.txInfoValue}>
+                          Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
+                        </Text>
+                      </View>
+                      <View style={styles.txInfoRow}>
+                        <Text style={styles.txInfoLabel}>Your share</Text>
+                        <Text style={styles.txInfoValue}>
+                          Ghc {Number(tx.super_agent_amount || 0).toFixed(2)}
+                        </Text>
+                      </View>
+                      {tx.jehuca_order_id && (
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Jehuca order</Text>
+                          <Text style={styles.txInfoValue}>
+                            {tx.jehuca_order_id}
+                          </Text>
+                        </View>
+                      )}
+                    </>
+                  )}
+                </View>
               </View>
-            </View>
-          ))}
-        </ScrollView>
-      )}
+            ))}
+          </ScrollView>
+        )}
       </SafeAreaView>
     </ThemedScreen>
   );
