@@ -1,4 +1,4 @@
-﻿import React, {
+import React, {
   useState,
   useEffect,
   useCallback,
@@ -13,17 +13,19 @@ import {
   TextInput,
   Modal,
   Platform,
-  StatusBar,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase, getPaystackPublicKey } from "../lib/supabase";
+import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { useNotification } from "../contexts/NotificationContext";
-import colors from "../components/theme";
+import { fonts } from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
 import { WebView } from "react-native-webview";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useTheme } from "../contexts/ThemeContext";
 import {
   fetchPaymentChargeSettings,
   getTransactionChargeAmount,
@@ -58,6 +60,7 @@ const generatePaystackHTML = (
   recipientName,
   recipientLabel,
   paystackPublicKey,
+  c,
 ) => {
   const paystackKey = escapeJs(paystackPublicKey || "");
   const safeEmail = escapeJs(email);
@@ -87,14 +90,44 @@ const generatePaystackHTML = (
   return (
     '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Paystack Payment</title><script src="https://js.paystack.co/v1/inline.js" onerror="window.ReactNativeWebView.postMessage(JSON.stringify({type:\'error\',message:\'Could not load Paystack payment service\'}))"></scr' +
     "ipt>" +
-    '<style>:root{--primary:#006769;--secondary:#2B5F1F;--accent:#40A578}body{margin:0;padding:0 20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#fff;display:flex;justify-content:center;align-items:center;min-height:100vh}.container{background:#fff;padding:0;width:100%;height:100vh;box-shadow:none;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center}.icon-box{width:70px;height:70px;background-color:#e6f7f7;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}.icon{font-size:32px;color:var(--primary)}.title{font-size:22px;font-weight:800;color:#1A1A1A;margin-bottom:12px}.subtitle{font-size:14px;color:#666;margin-bottom:30px;line-height:1.5}.amt-box{background:#f7f9fa;padding:20px;border-radius:16px;margin-bottom:35px;border:1px solid #eee}.amt-label{font-size:13px;font-weight:600;color:var(--primary);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}.amt-val{font-size:32px;font-weight:900;color:#1A1A1A}.pay-btn{width:100%;padding:18px;background:linear-gradient(to right,var(--primary),var(--accent));color:#fff;border:none;border-radius:16px;font-size:16px;font-weight:700;cursor:pointer}.cancel-btn{margin-top:20px;padding:10px 20px;color:#888;background:none;border:none;font-size:14px;font-weight:600;cursor:pointer}.secure-note{margin-top:30px;font-size:11px;color:#aaa}</style>' +
+    "<style>:root{--primary:" +
+    c.mintDim +
+    ";--accent:" +
+    c.mint +
+    '}body{margin:0;padding:0 20px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:' +
+    c.canvas +
+    ";display:flex;justify-content:center;align-items:center;min-height:100vh}.container{background:" +
+    c.canvas +
+    ";padding:0;width:100%;height:100vh;box-shadow:none;text-align:center;display:flex;flex-direction:column;justify-content:center;align-items:center}.icon-box{width:70px;height:70px;background-color:" +
+    c.surfaceHover +
+    ";border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}.icon{font-size:32px;color:var(--primary)}.title{font-size:22px;font-weight:800;color:" +
+    c.textPrimary +
+    ";margin-bottom:12px}.subtitle{font-size:14px;color:" +
+    c.textSecondary +
+    ";margin-bottom:30px;line-height:1.5}.amt-box{background:" +
+    c.surface +
+    ";padding:20px;border-radius:16px;margin-bottom:35px;border:1px solid " +
+    c.hairline +
+    "}.amt-label{font-size:13px;font-weight:600;color:var(--primary);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}.amt-val{font-size:32px;font-weight:900;color:" +
+    c.textPrimary +
+    "}.pay-btn{width:100%;padding:18px;background:linear-gradient(to right,var(--primary),var(--accent));color:" +
+    c.onAccent +
+    ";border:none;border-radius:999px;font-size:16px;font-weight:700;cursor:pointer}.cancel-btn{margin-top:20px;padding:10px 20px;color:" +
+    c.textMuted +
+    ";background:none;border:none;font-size:14px;font-weight:600;cursor:pointer}.secure-note{margin-top:30px;font-size:11px;color:" +
+    c.textMuted +
+    "}</style>" +
     '</head><body><div class="container"><div class="icon-box"><span class="icon">&#x1F4BC;</span></div><h2 class="title">Wallet Top-up</h2><p class="subtitle">Complete your wallet top-up.</p><div class="amt-box"><div class="amt-label">Top-up Amount</div><div class="amt-val">GHS ' +
     amount.toFixed(2) +
     "</div>" +
     (recipientName
-      ? '<div class="amt-label" style="margin-top:6px;font-size:11px;color:#888;">' +
+      ? '<div class="amt-label" style="margin-top:6px;font-size:11px;color:' +
+        c.textMuted +
+        ';">' +
         safeRecipientLabel +
-        '</div><div class="amt-val" style="font-size:15px;font-weight:700;color:#333;">' +
+        '</div><div class="amt-val" style="font-size:15px;font-weight:700;color:' +
+        c.textSecondary +
+        ';">' +
         escapeHtml(recipientName) +
         "</div>"
       : "") +
@@ -109,6 +142,12 @@ const generatePaystackHTML = (
 
 export default function WalletTopUpScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
+  const theme = useTheme();
+  const c = theme.c;
+  // Edge-to-edge on Android with no navigator header - see ProfileScreen.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const styles = useWalletTopUpStyles(c, topInset);
   const [amount, setAmount] = useState("");
   const [loading, setLoading] = useState(false);
   const [userEmail, setUserEmail] = useState("");
@@ -371,15 +410,18 @@ export default function WalletTopUpScreen({ navigation }) {
   }, [showError]);
 
   useEffect(() => {
-    let walletSubscription = null;
+    // Created asynchronously, so it lives in a ref cleanup can reach. A
+    // closure variable is still null if the effect is torn down during the
+    // awaits, which leaks the channel and lets the next run collide with it.
+    const walletChannelRef = { current: null };
     const setupWalletRealtime = async () => {
       try {
         const {
           data: { user },
         } = await supabase.auth.getUser();
         if (user) {
-          walletSubscription = supabase
-            .channel("super_agent_wallet_balance_realtime")
+          walletChannelRef.current = supabase
+            .channel(uniqueTopic("super_agent_wallet_balance_realtime"))
             .on(
               "postgres_changes",
               {
@@ -401,7 +443,7 @@ export default function WalletTopUpScreen({ navigation }) {
     fetchUserData();
     setupWalletRealtime();
     return () => {
-      if (walletSubscription) supabase.removeChannel(walletSubscription);
+      removeChannelSafe(walletChannelRef.current);
     };
   }, [fetchUserData]);
 
@@ -478,15 +520,14 @@ export default function WalletTopUpScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+    <ThemedScreen>
+      <View style={styles.safeArea}>
         <TouchableOpacity
           style={styles.floatingBackButton}
           onPress={() => navigation.goBack()}
           activeOpacity={0.7}
         >
-          <Ionicons name="arrow-back" size={20} color="#333" />
+          <Ionicons name="arrow-back" size={20} color={c.textPrimary} />
         </TouchableOpacity>
         <KeyboardAwareScrollView
           style={styles.content}
@@ -552,7 +593,7 @@ export default function WalletTopUpScreen({ navigation }) {
                 <Ionicons
                   name="information-circle-outline"
                   size={16}
-                  color={colors.textSecondary}
+                  color={c.textMuted}
                 />
                 <Text style={styles.limitText}>Min: Ghc 5</Text>
               </View>
@@ -560,7 +601,7 @@ export default function WalletTopUpScreen({ navigation }) {
                 <Ionicons
                   name="information-circle-outline"
                   size={16}
-                  color={colors.textSecondary}
+                  color={c.textMuted}
                 />
                 <Text style={styles.limitText}>Max: Ghc 5,000</Text>
               </View>
@@ -574,7 +615,14 @@ export default function WalletTopUpScreen({ navigation }) {
               {loading ? (
                 <Text style={styles.payButtonText}>Processing...</Text>
               ) : (
-                <Text style={styles.payButtonText}>Proceed to Pay</Text>
+                <Text
+                  style={[
+                    styles.payButtonText,
+                    !amount && styles.payButtonTextDisabled,
+                  ]}
+                >
+                  Proceed to Pay
+                </Text>
               )}
             </TouchableOpacity>
           </View>
@@ -594,11 +642,7 @@ export default function WalletTopUpScreen({ navigation }) {
                     onPress={handlePaymentClose}
                     style={styles.closeButton}
                   >
-                    <Ionicons
-                      name="close"
-                      size={24}
-                      color={colors.textSecondary}
-                    />
+                    <Ionicons name="close" size={24} color={c.textMuted} />
                   </TouchableOpacity>
                 </View>
                 <View style={styles.webviewContainer}>
@@ -607,7 +651,7 @@ export default function WalletTopUpScreen({ navigation }) {
                       <Ionicons
                         name="alert-circle-outline"
                         size={48}
-                        color={colors.danger}
+                        color={c.rose}
                       />
                       <Text style={styles.webviewErrorText}>
                         Payment configuration not available
@@ -636,6 +680,7 @@ export default function WalletTopUpScreen({ navigation }) {
                             ? "Super Agent"
                             : "Business",
                           paystackPublicKey,
+                          c,
                         ),
                       }}
                       javaScriptEnabled
@@ -688,7 +733,7 @@ export default function WalletTopUpScreen({ navigation }) {
                           <Ionicons
                             name="alert-circle-outline"
                             size={48}
-                            color={colors.danger}
+                            color={c.rose}
                           />
                           <Text style={styles.webviewErrorText}>
                             Failed to load payment page
@@ -706,170 +751,206 @@ export default function WalletTopUpScreen({ navigation }) {
             </View>
           </Modal>
         )}
-      </SafeAreaView>
-    </View>
+      </View>
+    </ThemedScreen>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#FFFFFF" },
-  safeArea: { flex: 1 },
-  flex: { flex: 1 },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 16,
-    zIndex: 10,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#FFF",
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  header: { paddingHorizontal: 20, paddingTop: 60, paddingBottom: 16 },
-  title: { fontSize: 28, fontWeight: "800", color: "#1A1A1A", marginBottom: 8 },
-  subtitle: { fontSize: 14, color: "#666", lineHeight: 20 },
-  balanceCard: {
-    marginHorizontal: 20,
-    marginBottom: 24,
-    padding: 24,
-    borderRadius: 20,
-    backgroundColor: "#F0FAFA",
-    borderWidth: 1,
-    borderColor: "#D0F0F0",
-  },
-  balanceLabel: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.primary,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginBottom: 8,
-  },
-  balanceAmount: { fontSize: 36, fontWeight: "900", color: "#1A1A1A" },
-  content: { flex: 1 },
-  scrollContent: { padding: 20 },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#1A1A1A",
-    marginBottom: 12,
-    marginTop: 8,
-  },
-  amountGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    marginBottom: 20,
-  },
-  amountChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
-    backgroundColor: "#F5F5F5",
-    borderWidth: 1.5,
-    borderColor: "transparent",
-  },
-  amountChipSelected: {
-    backgroundColor: "#E6F7F7",
-    borderColor: colors.primary,
-  },
-  amountChipText: { fontSize: 14, fontWeight: "600", color: "#555" },
-  amountChipTextSelected: { color: colors.primary, fontWeight: "700" },
-  inputWrapper: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#F8F9FA",
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: "#E0E0E0",
-    marginBottom: 16,
-    overflow: "hidden",
-  },
-  currencyPrefix: {
-    paddingHorizontal: 16,
-    borderRightWidth: 1,
-    borderRightColor: "#E0E0E0",
-    paddingVertical: 16,
-  },
-  currencyText: { fontSize: 16, fontWeight: "700", color: colors.primary },
-  input: {
-    flex: 1,
-    paddingHorizontal: 16,
-    paddingVertical: 16,
-    fontSize: 18,
-    fontWeight: "600",
-    color: "#1A1A1A",
-  },
-  limitInfo: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 24,
-    paddingHorizontal: 4,
-  },
-  limitItem: { flexDirection: "row", alignItems: "center" },
-  limitText: { fontSize: 12, color: colors.textSecondary, marginLeft: 4 },
-  payButton: {
-    backgroundColor: colors.primary,
-    paddingVertical: 18,
-    borderRadius: 16,
-    alignItems: "center",
-    marginBottom: 40,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  payButtonDisabled: { backgroundColor: "#CCC", shadowOpacity: 0.1 },
-  payButtonText: { color: "#FFF", fontSize: 16, fontWeight: "700" },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.6)",
-    justifyContent: "flex-end",
-  },
-  modalContent: {
-    backgroundColor: "#FFF",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: "85%",
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: "#F0F0F0",
-  },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: "#1A1A1A" },
-  closeButton: { padding: 4 },
-  webviewContainer: { height: 600 },
-  webview: { backgroundColor: "#FFF" },
-  webviewError: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  webviewErrorText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#1A1A1A",
-    marginTop: 12,
-  },
-  webviewErrorSubtext: {
-    fontSize: 13,
-    color: "#888",
-    marginTop: 4,
-    textAlign: "center",
-  },
-});
+// Layered on the shared kit. Screen-specific parts are the balance card, the
+// preset-amount chips and the Paystack sheet modal.
+const useWalletTopUpStyles = (c, topInset = 0) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    safeArea: { flex: 1 },
+    content: { flex: 1 },
+    scrollContent: { padding: 20, paddingBottom: 8 },
+
+    // The back button is absolutely positioned and the header sits below it,
+    // so both clear the Android status bar. iOS already spaces this, so the
+    // inset is Android-only.
+    floatingBackButton: {
+      position: "absolute",
+      top: 50 + topInset,
+      left: 16,
+      zIndex: 10,
+      width: 40,
+      height: 40,
+      borderRadius: 999,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+
+    header: { paddingTop: 60 + topInset, paddingBottom: 16 },
+    title: { ...base.headerTitle, fontSize: 28, marginBottom: 8 },
+    subtitle: { ...base.headerSubtitle, fontSize: 14, lineHeight: 20 },
+
+    // Balance is the headline number, so it keeps a filled treatment in both
+    // schemes via the mint tint rather than a flat surface.
+    balanceCard: {
+      marginBottom: 24,
+      padding: 24,
+      borderRadius: 22,
+      backgroundColor: `${c.mint}12`,
+      borderWidth: 1,
+      borderColor: `${c.mint}2E`,
+    },
+    balanceLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.mint,
+      textTransform: "uppercase",
+      letterSpacing: 1,
+      marginBottom: 8,
+    },
+    balanceAmount: {
+      fontFamily: fonts.display,
+      fontSize: 36,
+      color: c.textPrimary,
+    },
+
+    sectionTitle: {
+      fontFamily: fonts.display,
+      fontSize: 16,
+      color: c.textPrimary,
+      marginBottom: 12,
+      marginTop: 8,
+    },
+    amountGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 10,
+      marginBottom: 20,
+    },
+    amountChip: {
+      paddingHorizontal: 16,
+      paddingVertical: 11,
+      borderRadius: 999,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    amountChipSelected: {
+      backgroundColor: `${c.mint}1F`,
+      borderColor: c.mint,
+    },
+    amountChipText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textSecondary,
+    },
+    amountChipTextSelected: { fontFamily: fonts.bodyBold, color: c.mint },
+
+    inputWrapper: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.canvasRaised,
+      borderRadius: 18,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      marginBottom: 16,
+      overflow: "hidden",
+    },
+    currencyPrefix: {
+      paddingHorizontal: 16,
+      borderRightWidth: StyleSheet.hairlineWidth,
+      borderRightColor: c.hairline,
+      paddingVertical: 17,
+    },
+    currencyText: { fontFamily: fonts.bodyBold, fontSize: 16, color: c.mint },
+    input: {
+      flex: 1,
+      paddingHorizontal: 16,
+      paddingVertical: 17,
+      fontFamily: fonts.bodySemi,
+      fontSize: 18,
+      color: c.textPrimary,
+    },
+
+    limitInfo: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      marginBottom: 24,
+      paddingHorizontal: 4,
+    },
+    limitItem: { flexDirection: "row", alignItems: "center" },
+    limitText: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginLeft: 4,
+    },
+
+    payButton: {
+      backgroundColor: c.mint,
+      paddingVertical: 18,
+      borderRadius: 999,
+      alignItems: "center",
+      marginBottom: 40,
+    },
+    // Disabled greys the fill out rather than hiding the button, so the
+    // layout does not jump when no amount is entered yet.
+    payButtonDisabled: { backgroundColor: c.surfaceHover },
+    payButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 16,
+      color: c.onAccent,
+    },
+    payButtonTextDisabled: { color: c.textMuted },
+
+    // Paystack sheet
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: c.menuBackdrop,
+      justifyContent: "flex-end",
+    },
+    modalContent: {
+      backgroundColor: c.canvasRaised,
+      borderTopLeftRadius: 28,
+      borderTopRightRadius: 28,
+      maxHeight: "85%",
+      borderTopWidth: 1,
+      borderColor: c.hairline,
+    },
+    modalHeader: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingHorizontal: 20,
+      paddingTop: 20,
+      paddingBottom: 16,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.hairline,
+    },
+    modalTitle: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      color: c.textPrimary,
+    },
+    closeButton: { padding: 4 },
+    webviewContainer: { height: 600 },
+    webview: { backgroundColor: c.canvas },
+    webviewError: {
+      flex: 1,
+      justifyContent: "center",
+      alignItems: "center",
+      padding: 20,
+    },
+    webviewErrorText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 16,
+      color: c.textPrimary,
+      marginTop: 12,
+    },
+    webviewErrorSubtext: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+      marginTop: 4,
+      textAlign: "center",
+    },
+  });
+};

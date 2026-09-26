@@ -14,6 +14,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import colors from "../components/theme";
+import { ThemedScreen } from "../components/ui";
 
 export default function SuperAgentManagementScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -70,8 +71,9 @@ export default function SuperAgentManagementScreen({ navigation }) {
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
+    <ThemedScreen style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
@@ -187,7 +189,8 @@ export default function SuperAgentManagementScreen({ navigation }) {
           <Text style={styles.actionText}>Business Analytics</Text>
         </TouchableOpacity>
       </ScrollView>
-    </SafeAreaView>
+      </SafeAreaView>
+    </ThemedScreen>
   );
 }
 

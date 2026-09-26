@@ -14,6 +14,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { BarChart } from "react-native-chart-kit";
 import { supabase } from "../lib/supabase";
+import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { useNotification } from "../contexts/NotificationContext";
 import colors from "../components/theme";
 
@@ -52,7 +53,7 @@ export default function AgentDashboardScreen({ navigation }) {
         } = await supabase.auth.getUser();
         if (user) {
           ordersSubscription = supabase
-            .channel("agent_dashboard_agent_orders_realtime")
+            .channel(uniqueTopic("agent_dashboard_agent_orders_realtime"))
             .on(
               "postgres_changes",
               {
@@ -65,12 +66,12 @@ export default function AgentDashboardScreen({ navigation }) {
                 fetchAgentStats();
                 fetchRecentOrders();
                 fetchChartData();
-              }
+              },
             )
             .subscribe();
 
           walletSubscription = supabase
-            .channel("agent_dashboard_agent_wallet_realtime")
+            .channel(uniqueTopic("agent_dashboard_agent_wallet_realtime"))
             .on(
               "postgres_changes",
               {
@@ -86,7 +87,7 @@ export default function AgentDashboardScreen({ navigation }) {
                   ...prevAgent,
                   wallet: payload.new,
                 }));
-              }
+              },
             )
             .subscribe();
         }
@@ -98,12 +99,8 @@ export default function AgentDashboardScreen({ navigation }) {
     setupRealtimeSubscriptions();
 
     return () => {
-      if (ordersSubscription) {
-        ordersSubscription.unsubscribe();
-      }
-      if (walletSubscription) {
-        supabase.removeChannel(walletSubscription);
-      }
+      removeChannelSafe(ordersSubscription);
+      removeChannelSafe(walletSubscription);
     };
   }, []);
 
@@ -159,16 +156,16 @@ export default function AgentDashboardScreen({ navigation }) {
       const totalEarnings = orders
         .filter(
           (order) =>
-            order.status === "delivered" || order.status === "completed"
+            order.status === "delivered" || order.status === "completed",
         )
         .reduce((sum, order) => sum + (order.amount || 0), 0);
 
       const pendingOrders = orders.filter(
-        (order) => order.status === "pending" || order.status === "processing"
+        (order) => order.status === "pending" || order.status === "processing",
       ).length;
 
       const completedOrders = orders.filter(
-        (order) => order.status === "delivered" || order.status === "completed"
+        (order) => order.status === "delivered" || order.status === "completed",
       ).length;
 
       setStats({
@@ -297,14 +294,23 @@ export default function AgentDashboardScreen({ navigation }) {
                 </Text>
               </View>
             </View>
-            <TouchableOpacity onPress={handleLogout} style={styles.logoutButton}>
-              <Ionicons name="log-out-outline" size={24} color={colors.primary} />
+            <TouchableOpacity
+              onPress={handleLogout}
+              style={styles.logoutButton}
+            >
+              <Ionicons
+                name="log-out-outline"
+                size={24}
+                color={colors.primary}
+              />
             </TouchableOpacity>
           </View>
 
           <View style={styles.dashboardTitleSection}>
             <Text style={styles.dashboardTitle}>Agent Dashboard</Text>
-            <Text style={styles.dashboardSubtitle}>Overview of your business performance</Text>
+            <Text style={styles.dashboardSubtitle}>
+              Overview of your business performance
+            </Text>
           </View>
         </View>
 
@@ -388,7 +394,7 @@ export default function AgentDashboardScreen({ navigation }) {
                 <View style={styles.orderInfo}>
                   <Text style={styles.orderId}>Order #{order.id}</Text>
                   <Text style={styles.orderCustomer}>
-                    {order.recipient_name || "Unknown Customer"}
+                    {order.recipient_phone || "No recipient"}
                   </Text>
                   <Text style={styles.orderAmount}>
                     Ghc{order.amount ? order.amount.toFixed(2) : "0.00"}
@@ -524,6 +530,16 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     color: colors.dark,
+  },
+  // Referenced by the header avatar but was never defined, so the icon
+  // rendered with no container. Matches logoutButton's 40px circle.
+  avatarRing: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.light,
+    justifyContent: "center",
+    alignItems: "center",
   },
   logoutButton: {
     width: 40,

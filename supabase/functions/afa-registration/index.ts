@@ -60,7 +60,9 @@ Deno.serve(async (req) => {
     if (action === "getStatus" || action === "create") {
       const { data: settings, error: settingsError } = await admin
         .from("afa_registration_settings")
-        .select("registration_fee, currency, is_enabled")
+        .select(
+          "registration_fee, super_agent_base_price, sub_agent_base_price, currency, is_enabled",
+        )
         .eq("id", true)
         .maybeSingle();
       if (settingsError) throw settingsError;
@@ -73,7 +75,83 @@ Deno.serve(async (req) => {
       const { data: registrations, error: registrationsError } =
         await registrationsQuery;
       if (registrationsError) throw registrationsError;
-      return json({ settings, registrations: registrations || [] });
+
+      // The price this user will actually be charged. Resolved server-side so
+      // the figure the screen shows is the figure the registration records.
+      const callerIsSuperAgent = role === "SuperAgent";
+      const callerSuperAgentId = callerIsSuperAgent
+        ? user.id
+        : clean(
+            user.user_metadata?.super_agent_id ||
+              user.user_metadata?.superAgentId ||
+              user.app_metadata?.super_agent_id ||
+              user.app_metadata?.superAgentId,
+          ) || null;
+      const { data: pricing, error: pricingError } = await admin.rpc(
+        "resolve_afa_base_price",
+        {
+          p_payer_is_super_agent: callerIsSuperAgent,
+          p_payer_super_agent_id: callerSuperAgentId,
+        },
+      );
+      if (pricingError) throw pricingError;
+
+      // A super agent also owns the price charged to their sub-agents, so the
+      // settings screen needs it alongside the price they pay themselves.
+      let ownAgentPricing = null;
+      if (callerIsSuperAgent) {
+        const { data } = await admin
+          .from("super_agent_afa_pricing")
+          .select("*")
+          .eq("super_agent_id", user.id)
+          .maybeSingle();
+        ownAgentPricing = data || null;
+      }
+
+      return json({
+        settings,
+        registrations: registrations || [],
+        quotedFee: pricing?.[0]?.base_price ?? null,
+        priceSource: pricing?.[0]?.price_source ?? "platform_default",
+        ownAgentPricing,
+      });
+    }
+
+    // A super agent sets the base price charged to THEIR OWN sub-agents.
+    // Scoped to `user.id` server-side; the RLS policy on
+    // super_agent_afa_pricing is the second line of defence, but the edge
+    // function is what actually decides the owner so a crafted request cannot
+    // retarget somebody else's price.
+    if (action === "saveSubAgentPricing") {
+      if (role !== "SuperAgent") {
+        return json({ error: "Super Agent role required" }, 403);
+      }
+
+      const rawPrice = clean(body.subAgentBasePrice, 20);
+      const price = Number(rawPrice);
+      if (rawPrice === "" || !Number.isFinite(price) || price < 0) {
+        return json({ error: "Enter a valid base price" }, 400);
+      }
+
+      const { data, error: saveError } = await admin
+        .from("super_agent_afa_pricing")
+        .upsert(
+          {
+            super_agent_id: user.id,
+            sub_agent_base_price: price,
+            currency: "GHS",
+            is_enabled: body.isEnabled !== false,
+            notes: clean(body.notes, 500) || null,
+            updated_by: user.id,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "super_agent_id" },
+        )
+        .select()
+        .single();
+      if (saveError) throw saveError;
+
+      return json({ success: true, pricing: data });
     }
 
     if (action === "createRegistration") {
@@ -83,12 +161,6 @@ Deno.serve(async (req) => {
         .eq("id", true)
         .maybeSingle();
       if (settingsError) throw settingsError;
-      if (!settings?.is_enabled || Number(settings.registration_fee) <= 0) {
-        return json(
-          { error: "AFA registration is not currently available" },
-          400,
-        );
-      }
 
       const { data: pendingRegistration, error: pendingLookupError } =
         await admin
@@ -132,6 +204,46 @@ Deno.serve(async (req) => {
               user.app_metadata?.superAgentId,
           ) || null;
 
+      // Tiered pricing: a super agent pays the platform's super-agent price,
+      // a sub-agent pays whatever their own super agent set (falling back to
+      // the platform default). The enabled flag is checked against the QUOTED
+      // price rather than the legacy global fee, so enabling is per-tier.
+      const { data: pricing, error: pricingError } = await admin.rpc(
+        "resolve_afa_base_price",
+        {
+          p_payer_is_super_agent: isSuperAgent,
+          p_payer_super_agent_id: superAgentId,
+        },
+      );
+      if (pricingError) throw pricingError;
+      const quotedFee = Number(pricing?.[0]?.base_price ?? 0);
+      const priceSource = pricing?.[0]?.price_source ?? "platform_default";
+
+      if (!settings?.is_enabled || quotedFee <= 0) {
+        return json(
+          { error: "AFA registration is not currently available" },
+          400,
+        );
+      }
+
+      // When a sub-agent pays their own super agent's price, the money must go
+      // to that super agent - not to the platform. Paystack sub-accounts are
+      // the existing mechanism for exactly this (the data-order path already
+      // routes sub-agent orders to the super agent's subaccount).
+      let paystackSubaccountCode: string | null = null;
+      let beneficiarySuperAgentId: string | null = null;
+      if (!isSuperAgent && superAgentId) {
+        const { data: subaccount } = await admin
+          .from("super_agent_paystack")
+          .select("subaccount_code, is_active")
+          .eq("super_agent_id", superAgentId)
+          .maybeSingle();
+        if (subaccount?.is_active && subaccount.subaccount_code) {
+          paystackSubaccountCode = subaccount.subaccount_code;
+          beneficiarySuperAgentId = superAgentId;
+        }
+      }
+
       const { data: registration, error: createError } = await admin
         .from("afa_registrations")
         .insert({
@@ -147,7 +259,12 @@ Deno.serve(async (req) => {
           additional_info: clean(body.additionalInfo, 1000)
             ? { details: clean(body.additionalInfo, 1000) }
             : {},
-          fee_amount: Number(settings.registration_fee),
+          // What the payer is charged (tiered), and the platform base price it
+          // was derived from. Both snapshotted - editing a price later must
+          // never rewrite what a historical registration was worth.
+          fee_amount: quotedFee,
+          platform_fee_amount: Number(settings.registration_fee || 0),
+          price_source: priceSource,
           currency: settings.currency || "GHS",
           payment_method: paymentMethod,
           payment_reference: reference,
@@ -191,7 +308,15 @@ Deno.serve(async (req) => {
         });
       }
 
-      return json({ success: true, registration, paymentMethod });
+      return json({
+        success: true,
+        registration,
+        paymentMethod,
+        paystackSubaccountCode,
+        beneficiarySuperAgentId,
+        quotedFee,
+        priceSource,
+      });
     }
 
     if (action === "verifyPaystack") {
@@ -294,10 +419,34 @@ Deno.serve(async (req) => {
       const fee = Number(body.registrationFee);
       if (!Number.isFinite(fee) || fee < 0)
         return json({ error: "Invalid registration fee" }, 400);
+
+      // The per-tier base prices are optional: an absent or null value means
+      // "not configured, fall back to registration_fee". That is what lets the
+      // platform enable the tiers independently without a forced decision.
+      const parseOptionalPrice = (raw: unknown) => {
+        if (raw === undefined || raw === null || raw === "") return null;
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          throw new Error("Invalid base price");
+        }
+        return parsed;
+      };
+
+      let superAgentBasePrice = null;
+      let subAgentBasePrice = null;
+      try {
+        superAgentBasePrice = parseOptionalPrice(body.superAgentBasePrice);
+        subAgentBasePrice = parseOptionalPrice(body.subAgentBasePrice);
+      } catch (error: any) {
+        return json({ error: error.message }, 400);
+      }
+
       const { data, error } = await admin
         .from("afa_registration_settings")
         .update({
           registration_fee: fee,
+          super_agent_base_price: superAgentBasePrice,
+          sub_agent_base_price: subAgentBasePrice,
           is_enabled: Boolean(body.isEnabled),
           updated_by: user.id,
           updated_at: new Date().toISOString(),

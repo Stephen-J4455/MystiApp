@@ -60,7 +60,12 @@ export async function registerForPushNotifications() {
       importance: Notifications.AndroidImportance.MAX,
       vibrationPattern: [0, 250, 250, 250],
       lightColor: "#FF231F7C",
-      sound: "default",
+      // Must be null, not "default". Since SDK 57 this field is the name of a
+      // raw resource in res/raw, and "default" is not one - passing it throws
+      // "Custom sound 'default' not found in native app". `null` means "use
+      // the system default", which is what we want (app.json registers no
+      // custom sounds). Matches the "updates" channel below.
+      sound: null,
     });
 
     await Notifications.setNotificationChannelAsync("updates", {

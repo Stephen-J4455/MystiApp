@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -12,8 +12,9 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   KeyboardAwareScrollView,
   KeyboardAvoidingView,
@@ -22,12 +23,21 @@ import {
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
-import colors from "../components/theme";
+import { fonts } from "../components/theme";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useTheme } from "../contexts/ThemeContext";
 import { invokeEdgeFunction } from "../lib/edgeFunctions";
 import { getEdgeFunctionName } from "../lib/env";
 
 export default function SuperAgentPaystackScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
+  const theme = useTheme();
+  const c = theme.c;
+  // Edge-to-edge on Android with no navigator header, so the screen insets
+  // itself. iOS already spaces this header, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const styles = usePaystackStyles(c, topInset);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [subaccount, setSubaccount] = useState(null);
@@ -511,23 +521,23 @@ export default function SuperAgentPaystackScreen({ navigation }) {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <ThemedScreen style={styles.safeArea}>
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
+          <ActivityIndicator size="large" color={c.mint} />
           <Text style={styles.loadingText}>Loading Paystack settings...</Text>
         </View>
-      </SafeAreaView>
+      </ThemedScreen>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <ThemedScreen style={styles.safeArea}>
       <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
         >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          <Ionicons name="arrow-back" size={24} color={c.textPrimary} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
           <Text style={styles.title}>Paystack Settings</Text>
@@ -548,9 +558,14 @@ export default function SuperAgentPaystackScreen({ navigation }) {
             <Ionicons
               name={subaccount.is_active ? "checkmark-circle" : "close-circle"}
               size={18}
-              color="#fff"
+              color={c.onAccent}
             />
-            <Text style={styles.statusText}>
+            <Text
+              style={[
+                styles.statusText,
+                !subaccount.is_active && styles.statusTextInactive,
+              ]}
+            >
               {subaccount.is_active ? "Active" : "Inactive"}
             </Text>
           </TouchableOpacity>
@@ -568,7 +583,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         {subaccount && !editMode && (
           <View style={styles.summaryCard}>
             <View style={styles.summaryHeader}>
-              <Ionicons name="card-outline" size={24} color={colors.primary} />
+              <Ionicons name="card-outline" size={24} color={c.mintDim} />
               <Text style={styles.summaryTitle}>Settlement Account</Text>
             </View>
             <View style={styles.verifySection}>
@@ -577,20 +592,12 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                   <Ionicons
                     name="shield-outline"
                     size={16}
-                    color={colors.border}
+                    color={c.textMuted}
                   />
                 ) : verificationStatus?.verified ? (
-                  <Ionicons
-                    name="shield-checkmark"
-                    size={16}
-                    color={colors.success}
-                  />
+                  <Ionicons name="shield-checkmark" size={16} color={c.mint} />
                 ) : (
-                  <Ionicons
-                    name="shield-alert"
-                    size={16}
-                    color={colors.warning}
-                  />
+                  <Ionicons name="shield-alert" size={16} color={c.amber} />
                 )}
                 <Text style={styles.verifyLabel}>
                   {verificationStatus?.paystack_status === null
@@ -613,11 +620,28 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                 disabled={verifying}
               >
                 {verifying ? (
-                  <ActivityIndicator size="small" color="#fff" />
+                  <ActivityIndicator size="small" color={c.mint} />
                 ) : (
                   <>
-                    <Ionicons name="checkmark-done" size={16} color="#fff" />
-                    <Text style={styles.verifyButtonText}>Check</Text>
+                    <Ionicons
+                      name="checkmark-done"
+                      size={16}
+                      color={
+                        verificationStatus?.verified ? c.mint : c.textSecondary
+                      }
+                    />
+                    <Text
+                      style={[
+                        styles.verifyButtonText,
+                        verificationStatus?.verified &&
+                          styles.verifyButtonVerifiedText,
+                        !verificationStatus?.verified &&
+                          verificationStatus?.paystack_status !== null &&
+                          styles.verifyButtonInactiveText,
+                      ]}
+                    >
+                      Check
+                    </Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -662,18 +686,14 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                 style={styles.actionEditButton}
                 onPress={() => setEditMode(true)}
               >
-                <Ionicons name="pencil" size={18} color={colors.primary} />
+                <Ionicons name="pencil" size={18} color={c.mintDim} />
                 <Text style={styles.actionEditText}>Edit Details</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionDeleteButton}
                 onPress={handleDeleteSubaccount}
               >
-                <Ionicons
-                  name="trash-outline"
-                  size={18}
-                  color={colors.danger}
-                />
+                <Ionicons name="trash-outline" size={18} color={c.rose} />
                 <Text style={styles.actionDeleteText}>Delete</Text>
               </TouchableOpacity>
             </View>
@@ -686,7 +706,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
               <Ionicons
                 name={editMode ? "pencil" : "add-circle-outline"}
                 size={24}
-                color={colors.accent}
+                color={c.mint}
               />
               <Text style={styles.formTitle}>
                 {editMode ? "Edit Sub-Account" : "Configure Settlement Account"}
@@ -744,7 +764,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                     name="business"
                     size={18}
                     color={
-                      form.settlement_type === "bank" ? "#fff" : colors.primary
+                      form.settlement_type === "bank" ? c.onAccent : c.mintDim
                     }
                   />
                   <Text
@@ -778,8 +798,8 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                     size={18}
                     color={
                       form.settlement_type === "mobile_money"
-                        ? "#fff"
-                        : colors.primary
+                        ? c.onAccent
+                        : c.mintDim
                     }
                   />
                   <Text
@@ -803,7 +823,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
               </Text>
               {banksLoading ? (
                 <View style={styles.loadingRow}>
-                  <ActivityIndicator size="small" color={colors.primary} />
+                  <ActivityIndicator size="small" color={c.mintDim} />
                   <Text style={styles.loadingTextSmall}>
                     Loading options...
                   </Text>
@@ -839,11 +859,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                       </Text>
                     )}
                   </View>
-                  <Ionicons
-                    name="chevron-down"
-                    size={20}
-                    color={colors.border}
-                  />
+                  <Ionicons name="chevron-down" size={20} color={c.textMuted} />
                 </TouchableOpacity>
               )}
               {formErrors.settlement_bank && (
@@ -953,7 +969,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                   }}
                   disabled={creating || updating}
                 >
-                  <Ionicons name="close" size={18} color={colors.dark} />
+                  <Ionicons name="close" size={18} color={c.textPrimary} />
                   <Text style={styles.cancelButtonText}>Cancel</Text>
                 </TouchableOpacity>
               )}
@@ -966,13 +982,13 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                 disabled={creating || updating}
               >
                 {creating || updating ? (
-                  <ActivityIndicator size="small" color="#fff" />
+                  <ActivityIndicator size="small" color={c.onAccent} />
                 ) : (
                   <>
                     <Ionicons
                       name={editMode ? "save-outline" : "checkmark-circle"}
                       size={20}
-                      color="#fff"
+                      color={c.onAccent}
                     />
                     <Text style={styles.saveButtonText}>
                       {editMode
@@ -990,11 +1006,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
 
         {/* Help Info Card */}
         <View style={styles.helpCard}>
-          <Ionicons
-            name="information-circle"
-            size={20}
-            color={colors.primary}
-          />
+          <Ionicons name="information-circle" size={20} color={c.mintDim} />
           <Text style={styles.helpText}>
             Your settlement account receives split payments from customer
             transactions. Ensure the account details are correct before saving.
@@ -1027,12 +1039,12 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                 onPress={() => setShowBankPicker(false)}
                 style={styles.modalCloseButton}
               >
-                <Ionicons name="close" size={22} color={colors.dark} />
+                <Ionicons name="close" size={22} color={c.textPrimary} />
               </TouchableOpacity>
             </View>
             {/* Search Bar */}
             <View style={styles.searchContainer}>
-              <Ionicons name="search" size={20} color={colors.border} />
+              <Ionicons name="search" size={20} color={c.textMuted} />
               <TextInput
                 style={styles.searchInput}
                 placeholder="Search by name or code..."
@@ -1042,11 +1054,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
               />
               {searchQuery ? (
                 <TouchableOpacity onPress={() => setSearchQuery("")}>
-                  <Ionicons
-                    name="close-circle"
-                    size={18}
-                    color={colors.border}
-                  />
+                  <Ionicons name="close-circle" size={18} color={c.textMuted} />
                 </TouchableOpacity>
               ) : null}
             </View>
@@ -1090,8 +1098,8 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                         size={18}
                         color={
                           form.settlement_bank_code === item.code
-                            ? "#fff"
-                            : colors.primary
+                            ? c.onAccent
+                            : c.mintDim
                         }
                       />
                     </View>
@@ -1114,18 +1122,14 @@ export default function SuperAgentPaystackScreen({ navigation }) {
                     <Ionicons
                       name="checkmark-circle"
                       size={22}
-                      color={colors.primary}
+                      color={c.mintDim}
                     />
                   )}
                 </TouchableOpacity>
               )}
               ListEmptyComponent={
                 <View style={styles.modalEmpty}>
-                  <Ionicons
-                    name="close-circle"
-                    size={40}
-                    color={colors.border}
-                  />
+                  <Ionicons name="close-circle" size={40} color={c.textMuted} />
                   <Text style={styles.modalEmptyText}>
                     {searchQuery ? "No results found" : "No items available"}
                   </Text>
@@ -1135,403 +1139,444 @@ export default function SuperAgentPaystackScreen({ navigation }) {
           </View>
         </KeyboardAvoidingView>
       </Modal>
-    </SafeAreaView>
+    </ThemedScreen>
   );
 }
+// Layered on the shared kit. Screen-specific parts are the settlement
+// summary, the two-way settlement-type toggle, the bank picker modal, and the
+// verification chips - each mapped onto semantic palette tones so the states
+// stay distinguishable in both schemes.
+const usePaystackStyles = (c, topInset = 0) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    safeArea: { ...base.screen },
+    loadingContainer: { ...base.center },
+    loadingText: { ...base.headerSubtitle, marginTop: 12, fontSize: 15 },
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.light },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: colors.light,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: colors.dark,
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 14,
-    backgroundColor: colors.white,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    gap: 10,
-  },
-  headerCenter: { flex: 1 },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  title: { fontSize: 20, fontWeight: "800", color: colors.dark },
-  subtitle: { fontSize: 12, color: colors.border, marginTop: 2 },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 20,
-  },
-  statusBadgeActive: { backgroundColor: colors.success },
-  statusBadgeInactive: { backgroundColor: colors.border },
-  statusText: { color: "#fff", fontSize: 12, fontWeight: "700" },
-  content: { padding: 20, paddingBottom: 40, gap: 20 },
+    header: { ...base.header, paddingTop: 18 + topInset, paddingBottom: 14 },
+    backButton: { ...base.backButton, borderRadius: 999 },
+    title: { ...base.headerTitle, fontSize: 20 },
+    subtitle: { ...base.headerSubtitle },
 
-  // Summary card
-  summaryCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 18,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  summaryHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 16,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.light,
-  },
-  summaryTitle: { fontSize: 16, fontWeight: "800", color: colors.dark },
-  infoRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 8,
-  },
-  infoLabel: { fontSize: 13, color: colors.border, fontWeight: "600" },
-  infoValue: { fontSize: 14, color: colors.dark, fontWeight: "600" },
-  summaryActions: {
-    flexDirection: "row",
-    gap: 12,
-    marginTop: 16,
-    paddingTop: 14,
-    borderTopWidth: 1,
-    borderTopColor: colors.light,
-  },
-  actionEditButton: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 10,
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.primary,
-  },
-  actionEditText: { color: colors.primary, fontSize: 13, fontWeight: "700" },
-  actionDeleteButton: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 10,
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.danger,
-  },
-  actionDeleteText: { color: colors.danger, fontSize: 13, fontWeight: "700" },
+    statusBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 999,
+    },
+    statusBadgeActive: { backgroundColor: `${c.mint}26` },
+    statusBadgeInactive: { backgroundColor: c.surfaceHover },
+    statusText: { fontFamily: fonts.bodyBold, fontSize: 12, color: c.mint },
+    statusTextInactive: { color: c.textMuted },
 
-  // Form card
-  formCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 18,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
-  },
-  formHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 6,
-  },
-  formTitle: { fontSize: 16, fontWeight: "800", color: colors.dark },
-  formDescription: {
-    fontSize: 13,
-    color: colors.border,
-    lineHeight: 20,
-    marginBottom: 16,
-  },
-  fieldGroup: { marginBottom: 16 },
-  label: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.dark,
-    marginBottom: 6,
-  },
-  input: {
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    borderRadius: 12,
-    padding: 12,
-    fontSize: 14,
-    backgroundColor: colors.light,
-    color: colors.dark,
-  },
-  inputError: { borderColor: colors.danger, backgroundColor: "#fef2f2" },
-  textArea: { minHeight: 80, textAlignVertical: "top" },
-  errorText: {
-    fontSize: 12,
-    color: colors.danger,
-    marginTop: 4,
-    fontWeight: "600",
-  },
-  // Toggle buttons
-  toggleRow: { flexDirection: "row", gap: 10 },
-  toggleButton: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    borderRadius: 12,
-    backgroundColor: colors.white,
-  },
-  toggleButtonActive: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primary + "10",
-  },
-  toggleButtonText: { fontSize: 14, fontWeight: "700", color: colors.dark },
-  toggleButtonTextActive: { color: colors.primary },
+    content: { ...base.body, paddingTop: 20, paddingBottom: 40, gap: 20 },
 
-  // Picker
-  pickerInput: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    borderRadius: 12,
-    padding: 12,
-    backgroundColor: colors.light,
-  },
-  pickerContent: { flex: 1 },
-  pickerValue: { fontSize: 14, color: colors.dark, fontWeight: "600" },
-  pickerCode: { fontSize: 12, color: colors.border, marginTop: 2 },
-  pickerPlaceholder: { fontSize: 14, color: colors.border },
-  loadingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    paddingVertical: 12,
-  },
-  loadingTextSmall: { fontSize: 13, color: colors.border },
-  emptyStateText: {
-    fontSize: 12,
-    color: colors.danger,
-    marginTop: 4,
-    fontWeight: "600",
-  },
+    // Settlement summary
+    summaryCard: { ...base.card, borderRadius: 22, padding: 18 },
+    summaryHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 16,
+      paddingBottom: 12,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.hairline,
+    },
+    summaryTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 0 },
+    infoRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingVertical: 8,
+      gap: 16,
+    },
+    infoLabel: {
+      ...base.rowSubtitle,
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      marginTop: 0,
+    },
+    infoValue: { ...base.rowValue, flex: 1, textAlign: "right" },
+    summaryActions: {
+      flexDirection: "row",
+      gap: 12,
+      marginTop: 16,
+      paddingTop: 14,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.hairline,
+    },
+    actionEditButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      paddingVertical: 12,
+      backgroundColor: c.surfaceHover,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: `${c.mint}55`,
+    },
+    actionEditText: { fontFamily: fonts.bodyBold, fontSize: 13, color: c.mint },
+    actionDeleteButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      paddingVertical: 12,
+      backgroundColor: c.surfaceHover,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: `${c.rose}55`,
+    },
+    actionDeleteText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: c.rose,
+    },
 
-  // Charge preview
-  chargeRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  chargePreview: {
-    backgroundColor: colors.primary + "15",
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  chargePreviewText: { fontSize: 13, fontWeight: "800", color: colors.primary },
+    // Form card
+    formCard: { ...base.card, borderRadius: 22, padding: 18 },
+    formHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginBottom: 6,
+    },
+    formTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 0 },
+    formDescription: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+      lineHeight: 20,
+      marginBottom: 16,
+    },
+    fieldGroup: { marginBottom: 16 },
+    label: { ...base.label, fontSize: 12.5 },
+    input: {
+      borderWidth: 1,
+      borderColor: c.hairline,
+      borderRadius: 16,
+      padding: 13,
+      fontFamily: fonts.body,
+      fontSize: 14,
+      backgroundColor: c.canvasRaised,
+      color: c.textPrimary,
+    },
+    inputError: { borderColor: c.rose, backgroundColor: `${c.rose}14` },
+    textArea: { minHeight: 80, textAlignVertical: "top" },
+    errorText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.rose,
+      marginTop: 4,
+    },
 
-  // Buttons
-  buttonRow: { flexDirection: "row", gap: 10, marginTop: 8 },
-  cancelButton: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 14,
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  cancelButtonText: { color: colors.dark, fontSize: 14, fontWeight: "700" },
-  saveButton: {
-    flex: 2,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    paddingVertical: 14,
-    backgroundColor: colors.primary,
-    borderRadius: 12,
-  },
-  saveButtonDisabled: { opacity: 0.6 },
-  saveButtonText: { color: "#fff", fontSize: 15, fontWeight: "700" },
+    // Settlement-type toggle
+    toggleRow: { flexDirection: "row", gap: 10 },
+    toggleButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: 13,
+      paddingHorizontal: 14,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      borderRadius: 999,
+      backgroundColor: c.surface,
+    },
+    toggleButtonActive: { borderColor: c.mint, backgroundColor: `${c.mint}14` },
+    toggleButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.textSecondary,
+    },
+    toggleButtonTextActive: { color: c.mint },
 
-  // Charge input (read-only)
-  chargeInput: {
-    backgroundColor: colors.light,
-    color: "#999",
-  },
+    // Picker
+    pickerInput: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      borderWidth: 1,
+      borderColor: c.hairline,
+      borderRadius: 16,
+      padding: 13,
+      backgroundColor: c.canvasRaised,
+    },
+    pickerContent: { flex: 1 },
+    pickerValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    pickerCode: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    pickerPlaceholder: {
+      fontFamily: fonts.body,
+      fontSize: 14,
+      color: c.textMuted,
+    },
+    loadingRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      paddingVertical: 12,
+    },
+    loadingTextSmall: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+    },
+    emptyStateText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.rose,
+      marginTop: 4,
+    },
 
-  // Help card
-  helpCard: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 10,
-    backgroundColor: colors.primary + "08",
-    borderRadius: 14,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: colors.primary + "20",
-  },
-  helpText: { flex: 1, fontSize: 12, color: colors.dark, lineHeight: 18 },
+    // Charge preview
+    chargeRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    chargePreview: {
+      backgroundColor: `${c.mint}1F`,
+      paddingHorizontal: 12,
+      paddingVertical: 4,
+      borderRadius: 999,
+    },
+    chargePreviewText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: c.mint,
+    },
 
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "flex-end",
-  },
-  modalContent: {
-    backgroundColor: colors.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: "80%",
-    paddingBottom: 20,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.light,
-  },
-  modalTitle: { fontSize: 18, fontWeight: "800", color: colors.dark },
-  modalSubtitle: { fontSize: 12, color: colors.border, marginTop: 2 },
-  modalCloseButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
+    // Buttons
+    buttonRow: { flexDirection: "row", gap: 10, marginTop: 8 },
+    cancelButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      paddingVertical: 15,
+      backgroundColor: c.surface,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+    },
+    cancelButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    saveButton: {
+      flex: 2,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      paddingVertical: 15,
+      backgroundColor: c.mint,
+      borderRadius: 999,
+    },
+    saveButtonDisabled: { opacity: 0.55 },
+    saveButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 15,
+      color: c.onAccent,
+    },
 
-  // Search
-  searchContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    marginHorizontal: 20,
-    marginTop: 14,
-    marginBottom: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  searchInput: { flex: 1, fontSize: 14, color: colors.dark },
+    // Read-only computed charge
+    chargeInput: { backgroundColor: c.surfaceHover, color: c.textMuted },
 
-  // Modal list
-  modalList: { paddingHorizontal: 20, paddingBottom: 20 },
-  modalItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderRadius: 12,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.light,
-    marginBottom: 6,
-  },
-  modalItemSelected: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primary + "08",
-  },
-  modalItemContent: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    flex: 1,
-  },
-  modalItemIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  modalItemIconSelected: { backgroundColor: colors.primary },
-  modalItemTexts: { flex: 1 },
-  modalItemText: { fontSize: 14, color: colors.dark, fontWeight: "600" },
-  modalItemTextSelected: { color: colors.primary },
-  modalItemCode: { fontSize: 12, color: colors.border, marginTop: 2 },
-  // Verify section in summary card
-  verifySection: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingVertical: 10,
-    paddingHorizontal: 2,
-    marginBottom: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.light,
-  },
-  verifyInfo: { flexDirection: "row", alignItems: "center", gap: 6 },
-  verifyLabel: { fontSize: 13, color: colors.dark, fontWeight: "600" },
-  verifyButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    backgroundColor: colors.primary,
-    borderRadius: 8,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-  },
-  verifyButtonText: { color: "#fff", fontSize: 12, fontWeight: "700" },
-  verifyButtonVerified: { backgroundColor: colors.success },
-  verifyButtonNeutral: { backgroundColor: colors.border },
-  verifyButtonInactive: { backgroundColor: colors.warning },
+    helpCard: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 10,
+      backgroundColor: `${c.sky}12`,
+      borderRadius: 16,
+      padding: 14,
+      borderWidth: 1,
+      borderColor: `${c.sky}33`,
+    },
+    helpText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textSecondary,
+      lineHeight: 18,
+    },
 
-  modalEmpty: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 40,
-    gap: 10,
-  },
-  modalEmptyText: { fontSize: 14, color: colors.border, fontWeight: "600" },
-});
+    // Bank picker modal
+    modalOverlay: {
+      flex: 1,
+      backgroundColor: c.menuBackdrop,
+      justifyContent: "flex-end",
+    },
+    modalContent: {
+      backgroundColor: c.canvasRaised,
+      borderTopLeftRadius: 28,
+      borderTopRightRadius: 28,
+      maxHeight: "80%",
+      paddingBottom: 20,
+      borderTopWidth: 1,
+      borderColor: c.hairline,
+    },
+    modalHeader: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      paddingTop: 20,
+      paddingBottom: 14,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.hairline,
+    },
+    modalTitle: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      color: c.textPrimary,
+    },
+    modalSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    modalCloseButton: {
+      width: 32,
+      height: 32,
+      borderRadius: 999,
+      backgroundColor: c.surfaceHover,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+
+    searchContainer: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginHorizontal: 20,
+      marginTop: 14,
+      marginBottom: 10,
+      paddingHorizontal: 12,
+      paddingVertical: 11,
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    searchInput: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+
+    modalList: { paddingHorizontal: 20, paddingBottom: 20 },
+    modalItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingVertical: 14,
+      paddingHorizontal: 12,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      marginBottom: 6,
+    },
+    modalItemSelected: { borderColor: c.mint, backgroundColor: `${c.mint}14` },
+    modalItemContent: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      flex: 1,
+    },
+    modalItemIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHover,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+    modalItemIconSelected: { backgroundColor: c.mint },
+    modalItemTexts: { flex: 1 },
+    modalItemText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    modalItemTextSelected: { color: c.mint },
+    modalItemCode: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+
+    verifySection: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingVertical: 10,
+      paddingHorizontal: 2,
+      marginBottom: 8,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.hairline,
+    },
+    verifyInfo: { flexDirection: "row", alignItems: "center", gap: 6 },
+    verifyLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+    verifyButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: c.surfaceHover,
+      borderRadius: 999,
+      paddingVertical: 7,
+      paddingHorizontal: 11,
+    },
+    verifyButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 12,
+      color: c.textSecondary,
+    },
+    // Verification is a three-state signal, so each state gets its own tone
+    // rather than sharing one neutral chip.
+    verifyButtonVerified: { backgroundColor: `${c.mint}26` },
+    verifyButtonVerifiedText: { color: c.mint },
+    verifyButtonNeutral: { backgroundColor: c.surfaceHover },
+    verifyButtonInactive: { backgroundColor: `${c.amber}26` },
+    verifyButtonInactiveText: { color: c.amber },
+
+    modalEmpty: {
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 40,
+      gap: 10,
+    },
+    modalEmptyText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textMuted,
+    },
+  });
+};

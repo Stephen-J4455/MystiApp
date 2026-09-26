@@ -5,7 +5,7 @@
     "version": "1.0.4",
     "orientation": "portrait",
     "icon": "./assets/mystiwan.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "splash": {
       "image": "./assets/mystiwan.png",
       "resizeMode": "contain",
@@ -20,7 +20,6 @@
     },
     "android": {
       "icon": "./assets/mystiwan.png",
-      "edgeToEdgeEnabled": true,
       "package": "com.stephenj2.mystiwanebusiness",
       "googleServicesFile": "./google-services.json",
       "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "WAKE_LOCK"]

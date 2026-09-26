@@ -6,14 +6,20 @@ import {
   StyleSheet,
   StatusBar,
   TouchableOpacity,
+  Platform,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import colors from "../components/theme";
+import { ThemedScreen } from "../components/ui";
 
 export default function PrivacyPolicyScreen({ navigation }) {
+  // The floating back button is absolutely positioned, so it must clear the
+  // Android status bar itself. iOS already spaces this, so Android-only.
+  const insets = useSafeAreaInsets();
+  const backTop = Platform.OS === "android" ? insets.top + 10 : 50;
   return (
-    <View style={styles.container}>
+    <ThemedScreen style={styles.container}>
       <StatusBar
         translucent
         backgroundColor="transparent"
@@ -22,7 +28,7 @@ export default function PrivacyPolicyScreen({ navigation }) {
 
       {/* Floating Back Button */}
       <TouchableOpacity
-        style={styles.floatingBackButton}
+        style={[styles.floatingBackButton, { top: backTop }]}
         onPress={() => navigation.goBack()}
       >
         <View style={styles.backButtonCircle}>
@@ -89,7 +95,7 @@ export default function PrivacyPolicyScreen({ navigation }) {
           at: privacy@expressdata.com
         </Text>
       </ScrollView>
-    </View>
+    </ThemedScreen>
   );
 }
 

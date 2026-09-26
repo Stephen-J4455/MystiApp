@@ -13,6 +13,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import colors from "../components/theme";
+import { ThemedScreen } from "../components/ui";
 
 export default function SuperAgentTransactionsScreen({ navigation }) {
   const { showError } = useNotification();
@@ -122,8 +123,9 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
     );
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
+    <ThemedScreen style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
@@ -245,7 +247,8 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           ))}
         </ScrollView>
       )}
-    </SafeAreaView>
+      </SafeAreaView>
+    </ThemedScreen>
   );
 }
 

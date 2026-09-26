@@ -9,14 +9,16 @@ import {
   View,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-
+import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
-import colors from "../components/theme";
+import { fonts } from "../components/theme";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useTheme } from "../contexts/ThemeContext";
 import {
   upsertTierOffer,
   updateSuperAgentOffer,
@@ -121,6 +123,13 @@ export default function SuperAgentOffersScreen({ navigation }) {
   const [creatingOffer, setCreatingOffer] = useState(false);
 
   const { showError, showSuccess, showInfo } = useNotification();
+  const theme = useTheme();
+  const c = theme.c;
+  // Edge-to-edge on Android with no navigator header, so the screen insets
+  // itself. iOS already spaces this header, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const styles = useOfferStyles(c, topInset);
 
   const loadData = useCallback(
     async ({ showSpinner = true } = {}) => {
@@ -520,9 +529,9 @@ export default function SuperAgentOffersScreen({ navigation }) {
               disabled={isSaving || isToggling}
             >
               {isSaving ? (
-                <ActivityIndicator size="small" color="#fff" />
+                <ActivityIndicator size="small" color={c.onAccent} />
               ) : (
-                <Ionicons name="checkmark" size={16} color="#fff" />
+                <Ionicons name="checkmark" size={16} color={c.onAccent} />
               )}
             </TouchableOpacity>
             <TouchableOpacity
@@ -539,7 +548,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
               <Ionicons
                 name={offer.is_active ? "pause" : "play"}
                 size={14}
-                color="#fff"
+                color={c.onAccent}
               />
             </TouchableOpacity>
             <TouchableOpacity
@@ -554,7 +563,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
               <Ionicons
                 name={isConfirmingDelete ? "warning" : "trash-outline"}
                 size={14}
-                color="#fff"
+                color={c.onAccent}
               />
             </TouchableOpacity>
           </View>
@@ -565,23 +574,23 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <ThemedScreen style={styles.safeArea}>
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
+          <ActivityIndicator size="large" color={c.mint} />
           <Text style={styles.loadingText}>Loading offers...</Text>
         </View>
-      </SafeAreaView>
+      </ThemedScreen>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <ThemedScreen style={styles.safeArea}>
       <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
         >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          <Ionicons name="arrow-back" size={24} color={c.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.title}>Offers</Text>
         <TouchableOpacity
@@ -592,7 +601,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
           <Ionicons
             name={refreshing ? "sync" : "sync-outline"}
             size={20}
-            color={refreshing ? colors.border : colors.primary}
+            color={refreshing ? c.textMuted : c.mint}
           />
         </TouchableOpacity>
       </View>
@@ -603,11 +612,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.infoCard}>
-          <Ionicons
-            name="information-circle"
-            size={20}
-            color={colors.primary}
-          />
+          <Ionicons name="information-circle" size={20} color={c.mint} />
           <Text style={styles.infoText}>
             These are the prices your sub-agents pay. New offers start at the
             admin base price for the bundle — change it to set your own margin.
@@ -617,7 +622,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
         {loadError ? (
           <View style={styles.errorCard}>
-            <Ionicons name="warning-outline" size={18} color={colors.danger} />
+            <Ionicons name="warning-outline" size={18} color={c.rose} />
             <Text style={styles.errorText}>{loadError}</Text>
           </View>
         ) : null}
@@ -747,7 +752,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                   );
                 }}
                 placeholder="0.00"
-                placeholderTextColor="#9AA5AF"
+                placeholderTextColor={c.textMuted}
                 keyboardType="decimal-pad"
               />
             </View>
@@ -760,10 +765,14 @@ export default function SuperAgentOffersScreen({ navigation }) {
               disabled={creatingOffer}
             >
               {creatingOffer ? (
-                <ActivityIndicator size="small" color="#fff" />
+                <ActivityIndicator size="small" color={c.onAccent} />
               ) : (
                 <>
-                  <Ionicons name="add-circle-outline" size={18} color="#fff" />
+                  <Ionicons
+                    name="add-circle-outline"
+                    size={18}
+                    color={c.onAccent}
+                  />
                   <Text style={styles.createButtonText}>Save Offer</Text>
                 </>
               )}
@@ -781,11 +790,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
         {offerGroups.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Ionicons
-              name="pricetags-outline"
-              size={40}
-              color={colors.primary}
-            />
+            <Ionicons name="pricetags-outline" size={40} color={c.textMuted} />
             <Text style={styles.emptyTitle}>No offers yet</Text>
             <Text style={styles.emptyText}>
               Create your first offer above, or set prices for every bundle in a
@@ -796,7 +801,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
           offerGroups.map((group) => (
             <View key={`group-${group.title}`} style={styles.groupCard}>
               <View style={styles.groupHeader}>
-                <Ionicons name="layers" size={16} color={colors.primary} />
+                <Ionicons name="layers" size={16} color={c.mintDim} />
                 <Text style={styles.groupTitle}>
                   {group.title} ({group.items.length})
                 </Text>
@@ -806,308 +811,243 @@ export default function SuperAgentOffersScreen({ navigation }) {
           ))
         )}
       </KeyboardAwareScrollView>
-    </SafeAreaView>
+    </ThemedScreen>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.light },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: colors.light,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: colors.dark,
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 12,
-    backgroundColor: colors.white,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  title: {
-    flex: 1,
-    textAlign: "center",
-    fontSize: 20,
-    fontWeight: "800",
-    color: colors.dark,
-  },
-  refreshButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  content: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  infoCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.tint,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-  },
-  infoText: {
-    flex: 1,
-    marginLeft: 10,
-    color: colors.dark,
-    fontSize: 13,
-    lineHeight: 19,
-  },
-  errorCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fdecea",
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-  },
-  errorText: {
-    flex: 1,
-    marginLeft: 10,
-    color: colors.danger,
-    fontSize: 13,
-    fontWeight: "500",
-  },
-  createCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 16,
-  },
-  createTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.primary,
-    marginBottom: 10,
-  },
-  fieldLabel: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: colors.dark,
-    opacity: 0.7,
-    marginBottom: 6,
-  },
-  chipRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 2,
-    marginBottom: 8,
-  },
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginRight: 8,
-  },
-  chipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  chipText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: colors.dark,
-  },
-  chipTextActive: {
-    color: "#fff",
-  },
-  createPriceRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 4,
-  },
-  createButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.primary,
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    borderRadius: 12,
-    marginLeft: 10,
-  },
-  createButtonDisabled: {
-    opacity: 0.6,
-  },
-  createButtonText: {
-    color: "#fff",
-    fontWeight: "700",
-    marginLeft: 6,
-  },
-  basePriceHint: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.65,
-    marginTop: 6,
-  },
-  groupCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 16,
-  },
-  groupHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 12,
-  },
-  groupTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.primary,
-    marginLeft: 8,
-  },
-  offerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    padding: 10,
-    marginBottom: 8,
-  },
-  offerRowInactive: {
-    opacity: 0.65,
-  },
-  offerInfo: {
-    flex: 1,
-    marginRight: 8,
-  },
-  offerTitleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  offerTitle: {
-    flexShrink: 1,
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.dark,
-    marginRight: 6,
-  },
-  networkBadge: {
-    backgroundColor: colors.primary,
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-  },
-  networkBadgeText: {
-    color: "#fff",
-    fontSize: 9,
-    fontWeight: "800",
-  },
-  offerMeta: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.65,
-    marginTop: 3,
-  },
-  offerStatus: {
-    fontSize: 10,
-    color: colors.dark,
-    opacity: 0.5,
-    marginTop: 2,
-  },
-  offerControls: {
-    alignItems: "flex-end",
-  },
-  priceInputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    height: 34,
-    width: 104,
-  },
-  currencyPrefix: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.6,
-    marginRight: 4,
-    fontWeight: "600",
-  },
-  priceInput: {
-    flex: 1,
-    fontSize: 13,
-    color: colors.dark,
-    paddingVertical: 0,
-    fontWeight: "700",
-  },
-  offerActions: {
-    flexDirection: "row",
-    marginTop: 6,
-  },
-  actionChip: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    justifyContent: "center",
-    alignItems: "center",
-    marginLeft: 6,
-  },
-  actionChipSave: {
-    backgroundColor: colors.success,
-  },
-  actionChipPause: {
-    backgroundColor: colors.warning,
-  },
-  actionChipPlay: {
-    backgroundColor: colors.accent,
-  },
-  actionChipDelete: {
-    backgroundColor: colors.border,
-  },
-  actionChipDeleteConfirm: {
-    backgroundColor: colors.danger,
-  },
-  actionChipDisabled: {
-    opacity: 0.6,
-  },
-  emptyCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 24,
-    alignItems: "center",
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.primary,
-    marginTop: 10,
-  },
-  emptyText: {
-    fontSize: 13,
-    color: colors.dark,
-    opacity: 0.7,
-    textAlign: "center",
-    marginTop: 6,
-    lineHeight: 20,
-  },
-});
+// Layered on the shared kit. The per-row action chips are the only genuinely
+// screen-specific part: save is mint, pause/resume are amber/sky, and the
+// destructive chip only goes rose once the user has armed the confirm tap.
+const useOfferStyles = (c, topInset = 0) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    safeArea: { ...base.screen },
+    loadingContainer: { ...base.center },
+    loadingText: { ...base.headerSubtitle, marginTop: 12, fontSize: 15 },
+
+    header: { ...base.header, paddingTop: 18 + topInset, paddingBottom: 12 },
+    backButton: { ...base.backButton, borderRadius: 999 },
+    refreshButton: { ...base.backButton, borderRadius: 999 },
+    title: { ...base.headerTitle, flex: 1, textAlign: "center", fontSize: 20 },
+
+    content: { ...base.body, paddingTop: 20, paddingBottom: 40 },
+
+    infoCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: `${c.mint}14`,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: `${c.mint}2E`,
+      padding: 14,
+      marginBottom: 14,
+    },
+    infoText: {
+      flex: 1,
+      marginLeft: 10,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      lineHeight: 19,
+      color: c.textSecondary,
+    },
+    errorCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: `${c.rose}14`,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: `${c.rose}33`,
+      padding: 14,
+      marginBottom: 14,
+    },
+    errorText: {
+      flex: 1,
+      marginLeft: 10,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.rose,
+    },
+
+    createCard: {
+      ...base.card,
+      borderRadius: 22,
+      padding: 16,
+      marginBottom: 16,
+    },
+    createTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 10 },
+    fieldLabel: { ...base.label, marginBottom: 6 },
+    chipRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 2,
+      marginBottom: 8,
+    },
+    chip: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: c.canvasRaised,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      marginRight: 8,
+    },
+    chipActive: { backgroundColor: c.mint, borderColor: c.mint },
+    chipText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.textSecondary,
+    },
+    chipTextActive: { color: c.onAccent },
+
+    createPriceRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginTop: 4,
+    },
+    createButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.mint,
+      paddingHorizontal: 16,
+      paddingVertical: 13,
+      borderRadius: 999,
+      marginLeft: 10,
+    },
+    createButtonDisabled: { opacity: 0.55 },
+    createButtonText: {
+      fontFamily: fonts.bodyBold,
+      color: c.onAccent,
+      marginLeft: 6,
+    },
+    basePriceHint: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 6,
+    },
+
+    groupCard: {
+      ...base.card,
+      borderRadius: 22,
+      padding: 16,
+      marginBottom: 16,
+    },
+    groupHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginBottom: 12,
+    },
+    groupTitle: {
+      fontFamily: fonts.display,
+      fontSize: 16,
+      color: c.textPrimary,
+      marginLeft: 8,
+    },
+
+    offerRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.canvasRaised,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 10,
+      marginBottom: 8,
+    },
+    // Inactive rows stay legible rather than being hidden - agents need to
+    // see that an offer exists but is switched off.
+    offerRowInactive: { opacity: 0.6 },
+    offerInfo: { flex: 1, marginRight: 8 },
+    offerTitleRow: { flexDirection: "row", alignItems: "center" },
+    offerTitle: {
+      flexShrink: 1,
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+      marginRight: 6,
+    },
+    networkBadge: {
+      backgroundColor: `${c.mint}26`,
+      borderRadius: 6,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+    },
+    networkBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      color: c.mint,
+    },
+    offerMeta: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 3,
+    },
+    offerStatus: {
+      fontFamily: fonts.body,
+      fontSize: 10,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    offerControls: { alignItems: "flex-end" },
+    priceInputWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      borderRadius: 12,
+      paddingHorizontal: 8,
+      height: 36,
+      width: 104,
+    },
+    currencyPrefix: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textMuted,
+      marginRight: 4,
+    },
+    priceInput: {
+      flex: 1,
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+      paddingVertical: 0,
+    },
+    offerActions: { flexDirection: "row", marginTop: 6 },
+    actionChip: {
+      width: 30,
+      height: 30,
+      borderRadius: 999,
+      justifyContent: "center",
+      alignItems: "center",
+      marginLeft: 6,
+    },
+    actionChipSave: { backgroundColor: c.mint },
+    actionChipPause: { backgroundColor: c.amber },
+    actionChipPlay: { backgroundColor: c.sky },
+    // Idle delete is neutral so it does not shout; it only turns rose after
+    // the first tap arms the confirm.
+    actionChipDelete: { backgroundColor: c.surfaceHover },
+    actionChipDeleteConfirm: { backgroundColor: c.rose },
+    actionChipDisabled: { opacity: 0.55 },
+
+    emptyCard: {
+      ...base.card,
+      borderRadius: 22,
+      padding: 24,
+      alignItems: "center",
+    },
+    emptyTitle: { ...base.rowTitle, fontSize: 16, marginTop: 10 },
+    emptyText: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+      textAlign: "center",
+      marginTop: 6,
+      lineHeight: 20,
+    },
+  });
+};

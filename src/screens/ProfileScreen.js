@@ -1,25 +1,68 @@
-import React, { useState, useEffect, useRef } from "react";
+﻿import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View,
   Text,
-  TextInput,
   TouchableOpacity,
   StyleSheet,
   Switch,
   Animated,
   StatusBar,
+  Platform,
   Linking,
+  ScrollView,
 } from "react-native";
-import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
+import {
+  SafeAreaView,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect } from "@react-navigation/native";
 import { supabase } from "../lib/supabase";
+import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { useNotification } from "../contexts/NotificationContext";
-import colors from "../components/theme";
+import { useTheme } from "../contexts/ThemeContext";
+import {
+  useThemedStyles,
+  Field,
+  PrimaryButton,
+  SecondaryButton,
+  RowIcon,
+} from "../components/ui";
+import ThemePicker from "../components/ThemePicker";
 import { useAppVersion } from "../hooks/useAppVersion";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
+import { fonts } from "../components/theme";
+
+const ADMIN_WHATSAPP = "233532973455";
+
+const initialsOf = (name) => {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return "?";
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0].toUpperCase())
+    .join("");
+};
 
 export default function ProfileScreen({ navigation }) {
+  const { c, isDark } = useTheme();
+  // The shared kit is consumed by Field/PrimaryButton/SecondaryButton, which
+  // read it from context themselves; the screen keeps its own scheme-scoped
+  // stylesheet for layout.
+  useThemedStyles();
+  // The app is edge-to-edge on Android and this screen has no navigator
+  // header, so it must inset itself below the status bar. iOS already spaces
+  // its header, so the inset is only consumed there.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const s = useSettingsStyles(c, topInset);
+  // Clears the floating bottom dock so the sign-out button stays reachable.
+  const dockPadding = useDockBottomPadding(12);
+
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
@@ -33,6 +76,7 @@ export default function ProfileScreen({ navigation }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [passwordError, setPasswordError] = useState("");
   const [recentTransactions, setRecentTransactions] = useState([]);
@@ -79,7 +123,7 @@ export default function ProfileScreen({ navigation }) {
         } = await supabase.auth.getUser();
         if (user && isAgent) {
           agentOrdersSubscription = supabase
-            .channel("profile_agent_orders_realtime")
+            .channel(uniqueTopic("profile_agent_orders_realtime"))
             .on(
               "postgres_changes",
               {
@@ -108,9 +152,7 @@ export default function ProfileScreen({ navigation }) {
     }
 
     return () => {
-      if (agentOrdersSubscription) {
-        supabase.removeChannel(agentOrdersSubscription);
-      }
+      removeChannelSafe(agentOrdersSubscription);
     };
   }, [isAgent]);
 
@@ -278,6 +320,13 @@ export default function ProfileScreen({ navigation }) {
     setNewPassword("");
     setConfirmPassword("");
     setPasswordError("");
+    setShowNewPassword(false);
+  };
+
+  const cancelProfileEdit = () => {
+    setIsEditing(false);
+    setFullName(user?.user_metadata?.full_name || "");
+    setPhone(user?.user_metadata?.phone || "");
   };
 
   const handleChangePassword = async () => {
@@ -358,623 +407,760 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
+  const openWhatsApp = () => {
+    const message = "Hi Admin, I need help with the Mystiwan E-Business app.";
+    Linking.openURL(
+      `https://wa.me/${ADMIN_WHATSAPP}?text=${encodeURIComponent(message)}`,
+    ).catch((error) => console.warn("Could not open WhatsApp:", error));
+  };
+
   if (!user) {
     return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.skeletonContainer}>
+      <View style={s.screen}>
+        <StatusBar
+          translucent
+          backgroundColor="transparent"
+          barStyle={isDark ? "light-content" : "dark-content"}
+        />
+        <SafeAreaView style={s.skeletonContainer} edges={["top"]}>
           <Animated.View
-            style={[styles.skeletonAvatar, { opacity: profileSkeletonOpacity }]}
+            style={[s.skeletonHero, { opacity: profileSkeletonOpacity }]}
           />
-          <Animated.View
-            style={[styles.skeletonCard, { opacity: profileSkeletonOpacity }]}
-          >
-            <View style={styles.skeletonLineLarge} />
-            <View style={styles.skeletonLine} />
-            <View style={styles.skeletonLineShort} />
-            <View style={styles.skeletonLine} />
-            <View style={styles.skeletonLineShort} />
-          </Animated.View>
-          <Animated.View
-            style={[styles.skeletonCard, { opacity: profileSkeletonOpacity }]}
-          >
-            <View style={styles.skeletonLineLarge} />
-            <View style={styles.skeletonRow}>
-              <View style={styles.skeletonToggle} />
-              <View style={styles.skeletonToggle} />
-            </View>
-          </Animated.View>
-        </View>
-      </SafeAreaView>
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Animated.View
+              key={i}
+              style={[s.skeletonCard, { opacity: profileSkeletonOpacity }]}
+            >
+              <View style={s.skeletonLineWide} />
+              <View style={s.skeletonLineNarrow} />
+            </Animated.View>
+          ))}
+        </SafeAreaView>
+      </View>
     );
   }
 
+  const displayName = fullName || email.split("@")[0] || "User";
+
+  const accountRows = [
+    {
+      icon: "mail-outline",
+      tint: c.mint,
+      title: "Email address",
+      value: email,
+    },
+    {
+      icon: "call-outline",
+      tint: c.sky,
+      title: "Phone number",
+      value: phone || "Not set",
+      empty: !phone,
+    },
+  ];
+
+  const aboutRows = [
+    {
+      icon: "document-text-outline",
+      tint: c.sky,
+      title: "Privacy Policy",
+      onPress: () => navigation.navigate("PrivacyPolicy"),
+    },
+    {
+      icon: "logo-whatsapp",
+      tint: "#25D366",
+      title: "Contact Admin",
+      subtitle: "Chat with us on WhatsApp",
+      onPress: openWhatsApp,
+    },
+  ];
+
   return (
-    <View style={styles.container}>
+    <View style={s.screen}>
       <StatusBar
         translucent
         backgroundColor="transparent"
-        barStyle="dark-content"
+        barStyle={isDark ? "light-content" : "dark-content"}
       />
 
-      {/* Floating Back Button */}
-      <TouchableOpacity
-        style={styles.floatingBackButton}
-        onPress={() => navigation.goBack()}
-      >
-        <View style={styles.backButtonCircle}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </View>
-      </TouchableOpacity>
-
-      <KeyboardAwareScrollView
-        contentContainerStyle={styles.scrollContent}
+      <ScrollView
+        contentContainerStyle={[
+          s.scrollContent,
+          { paddingBottom: dockPadding },
+        ]}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.content}>
-          <View style={styles.profileImageContainer}>
-            <View style={styles.avatarRing}>
-              <Ionicons
-                name="person-circle"
-                size={100}
-                color={colors.primary}
-              />
-            </View>
+        <View style={s.header}>
+          <TouchableOpacity
+            style={s.backButton}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.7}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
+            <Ionicons name="chevron-back" size={20} color={c.textPrimary} />
+          </TouchableOpacity>
+          <View style={s.headerTextWrap}>
+            <Text style={s.headerTitle}>Settings</Text>
+            <Text style={s.headerSubtitle} numberOfLines={1}>
+              Account, security and app preferences
+            </Text>
           </View>
+        </View>
 
-          <View style={styles.infoSection}>
-            <Text style={styles.sectionTitle}>Personal Information</Text>
+        {/* Identity hero */}
+        <View style={s.hero}>
+          <LinearGradient
+            colors={[c.heroFrom, c.heroTo]}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={s.heroGradient}
+          >
+            <View style={s.heroTop}>
+              <View style={s.avatar}>
+                <Text style={s.avatarText}>{initialsOf(displayName)}</Text>
+              </View>
+              <View style={s.heroIdentity}>
+                <Text style={s.heroName} numberOfLines={1}>
+                  {displayName}
+                </Text>
+                <Text style={s.heroEmail} numberOfLines={1}>
+                  {email}
+                </Text>
+                {isAgent ? (
+                  <View style={s.heroBadge}>
+                    <Ionicons name="shield-checkmark" size={12} color="#fff" />
+                    <Text style={s.heroBadgeText}>AGENT</Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
 
-            <View style={styles.inputContainer}>
-              <Text style={styles.label}>Full Name</Text>
-              {isEditing ? (
-                <TextInput
-                  style={styles.input}
-                  value={fullName}
-                  onChangeText={setFullName}
-                  placeholder="Enter your full name"
-                  placeholderTextColor={colors.secondary}
+            {isAgent ? (
+              <View style={s.heroStats}>
+                <HeroStat
+                  label="Orders"
+                  value={String(agentStats.totalOrders)}
                 />
-              ) : (
-                <View style={styles.nameContainer}>
-                  <Text style={styles.valueText}>{fullName || "Not set"}</Text>
-                  {isAgent && (
-                    <View style={styles.agentBadge}>
-                      <Ionicons
-                        name="shield-checkmark"
-                        size={14}
-                        color="#fff"
-                      />
-                      <Text style={styles.agentBadgeText}>AGENT</Text>
-                    </View>
-                  )}
-                </View>
-              )}
-            </View>
-
-            <View style={styles.inputContainer}>
-              <Text style={styles.label}>Phone Number</Text>
-              {isEditing ? (
-                <TextInput
-                  style={styles.input}
-                  value={phone}
-                  onChangeText={setPhone}
-                  placeholder="Enter your phone number (e.g., 0532973455)"
-                  placeholderTextColor={colors.secondary}
-                  keyboardType="phone-pad"
+                <View style={s.heroStatDivider} />
+                <HeroStat
+                  label="Pending"
+                  value={String(agentStats.pendingOrders)}
                 />
-              ) : (
-                <Text style={styles.valueText}>{phone || "Not set"}</Text>
-              )}
-            </View>
+                <View style={s.heroStatDivider} />
+                <HeroStat
+                  label="Completed"
+                  value={String(agentStats.completedOrders)}
+                />
+              </View>
+            ) : null}
+          </LinearGradient>
+        </View>
 
-            <View style={styles.inputContainer}>
-              <Text style={styles.label}>Email</Text>
-              <Text style={styles.valueText}>{email}</Text>
-              <Text style={styles.noteText}>* Email cannot be changed</Text>
-            </View>
-
-            <View style={styles.buttonContainer}>
-              {isEditing ? (
-                <View style={styles.editButtons}>
-                  <TouchableOpacity
-                    style={[styles.button, styles.cancelButton]}
-                    onPress={() => {
-                      setIsEditing(false);
-                      setFullName(user.user_metadata?.full_name || "");
-                      setPhone(user.user_metadata?.phone || "");
-                    }}
-                  >
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.button, styles.saveButton]}
-                    onPress={handleUpdateProfile}
-                    disabled={loading}
-                  >
-                    <Text style={styles.buttonText}>
-                      {loading ? "Saving..." : "Save"}
+        {/* Account */}
+        <View style={s.section}>
+          <Text style={s.sectionEyebrow}>Account</Text>
+          <View style={s.card}>
+            {accountRows.map((row, i) => (
+              <View key={row.title}>
+                {i > 0 ? <View style={s.divider} /> : null}
+                <View style={s.row}>
+                  <RowIcon icon={row.icon} tint={row.tint} />
+                  <View style={s.rowBody}>
+                    <Text style={s.rowTitle}>{row.title}</Text>
+                    <Text
+                      style={[
+                        s.rowValue,
+                        row.empty ? { color: c.textMuted } : null,
+                      ]}
+                      numberOfLines={1}
+                    >
+                      {row.value}
                     </Text>
-                  </TouchableOpacity>
+                  </View>
+                  {i === 0 ? (
+                    <Ionicons
+                      name="lock-closed"
+                      size={14}
+                      color={c.textMuted}
+                    />
+                  ) : null}
                 </View>
-              ) : (
-                <TouchableOpacity
-                  style={styles.button}
-                  onPress={() => setIsEditing(true)}
-                >
-                  <Text style={styles.buttonText}>Edit Profile</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+              </View>
+            ))}
           </View>
 
-          <View style={styles.preferenceSection}>
-            <Text style={styles.sectionTitle}>Preferences</Text>
-            <View style={styles.preferenceItem}>
-              <Text style={styles.preferenceLabel}>Enable Notifications</Text>
+          {isEditing ? (
+            <View style={s.editForm}>
+              <Text style={s.formTitle}>Edit your details</Text>
+              <Field
+                label="Full name"
+                icon="person-outline"
+                value={fullName}
+                onChangeText={setFullName}
+                placeholder="Enter your full name"
+                autoCapitalize="words"
+              />
+              <Field
+                label="Phone number"
+                icon="call-outline"
+                value={phone}
+                onChangeText={setPhone}
+                placeholder="e.g. 0532973455"
+                keyboardType="phone-pad"
+              />
+              <View style={s.editActions}>
+                <SecondaryButton
+                  title="Cancel"
+                  onPress={cancelProfileEdit}
+                  style={s.flexAction}
+                />
+                <PrimaryButton
+                  title="Save changes"
+                  onPress={handleUpdateProfile}
+                  loading={loading}
+                  style={s.flexAction}
+                />
+              </View>
+            </View>
+          ) : (
+            <SecondaryButton
+              title="Edit profile"
+              icon="create-outline"
+              onPress={() => setIsEditing(true)}
+              style={s.editCta}
+            />
+          )}
+        </View>
+
+        {/* Preferences */}
+        <View style={s.section}>
+          <Text style={s.sectionEyebrow}>Preferences</Text>
+          <View style={s.card}>
+            <View style={s.row}>
+              <RowIcon icon="notifications-outline" tint={c.amber} />
+              <View style={s.rowBody}>
+                <Text style={s.rowTitle}>Push notifications</Text>
+                <Text style={s.rowSubtitle}>
+                  Order updates and account alerts
+                </Text>
+              </View>
               <Switch
                 value={notificationsEnabled}
                 onValueChange={(value) => {
                   setNotificationsEnabled(value);
                   handleUpdatePreferences(value);
                 }}
+                trackColor={{ false: c.surfaceSunken, true: `${c.mint}80` }}
+                thumbColor={notificationsEnabled ? c.mint : c.textMuted}
+                ios_backgroundColor={c.surfaceSunken}
               />
             </View>
-          </View>
 
-          <View style={styles.preferenceSection}>
-            <Text style={styles.sectionTitle}>Security</Text>
-            {!showPasswordSection ? (
+            <View style={s.divider} />
+
+            {/* ThemePicker renders its own "Appearance" label and hint. */}
+            <View style={s.themeBlock}>
+              <ThemePicker />
+            </View>
+          </View>
+        </View>
+
+        {/* Security */}
+        <View style={s.section}>
+          <Text style={s.sectionEyebrow}>Security</Text>
+          {!showPasswordSection ? (
+            <View style={s.cardDivided}>
               <TouchableOpacity
-                style={styles.appInfoItem}
+                style={s.row}
+                activeOpacity={0.75}
                 onPress={() => {
                   resetPasswordForm();
                   setShowPasswordSection(true);
                 }}
+                accessibilityRole="button"
               >
-                <Ionicons
-                  name="lock-closed-outline"
-                  size={20}
-                  color={colors.primary}
-                />
-                <Text style={styles.appInfoText}>Change password</Text>
+                <RowIcon icon="lock-closed-outline" tint={c.rose} />
+                <View style={s.rowBody}>
+                  <Text style={s.rowTitle}>Change password</Text>
+                  <Text style={s.rowSubtitle}>Use at least 8 characters</Text>
+                </View>
                 <Ionicons
                   name="chevron-forward"
                   size={16}
-                  color={colors.secondary}
+                  color={c.textMuted}
                 />
               </TouchableOpacity>
-            ) : (
-              <View style={styles.passwordForm}>
-                <View style={styles.inputContainer}>
-                  <Text style={styles.label}>Current password</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={currentPassword}
-                    onChangeText={setCurrentPassword}
-                    placeholder="Enter your current password"
-                    placeholderTextColor={colors.secondary}
-                    secureTextEntry
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    textContentType="password"
-                  />
-                </View>
-                <View style={styles.inputContainer}>
-                  <Text style={styles.label}>New password</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={newPassword}
-                    onChangeText={setNewPassword}
-                    placeholder="At least 8 characters"
-                    placeholderTextColor={colors.secondary}
-                    secureTextEntry
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    textContentType="newPassword"
-                  />
-                </View>
-                <View style={styles.inputContainer}>
-                  <Text style={styles.label}>Confirm new password</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={confirmPassword}
-                    onChangeText={setConfirmPassword}
-                    placeholder="Re-enter the new password"
-                    placeholderTextColor={colors.secondary}
-                    secureTextEntry
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    textContentType="newPassword"
-                  />
-                </View>
-
-                {passwordError ? (
-                  <Text style={styles.passwordError}>{passwordError}</Text>
-                ) : null}
-
-                <View style={styles.editButtons}>
-                  <TouchableOpacity
-                    style={[styles.button, styles.cancelButton]}
-                    onPress={() => {
-                      resetPasswordForm();
-                      setShowPasswordSection(false);
-                    }}
-                    disabled={passwordSaving}
-                  >
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.button, styles.saveButton]}
-                    onPress={handleChangePassword}
-                    disabled={passwordSaving}
-                  >
-                    <Text style={styles.buttonText}>
-                      {passwordSaving ? "Saving..." : "Update"}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
+            </View>
+          ) : (
+            <View style={s.card}>
+              <Text style={s.formTitle}>Set a new password</Text>
+              <View style={s.formGap}>
+                <Field
+                  label="Current password"
+                  icon="key-outline"
+                  value={currentPassword}
+                  onChangeText={setCurrentPassword}
+                  placeholder="Enter your current password"
+                  secureTextEntry
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  textContentType="password"
+                />
+                <Field
+                  label="New password"
+                  icon="key-outline"
+                  value={newPassword}
+                  onChangeText={setNewPassword}
+                  placeholder="At least 8 characters"
+                  secureTextEntry={!showNewPassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  textContentType="newPassword"
+                  affix={showNewPassword ? "eye-off-outline" : "eye-outline"}
+                  onAffixPress={() => setShowNewPassword((v) => !v)}
+                />
+                <Field
+                  label="Confirm new password"
+                  icon="key-outline"
+                  value={confirmPassword}
+                  onChangeText={setConfirmPassword}
+                  placeholder="Re-enter the new password"
+                  secureTextEntry={!showNewPassword}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  textContentType="newPassword"
+                  error={passwordError || undefined}
+                />
               </View>
-            )}
-          </View>
+              <View style={s.editActions}>
+                <SecondaryButton
+                  title="Cancel"
+                  onPress={() => {
+                    resetPasswordForm();
+                    setShowPasswordSection(false);
+                  }}
+                  style={s.flexAction}
+                />
+                <PrimaryButton
+                  title="Update"
+                  onPress={handleChangePassword}
+                  loading={passwordSaving}
+                  style={s.flexAction}
+                />
+              </View>
+            </View>
+          )}
+        </View>
 
-          <View style={styles.appInfoSection}>
-            <TouchableOpacity
-              style={styles.appInfoItem}
-              onPress={() => navigation.navigate("PrivacyPolicy")}
-            >
-              <Ionicons
-                name="document-text-outline"
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.appInfoText}>Privacy Policy</Text>
-              <Ionicons
-                name="chevron-forward"
-                size={16}
-                color={colors.secondary}
-              />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.appInfoItem}
-              onPress={() => {
-                const message =
-                  "Hi Admin, I need help with the Mystiwan E-Business app.";
-                const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
-                  message,
-                )}`;
-                Linking.openURL(whatsappUrl);
-              }}
-            >
-              <Ionicons name="logo-whatsapp" size={20} color="#25D366" />
-              <Text style={styles.appInfoText}>Contact Admin</Text>
-              <Ionicons
-                name="chevron-forward"
-                size={16}
-                color={colors.secondary}
-              />
-            </TouchableOpacity>
-            <View style={styles.appInfoItem}>
-              <Ionicons
-                name="information-circle-outline"
-                size={20}
-                color={colors.primary}
-              />
-              <Text style={styles.appInfoText}>App Version</Text>
-              <Text style={styles.appVersionText}>{appVersion}</Text>
+        {/* About */}
+        <View style={s.section}>
+          <Text style={s.sectionEyebrow}>About</Text>
+          <View style={s.cardDivided}>
+            {aboutRows.map((row, i) => (
+              <View key={row.title}>
+                {i > 0 ? <View style={s.divider} /> : null}
+                <TouchableOpacity
+                  style={s.row}
+                  activeOpacity={0.75}
+                  onPress={row.onPress}
+                  accessibilityRole="button"
+                >
+                  <RowIcon icon={row.icon} tint={row.tint} />
+                  <View style={s.rowBody}>
+                    <Text style={s.rowTitle}>{row.title}</Text>
+                    {row.subtitle ? (
+                      <Text style={s.rowSubtitle}>{row.subtitle}</Text>
+                    ) : null}
+                  </View>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={16}
+                    color={c.textMuted}
+                  />
+                </TouchableOpacity>
+              </View>
+            ))}
+
+            <View style={s.divider} />
+
+            <View style={s.row}>
+              <RowIcon icon="information-circle-outline" tint={c.mintDim} />
+              <View style={s.rowBody}>
+                <Text style={s.rowTitle}>App version</Text>
+                <Text style={s.rowSubtitle}>Mystiwan E-Business</Text>
+              </View>
+              <Text style={s.versionValue}>{appVersion}</Text>
             </View>
           </View>
-
-          <View style={styles.signOutSection}>
-            <TouchableOpacity
-              style={styles.signOutButton}
-              onPress={handleSignOut}
-            >
-              <Ionicons name="log-out-outline" size={20} color="#e74c3c" />
-              <Text style={styles.signOutText}>Sign Out</Text>
-            </TouchableOpacity>
-          </View>
         </View>
-      </KeyboardAwareScrollView>
+
+        {/* Sign out */}
+        <View style={s.signOutWrap}>
+          <TouchableOpacity
+            style={s.signOutButton}
+            onPress={handleSignOut}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+          >
+            <Ionicons name="log-out-outline" size={18} color={c.rose} />
+            <Text style={s.signOutText}>Sign out</Text>
+          </TouchableOpacity>
+          <Text style={s.signOutHint}>
+            You will need to sign in again to access your account.
+          </Text>
+        </View>
+      </ScrollView>
     </View>
   );
 }
 
+function HeroStat({ label, value }) {
+  return (
+    <View style={styles.heroStat}>
+      <Text style={styles.heroStatValue} numberOfLines={1}>
+        {value}
+      </Text>
+      <Text style={styles.heroStatLabel} numberOfLines={1}>
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+// Cross-platform elevation. Mirrors HomeScreen: `boxShadow` for web (where
+// `shadow*` flattens), native props elsewhere, and the tone comes from the
+// palette so a black shadow never sits on a dark canvas.
+const shadow = (elevation, shadowOpacity = 0.18, tone = "#000000") =>
+  Platform.select({
+    ios: {
+      shadowColor: tone,
+      shadowOffset: { width: 0, height: elevation },
+      shadowOpacity,
+      shadowRadius: elevation * 1.6,
+    },
+    android: { elevation },
+    default: {
+      boxShadow: `${tone}${Math.round(shadowOpacity * 255)
+        .toString(16)
+        .padStart(2, "0")} 0px ${elevation}px ${elevation * 1.8}px`,
+    },
+  });
+
+const useSettingsStyles = (c, topInset) =>
+  useMemo(() => buildStyles(c, topInset), [c, topInset]);
+
+// One stylesheet per colour scheme, rebuilt only when the scheme flips. Every
+// colour is a palette token, so the page has no light-only code path.
+// `topInset` is the Android status-bar height: the app is edge-to-edge there
+// (mandatory on Android 16), and this screen draws its own header rather than
+// using a navigator header, so it has to inset itself.
+const buildStyles = (c, topInset = 0) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: c.canvas,
+    },
+    scrollContent: {
+      paddingHorizontal: 20,
+      paddingBottom: 40,
+    },
+
+    /* ---------- Header ---------- */
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 14,
+      paddingTop: 8 + topInset,
+      paddingBottom: 18,
+    },
+    backButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    headerTextWrap: {
+      flex: 1,
+    },
+    headerTitle: {
+      fontFamily: fonts.display,
+      fontSize: 21,
+      color: c.textPrimary,
+    },
+    headerSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+
+    /* ---------- Identity hero ---------- */
+    hero: {
+      borderRadius: 26,
+      overflow: "hidden",
+      ...shadow(6, 0.2, c.shadow),
+    },
+    heroGradient: {
+      padding: 20,
+      gap: 18,
+    },
+    heroTop: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 14,
+    },
+    avatar: {
+      width: 62,
+      height: 62,
+      borderRadius: 21,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: "rgba(255, 255, 255, 0.22)",
+      borderWidth: 1,
+      borderColor: "rgba(255, 255, 255, 0.32)",
+    },
+    avatarText: {
+      fontFamily: fonts.displayBold,
+      fontSize: 24,
+      color: "#FFFFFF",
+      letterSpacing: 0.5,
+    },
+    heroIdentity: {
+      flex: 1,
+      alignItems: "flex-start",
+    },
+    heroName: {
+      fontFamily: fonts.display,
+      fontSize: 20,
+      color: c.heroText,
+    },
+    heroEmail: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.heroTextDim,
+      marginTop: 2,
+    },
+    heroBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      backgroundColor: "rgba(0, 0, 0, 0.30)",
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      borderRadius: 999,
+      marginTop: 8,
+    },
+    heroBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 10,
+      color: "#FFFFFF",
+      letterSpacing: 1,
+    },
+    heroStats: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: "rgba(0, 0, 0, 0.20)",
+      borderRadius: 18,
+      paddingVertical: 12,
+    },
+    heroStatDivider: {
+      width: StyleSheet.hairlineWidth,
+      height: 26,
+      backgroundColor: "rgba(255, 255, 255, 0.24)",
+    },
+
+    /* ---------- Sections ---------- */
+    section: {
+      marginTop: 26,
+    },
+    sectionEyebrow: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 10,
+      color: c.mintDim,
+      letterSpacing: 1.4,
+      textTransform: "uppercase",
+      marginBottom: 10,
+      marginLeft: 4,
+    },
+    card: {
+      backgroundColor: c.surface,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 6,
+      ...shadow(4, 0.16, c.shadow),
+    },
+    cardDivided: {
+      backgroundColor: c.surface,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      overflow: "hidden",
+      ...shadow(4, 0.16, c.shadow),
+    },
+
+    /* ---------- Rows ---------- */
+    row: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      paddingVertical: 13,
+      paddingHorizontal: 12,
+    },
+    rowBody: {
+      flex: 1,
+    },
+    rowTitle: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14.5,
+      color: c.textPrimary,
+    },
+    rowValue: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textSecondary,
+      marginTop: 2,
+    },
+    rowSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    divider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: c.hairline,
+      marginLeft: 60,
+    },
+    versionValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13.5,
+      color: c.textSecondary,
+    },
+
+    /* ---------- Forms ---------- */
+    editForm: {
+      marginTop: 12,
+      backgroundColor: c.surface,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 18,
+      gap: 14,
+      ...shadow(4, 0.16, c.shadow),
+    },
+    editCta: {
+      marginTop: 12,
+    },
+    formTitle: {
+      fontFamily: fonts.display,
+      fontSize: 17,
+      color: c.textPrimary,
+    },
+    formGap: {
+      gap: 14,
+    },
+    editActions: {
+      flexDirection: "row",
+      gap: 12,
+    },
+    flexAction: {
+      flex: 1,
+    },
+    themeBlock: {
+      paddingHorizontal: 12,
+      paddingTop: 14,
+      paddingBottom: 16,
+    },
+
+    /* ---------- Sign out ---------- */
+    signOutWrap: {
+      marginTop: 28,
+      gap: 10,
+    },
+    signOutButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 9,
+      height: 52,
+      borderRadius: 999,
+      backgroundColor: `${c.rose}14`,
+      borderWidth: 1,
+      borderColor: `${c.rose}40`,
+    },
+    signOutText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14.5,
+      color: c.rose,
+    },
+    signOutHint: {
+      fontFamily: fonts.body,
+      fontSize: 11.5,
+      color: c.textMuted,
+      textAlign: "center",
+    },
+
+    /* ---------- Skeleton ---------- */
+    // Wrapped in a SafeAreaView with edges={["top"]}, so the status-bar inset
+    // is already applied here - unlike the real header, which has to inset
+    // itself. Only the resting gap below the bar belongs in the style.
+    skeletonContainer: {
+      flex: 1,
+      paddingHorizontal: 20,
+      paddingTop: 8,
+    },
+    skeletonHero: {
+      height: 150,
+      borderRadius: 26,
+      backgroundColor: c.skeleton,
+      marginBottom: 26,
+    },
+    skeletonCard: {
+      height: 84,
+      borderRadius: 22,
+      backgroundColor: c.skeleton,
+      marginBottom: 16,
+      padding: 20,
+      justifyContent: "center",
+      gap: 10,
+    },
+    skeletonLineWide: {
+      height: 13,
+      borderRadius: 7,
+      backgroundColor: c.surfaceHover,
+      width: "55%",
+    },
+    skeletonLineNarrow: {
+      height: 11,
+      borderRadius: 6,
+      backgroundColor: c.surfaceHover,
+      width: "35%",
+    },
+  });
+
+// Hero stat typography always sits on the gradient, which is light-on-dark in
+// both schemes, so these are intentionally scheme-independent.
 const styles = StyleSheet.create({
-  container: {
+  heroStat: {
     flex: 1,
-    backgroundColor: colors.white,
-  },
-  skeletonContainer: {
-    flex: 1,
-    padding: 20,
-    paddingTop: 40,
-  },
-  skeletonAvatar: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    backgroundColor: colors.border,
-    alignSelf: "center",
-    marginBottom: 30,
-  },
-  skeletonCard: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
-  },
-  skeletonLineLarge: {
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: colors.border,
-    width: "60%",
-    marginBottom: 16,
-  },
-  skeletonLine: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "85%",
-    marginBottom: 12,
-  },
-  skeletonLineShort: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "65%",
-    marginBottom: 12,
-  },
-  skeletonRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginTop: 6,
-  },
-  skeletonToggle: {
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: colors.border,
-    width: "45%",
-  },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 20,
-    zIndex: 10,
-  },
-  backButtonCircle: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: "rgba(255, 255, 255, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  scrollContent: {
-    paddingBottom: 40,
-  },
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
     alignItems: "center",
   },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
+  heroStatValue: {
+    fontFamily: fonts.displayBold,
+    fontSize: 19,
+    color: "#FFFFFF",
   },
-  content: {
-    padding: 20,
-  },
-  profileImageContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 30,
-  },
-  avatarRing: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    borderWidth: 2,
-    borderColor: colors.primary,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 3,
-  },
-  infoSection: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-    marginBottom: 20,
-  },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 13,
-    fontWeight: "600",
-    color: colors.dark,
-    opacity: 0.6,
-    marginBottom: 8,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    padding: 14,
-    fontSize: 16,
-    color: colors.dark,
-    backgroundColor: colors.light,
-  },
-  valueText: {
-    fontSize: 16,
-    color: colors.dark,
-    fontWeight: "500",
-    paddingVertical: 4,
-  },
-  nameContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  agentBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.primary,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
-  },
-  agentBadgeText: {
-    color: colors.white,
-    fontSize: 11,
-    fontWeight: "bold",
-    marginLeft: 4,
-  },
-  noteText: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.4,
-    marginTop: 4,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    paddingVertical: 16,
-    borderRadius: 16,
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-  },
-  buttonText: {
-    color: colors.white,
-    fontSize: 16,
-    fontWeight: "bold",
-  },
-  editButtons: {
-    flexDirection: "row",
-    gap: 12,
-  },
-  cancelButton: {
-    backgroundColor: colors.light,
-    flex: 1,
-    elevation: 0,
-  },
-  saveButton: {
-    flex: 1,
-  },
-  cancelButtonText: {
-    color: colors.primary,
-    fontWeight: "600",
-  },
-  preferenceSection: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 24,
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  passwordForm: {
-    marginTop: 16,
-  },
-  passwordError: {
-    color: "#b42318",
-    fontSize: 12,
-    fontWeight: "600",
-    marginBottom: 14,
-  },
-  preferenceItem: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  preferenceLabel: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: colors.dark,
-  },
-  appInfoSection: {
-    backgroundColor: colors.white,
-    borderRadius: 24,
-    padding: 12,
-    marginBottom: 20,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  appInfoItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 16,
-    gap: 12,
-  },
-  appInfoText: {
-    flex: 1,
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.dark,
-  },
-  appVersionText: {
-    fontSize: 14,
-    color: colors.dark,
-    opacity: 0.4,
-  },
-  signOutSection: {
-    marginTop: 10,
-  },
-  signOutButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#FFF5F5",
-    paddingVertical: 16,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#FFDADA",
-    gap: 10,
-  },
-  signOutText: {
-    color: colors.danger,
-    fontSize: 16,
-    fontWeight: "700",
+  heroStatLabel: {
+    fontFamily: fonts.body,
+    fontSize: 10.5,
+    color: "rgba(255, 255, 255, 0.72)",
+    marginTop: 2,
   },
 });

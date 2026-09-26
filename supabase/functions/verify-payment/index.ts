@@ -173,7 +173,6 @@ Deno.serve(async (req) => {
       transaction_fee,
       network,
       super_agent_id,
-      recipient_name,
     } = await req.json();
 
     console.log("Received request with params:", {
@@ -739,11 +738,9 @@ Deno.serve(async (req) => {
         network: orderNetwork,
         amount: orderAmount,
         recipient_phone: recipient_phone || user.user_metadata?.phone || null,
-        recipient_name:
-          recipient_name ||
-          user.user_metadata?.full_name ||
-          user.email?.split("@")[0] ||
-          null,
+        // Agents buy on behalf of a recipient and no longer collect a name for
+        // them, so this stays null rather than borrowing the buyer's own name.
+        recipient_name: null,
         status: "pending",
         transaction_status: verifyData.data.status,
         channel: sharedOrderFields.channel,

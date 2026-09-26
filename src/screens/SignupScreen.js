@@ -16,6 +16,7 @@ import * as WebBrowser from "expo-web-browser";
 import { supabase } from "../lib/supabase";
 import colors from "../components/theme";
 import { useNotification } from "../contexts/NotificationContext";
+import { ThemedScreen } from "../components/ui";
 
 WebBrowser.maybeCompleteAuthSession();
 
@@ -131,7 +132,7 @@ export default function SignupScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
+    <ThemedScreen style={styles.container}>
       <StatusBar
         translucent
         backgroundColor="transparent"
@@ -276,7 +277,7 @@ export default function SignupScreen({ navigation }) {
           </TouchableOpacity>
         </View>
       </KeyboardAwareScrollView>
-    </View>
+    </ThemedScreen>
   );
 }
 

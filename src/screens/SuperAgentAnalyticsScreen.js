@@ -8,12 +8,15 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { Platform } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
-import colors from "../components/theme";
+import { fonts } from "../components/theme";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useTheme } from "../contexts/ThemeContext";
 
 const money = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 const count = (value) => Number(value || 0).toLocaleString();
@@ -55,6 +58,8 @@ const EMPTY_ANALYTICS = {
 };
 
 const TrendChart = ({ data }) => {
+  const theme = useTheme();
+  const styles = useAnalyticsStyles(theme.c);
   const normalized = useMemo(() => {
     const byDay = new Map(
       (data || []).map((row) => [String(row.day).slice(0, 10), row]),
@@ -72,7 +77,7 @@ const TrendChart = ({ data }) => {
   );
 
   return (
-    <View style={styles.chart}>
+    <ThemedScreen style={styles.chart}>
       <View style={styles.chartBars}>
         {normalized.map((row, index) => {
           const value = Number(row.earnings || 0);
@@ -101,23 +106,35 @@ const TrendChart = ({ data }) => {
           );
         })}
       </View>
+    </ThemedScreen>
+  );
+};
+
+const MetricCard = ({ icon, label, value, detail, tone }) => {
+  const theme = useTheme();
+  const styles = useAnalyticsStyles(theme.c);
+  const accent = tone || theme.c.mint;
+  return (
+    <View style={styles.metricCard}>
+      <View style={[styles.metricIcon, { backgroundColor: `${accent}1F` }]}>
+        <Ionicons name={icon} size={21} color={accent} />
+      </View>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={[styles.metricValue, { color: accent }]}>{value}</Text>
+      {detail ? <Text style={styles.metricDetail}>{detail}</Text> : null}
     </View>
   );
 };
 
-const MetricCard = ({ icon, label, value, detail, tone = colors.primary }) => (
-  <View style={styles.metricCard}>
-    <View style={[styles.metricIcon, { backgroundColor: `${tone}18` }]}>
-      <Ionicons name={icon} size={21} color={tone} />
-    </View>
-    <Text style={styles.metricLabel}>{label}</Text>
-    <Text style={[styles.metricValue, { color: tone }]}>{value}</Text>
-    {detail ? <Text style={styles.metricDetail}>{detail}</Text> : null}
-  </View>
-);
-
 export default function SuperAgentAnalyticsScreen({ navigation }) {
   const { showError } = useNotification();
+  const theme = useTheme();
+  const c = theme.c;
+  // Edge-to-edge on Android with no navigator header, so the screen insets
+  // itself. iOS already spaces this header, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const styles = useAnalyticsStyles(c, topInset);
   const [analytics, setAnalytics] = useState(EMPTY_ANALYTICS);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -178,17 +195,14 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
     Number(ownPurchases.wallet_spend || 0);
 
   return (
-    <SafeAreaView
-      style={styles.safeArea}
-      edges={["top", "right", "bottom", "left"]}
-    >
+    <ThemedScreen style={styles.safeArea}>
       <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
           accessibilityLabel="Go back"
         >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          <Ionicons name="arrow-back" size={24} color={c.textPrimary} />
         </TouchableOpacity>
         <View style={styles.headerCopy}>
           <Text style={styles.eyebrow}>SUPER AGENT</Text>
@@ -199,13 +213,13 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           style={styles.refreshButton}
           accessibilityLabel="Refresh analytics"
         >
-          <Ionicons name="refresh" size={21} color={colors.primary} />
+          <Ionicons name="refresh" size={21} color={c.mint} />
         </TouchableOpacity>
       </View>
 
       {loading ? (
         <View style={styles.centered}>
-          <ActivityIndicator size="large" color={colors.primary} />
+          <ActivityIndicator size="large" color={c.mint} />
           <Text style={styles.loadingText}>Calculating your business...</Text>
         </View>
       ) : (
@@ -215,7 +229,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={() => loadAnalytics(true)}
-              tintColor={colors.primary}
+              tintColor={c.mint}
             />
           }
         >
@@ -228,7 +242,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                 <Text style={styles.heroValue}>{money(earnings.all_time)}</Text>
               </View>
               <View style={styles.heroIcon}>
-                <Ionicons name="trending-up" size={26} color={colors.white} />
+                <Ionicons name="trending-up" size={26} color={c.heroText} />
               </View>
             </View>
             <Text style={styles.heroDescription}>
@@ -244,7 +258,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                 Base cost plus markup earnings
               </Text>
             </View>
-            <Ionicons name="analytics" size={22} color={colors.primary} />
+            <Ionicons name="analytics" size={22} color={c.mint} />
           </View>
           <View style={styles.periodGrid}>
             <MetricCard
@@ -289,11 +303,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           <View style={styles.totalCard}>
             <View style={styles.totalRow}>
               <View style={styles.totalIcon}>
-                <Ionicons
-                  name="git-network-outline"
-                  size={22}
-                  color={colors.primary}
-                />
+                <Ionicons name="git-network-outline" size={22} color={c.mint} />
               </View>
               <View style={styles.totalCopy}>
                 <Text style={styles.totalLabel}>Sub-agent transactions</Text>
@@ -311,7 +321,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                 <Ionicons
                   name="phone-portrait-outline"
                   size={22}
-                  color={colors.secondary}
+                  color={c.sky}
                 />
               </View>
               <View style={styles.totalCopy}>
@@ -327,7 +337,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             <View style={styles.divider} />
             <View style={styles.totalRow}>
               <View style={styles.totalIcon}>
-                <Ionicons name="layers-outline" size={22} color="#7C3AED" />
+                <Ionicons name="layers-outline" size={22} color={c.amber} />
               </View>
               <View style={styles.totalCopy}>
                 <Text style={styles.totalLabel}>All data transactions</Text>
@@ -349,9 +359,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             </View>
             <View style={styles.breakdownCard}>
               <Text style={styles.breakdownLabel}>Total markup earnings</Text>
-              <Text
-                style={[styles.breakdownValue, { color: colors.secondary }]}
-              >
+              <Text style={[styles.breakdownValue, { color: c.sky }]}>
                 {money(subAgentSales.markup_earnings)}
               </Text>
               <Text style={styles.breakdownHint}>Your realized margin</Text>
@@ -381,11 +389,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           <View style={styles.operationsCard}>
             <View style={styles.operationRow}>
               <View style={styles.operationIcon}>
-                <Ionicons
-                  name="wallet-outline"
-                  size={20}
-                  color={colors.primary}
-                />
+                <Ionicons name="wallet-outline" size={20} color={c.mint} />
               </View>
               <View style={styles.operationCopy}>
                 <Text style={styles.operationLabel}>Super Agent wallet</Text>
@@ -399,11 +403,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             </View>
             <View style={styles.operationRow}>
               <View style={styles.operationIcon}>
-                <Ionicons
-                  name="cash-outline"
-                  size={20}
-                  color={colors.secondary}
-                />
+                <Ionicons name="cash-outline" size={20} color={c.sky} />
               </View>
               <View style={styles.operationCopy}>
                 <Text style={styles.operationLabel}>Wallet funding</Text>
@@ -417,7 +417,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             </View>
             <View style={styles.operationRow}>
               <View style={styles.operationIcon}>
-                <Ionicons name="card-outline" size={20} color="#D97706" />
+                <Ionicons name="card-outline" size={20} color={c.amber} />
               </View>
               <View style={styles.operationCopy}>
                 <Text style={styles.operationLabel}>
@@ -436,7 +436,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                 <Ionicons
                   name="shield-checkmark-outline"
                   size={20}
-                  color="#7C3AED"
+                  color={c.mintDim}
                 />
               </View>
               <View style={styles.operationCopy}>
@@ -452,19 +452,19 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           </View>
 
           <View style={styles.healthRow}>
-            <View style={[styles.healthCard, { backgroundColor: "#FFF7E8" }]}>
-              <Ionicons name="time-outline" size={22} color={colors.warning} />
+            <View
+              style={[styles.healthCard, { backgroundColor: `${c.amber}14` }]}
+            >
+              <Ionicons name="time-outline" size={22} color={c.amber} />
               <Text style={styles.healthValue}>
                 {count(subAgentSales.held_count)}
               </Text>
               <Text style={styles.healthLabel}>Held orders</Text>
             </View>
-            <View style={[styles.healthCard, { backgroundColor: "#FDEDEC" }]}>
-              <Ionicons
-                name="close-circle-outline"
-                size={22}
-                color={colors.danger}
-              />
+            <View
+              style={[styles.healthCard, { backgroundColor: `${c.rose}14` }]}
+            >
+              <Ionicons name="close-circle-outline" size={22} color={c.rose} />
               <Text style={styles.healthValue}>
                 {count(
                   Number(subAgentSales.cancelled_count || 0) +
@@ -508,7 +508,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             ))
           ) : (
             <View style={styles.emptyCard}>
-              <Ionicons name="people-outline" size={42} color={colors.border} />
+              <Ionicons name="people-outline" size={42} color={c.textMuted} />
               <Text style={styles.emptyTitle}>No sub-agent sales yet</Text>
               <Text style={styles.emptyText}>
                 Assigned sub-agent transactions will populate this breakdown.
@@ -522,280 +522,267 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           </Text>
         </ScrollView>
       )}
-    </SafeAreaView>
+    </ThemedScreen>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.light },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: colors.white,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.tint,
-  },
-  headerCopy: { flex: 1, marginLeft: 12 },
-  eyebrow: {
-    color: colors.secondary,
-    fontSize: 10,
-    fontWeight: "900",
-    letterSpacing: 1.4,
-  },
-  title: { color: colors.dark, fontSize: 20, fontWeight: "900" },
-  refreshButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  centered: { flex: 1, alignItems: "center", justifyContent: "center" },
-  loadingText: { marginTop: 12, color: colors.secondary },
-  content: { padding: 16, paddingBottom: 36, gap: 12 },
-  heroCard: {
-    padding: 20,
-    borderRadius: 22,
-    backgroundColor: colors.dark,
-    overflow: "hidden",
-  },
-  heroTopline: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  heroLabel: { color: "#A7B6BE", fontSize: 13, fontWeight: "600" },
-  heroValue: {
-    color: colors.white,
-    fontSize: 30,
-    fontWeight: "900",
-    marginTop: 5,
-  },
-  heroIcon: {
-    width: 52,
-    height: 52,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.secondary,
-  },
-  heroDescription: {
-    color: "#C6D0D5",
-    fontSize: 12,
-    lineHeight: 18,
-    marginTop: 14,
-  },
-  sectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 8,
-    marginBottom: 2,
-  },
-  sectionTitle: {
-    color: colors.dark,
-    fontSize: 17,
-    fontWeight: "900",
-  },
-  sectionSubtitle: { color: colors.secondary, fontSize: 12, marginTop: 2 },
-  periodGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  metricCard: {
-    width: "48%",
-    minHeight: 118,
-    padding: 14,
-    borderRadius: 18,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  metricIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 10,
-  },
-  metricLabel: { color: colors.secondary, fontSize: 12, fontWeight: "600" },
-  metricValue: { fontSize: 16, fontWeight: "900", marginTop: 4 },
-  metricDetail: { color: colors.secondary, fontSize: 10, marginTop: 3 },
-  livePill: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#E8F7EE",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 20,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.success,
-    marginRight: 5,
-  },
-  liveText: { color: colors.success, fontSize: 9, fontWeight: "900" },
-  panel: {
-    padding: 16,
-    borderRadius: 20,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  chart: { minHeight: 145, justifyContent: "center" },
-  chartBars: {
-    height: 130,
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 5,
-  },
-  barColumn: { flex: 1, alignItems: "center" },
-  barTrack: {
-    height: 108,
-    width: "100%",
-    justifyContent: "flex-end",
-    alignItems: "center",
-  },
-  bar: {
-    width: "72%",
-    minWidth: 4,
-    borderTopLeftRadius: 5,
-    borderTopRightRadius: 5,
-    backgroundColor: colors.secondary,
-  },
-  barLabel: { color: colors.secondary, fontSize: 8, marginTop: 5 },
-  totalCard: {
-    padding: 16,
-    borderRadius: 20,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  totalRow: { flexDirection: "row", alignItems: "center" },
-  totalIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.tint,
-  },
-  totalCopy: { flex: 1, marginLeft: 11 },
-  totalLabel: { color: colors.dark, fontSize: 14, fontWeight: "800" },
-  totalHint: { color: colors.secondary, fontSize: 11, marginTop: 3 },
-  totalValue: { color: colors.primary, fontSize: 20, fontWeight: "900" },
-  divider: { height: 1, backgroundColor: "#E6EBEE", marginVertical: 13 },
-  breakdownGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  breakdownCard: {
-    width: "48%",
-    padding: 15,
-    borderRadius: 18,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  breakdownLabel: { color: colors.secondary, fontSize: 11, fontWeight: "700" },
-  breakdownValue: {
-    color: colors.primary,
-    fontSize: 17,
-    fontWeight: "900",
-    marginTop: 6,
-  },
-  breakdownHint: { color: colors.secondary, fontSize: 9, marginTop: 4 },
-  operationsCard: {
-    padding: 15,
-    borderRadius: 20,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-    gap: 14,
-  },
-  operationRow: { flexDirection: "row", alignItems: "center" },
-  operationIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.tint,
-  },
-  operationCopy: { flex: 1, marginLeft: 10 },
-  operationLabel: { color: colors.dark, fontSize: 13, fontWeight: "800" },
-  operationHint: { color: colors.secondary, fontSize: 10, marginTop: 2 },
-  operationValue: { color: colors.dark, fontSize: 14, fontWeight: "900" },
-  healthRow: { flexDirection: "row", gap: 10 },
-  healthCard: { flex: 1, padding: 15, borderRadius: 18 },
-  healthValue: {
-    color: colors.dark,
-    fontSize: 22,
-    fontWeight: "900",
-    marginTop: 7,
-  },
-  healthLabel: { color: colors.secondary, fontSize: 11, marginTop: 2 },
-  agentRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 13,
-    borderRadius: 16,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  rank: {
-    width: 30,
-    height: 30,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.tint,
-  },
-  rankText: { color: colors.primary, fontWeight: "900" },
-  agentCopy: { flex: 1, marginLeft: 10 },
-  agentName: { color: colors.dark, fontSize: 13, fontWeight: "800" },
-  agentMeta: { color: colors.secondary, fontSize: 10, marginTop: 3 },
-  agentEarnings: { alignItems: "flex-end" },
-  agentEarningsValue: {
-    color: colors.secondary,
-    fontSize: 13,
-    fontWeight: "900",
-  },
-  agentEarningsLabel: { color: colors.secondary, fontSize: 9, marginTop: 2 },
-  emptyCard: {
-    padding: 28,
-    borderRadius: 20,
-    alignItems: "center",
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: "#E1E8EC",
-  },
-  emptyTitle: {
-    color: colors.dark,
-    fontSize: 15,
-    fontWeight: "800",
-    marginTop: 8,
-  },
-  emptyText: {
-    color: colors.secondary,
-    fontSize: 11,
-    textAlign: "center",
-    marginTop: 5,
-  },
-  footnote: {
-    color: colors.secondary,
-    fontSize: 10,
-    lineHeight: 15,
-    textAlign: "center",
-    paddingHorizontal: 16,
-    marginTop: 8,
-  },
-});
+// Layered on the shared kit: `themedStyles(c)` already owns the surface, border
+// and type ramp, so this file only adds the analytics-specific pieces and the
+// handful of tones that are semantic here (earnings hero, status pills).
+const useAnalyticsStyles = (c, topInset = 0) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    safeArea: { ...base.screen },
+    header: { ...base.header, paddingVertical: 12, paddingTop: 8 + topInset },
+    backButton: { ...base.backButton, borderRadius: 14 },
+    refreshButton: { ...base.headerAction, borderRadius: 999 },
+    eyebrow: { ...base.sectionEyebrow, marginBottom: 0 },
+    title: { ...base.headerTitle, fontSize: 20 },
+    centered: { ...base.center },
+    loadingText: { ...base.headerSubtitle, marginTop: 12 },
+
+    content: { ...base.body, paddingTop: 4, gap: 12 },
+
+    // Earnings hero keeps a dark, luminous card in BOTH schemes - the number is
+    // the headline of this screen and must not lose its contrast.
+    heroCard: {
+      padding: 20,
+      borderRadius: 22,
+      backgroundColor: c.heroTo,
+      overflow: "hidden",
+    },
+    heroTopline: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    heroLabel: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.heroTextDim,
+    },
+    heroValue: {
+      fontFamily: fonts.display,
+      fontSize: 30,
+      color: c.heroText,
+      marginTop: 5,
+    },
+    heroIcon: {
+      width: 52,
+      height: 52,
+      borderRadius: 18,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: "rgba(255, 255, 255, 0.18)",
+    },
+    heroDescription: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      lineHeight: 18,
+      color: c.heroTextDim,
+      marginTop: 14,
+    },
+
+    sectionHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginTop: 8,
+      marginBottom: 2,
+    },
+    sectionTitle: { ...base.sectionTitle, fontSize: 17, marginBottom: 0 },
+    sectionSubtitle: { ...base.headerSubtitle },
+
+    periodGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+    metricCard: {
+      ...base.card,
+      width: "48%",
+      minHeight: 118,
+      padding: 14,
+      borderRadius: 18,
+    },
+    metricIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      marginBottom: 10,
+    },
+    metricLabel: {
+      ...base.rowSubtitle,
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      marginTop: 0,
+    },
+    metricValue: { fontFamily: fonts.bodyBold, fontSize: 16, marginTop: 4 },
+    metricDetail: { ...base.rowSubtitle, fontSize: 10, marginTop: 3 },
+
+    livePill: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: `${c.mint}1F`,
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: 999,
+    },
+    liveDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.mint,
+      marginRight: 5,
+    },
+    liveText: { fontFamily: fonts.bodyBold, fontSize: 9, color: c.mint },
+
+    panel: { ...base.card, padding: 16, borderRadius: 20 },
+    chart: { minHeight: 145, justifyContent: "center" },
+    chartBars: {
+      height: 130,
+      flexDirection: "row",
+      alignItems: "flex-end",
+      gap: 5,
+    },
+    barColumn: { flex: 1, alignItems: "center" },
+    barTrack: {
+      height: 108,
+      width: "100%",
+      justifyContent: "flex-end",
+      alignItems: "center",
+    },
+    bar: {
+      width: "72%",
+      minWidth: 4,
+      borderTopLeftRadius: 5,
+      borderTopRightRadius: 5,
+      backgroundColor: c.mintDim,
+    },
+    barLabel: {
+      fontFamily: fonts.body,
+      fontSize: 8,
+      color: c.textMuted,
+      marginTop: 5,
+    },
+
+    totalCard: { ...base.card, padding: 16, borderRadius: 20 },
+    totalRow: { flexDirection: "row", alignItems: "center" },
+    totalIcon: {
+      ...base.rowIcon,
+      borderRadius: 14,
+      backgroundColor: c.surfaceHover,
+    },
+    totalCopy: { flex: 1, marginLeft: 11 },
+    totalLabel: { ...base.rowTitle },
+    totalHint: { ...base.rowSubtitle },
+    totalValue: { fontFamily: fonts.bodyBold, fontSize: 20, color: c.mint },
+    divider: { ...base.divider, marginVertical: 13 },
+
+    breakdownGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+    breakdownCard: {
+      ...base.card,
+      width: "48%",
+      padding: 15,
+      borderRadius: 18,
+    },
+    breakdownLabel: {
+      ...base.rowSubtitle,
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      marginTop: 0,
+    },
+    breakdownValue: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 17,
+      color: c.mint,
+      marginTop: 6,
+    },
+    breakdownHint: { ...base.rowSubtitle, fontSize: 9, marginTop: 4 },
+
+    operationsCard: { ...base.card, padding: 15, borderRadius: 20, gap: 14 },
+    operationRow: { flexDirection: "row", alignItems: "center" },
+    operationIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surfaceHover,
+    },
+    operationCopy: { flex: 1, marginLeft: 10 },
+    operationLabel: { ...base.rowTitle, fontSize: 13 },
+    operationHint: { ...base.rowSubtitle, fontSize: 10, marginTop: 2 },
+    operationValue: { ...base.rowValue, color: c.textPrimary },
+
+    healthRow: { flexDirection: "row", gap: 10 },
+    healthCard: { flex: 1, padding: 15, borderRadius: 18 },
+    healthValue: {
+      fontFamily: fonts.display,
+      fontSize: 22,
+      color: c.textPrimary,
+      marginTop: 7,
+    },
+    healthLabel: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+
+    agentRow: {
+      ...base.card,
+      flexDirection: "row",
+      alignItems: "center",
+      padding: 13,
+      borderRadius: 16,
+    },
+    rank: {
+      width: 30,
+      height: 30,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: `${c.mint}1F`,
+    },
+    rankText: { fontFamily: fonts.bodyBold, fontSize: 13, color: c.mint },
+    agentCopy: { flex: 1, marginLeft: 10 },
+    agentName: { ...base.rowTitle, fontSize: 13 },
+    agentMeta: { ...base.rowSubtitle, fontSize: 10, marginTop: 3 },
+    agentEarnings: { alignItems: "flex-end" },
+    agentEarningsValue: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+    agentEarningsLabel: {
+      fontFamily: fonts.body,
+      fontSize: 9,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+
+    emptyCard: {
+      ...base.card,
+      padding: 28,
+      borderRadius: 20,
+      alignItems: "center",
+    },
+    emptyTitle: { ...base.rowTitle, fontSize: 15, marginTop: 8 },
+    emptyText: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      textAlign: "center",
+      marginTop: 5,
+    },
+    footnote: {
+      fontFamily: fonts.body,
+      fontSize: 10,
+      lineHeight: 15,
+      color: c.textMuted,
+      textAlign: "center",
+      paddingHorizontal: 16,
+      marginTop: 8,
+    },
+  });
+};

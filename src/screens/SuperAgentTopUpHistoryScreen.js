@@ -15,6 +15,7 @@ import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
 import colors from "../components/theme";
+import { ThemedScreen } from "../components/ui";
 
 const getStatusColor = (status) => {
   switch (String(status || "").toLowerCase()) {
@@ -144,8 +145,9 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
+    <ThemedScreen style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
@@ -262,7 +264,8 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
           )}
         </ScrollView>
       )}
-    </SafeAreaView>
+      </SafeAreaView>
+    </ThemedScreen>
   );
 }
 
@@ -273,7 +276,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 12,
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingTop: 14,
+    paddingBottom: 14,
     backgroundColor: colors.white,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,

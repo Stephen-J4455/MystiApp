@@ -5,6 +5,18 @@ import { Linking, Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
 import Constants from "expo-constants";
+import { useFonts } from "expo-font";
+import {
+  Fraunces_600SemiBold,
+  Fraunces_700Bold,
+} from "@expo-google-fonts/fraunces";
+import {
+  PublicSans_400Regular,
+  PublicSans_500Medium,
+  PublicSans_600SemiBold,
+  PublicSans_700Bold,
+  PublicSans_800ExtraBold,
+} from "@expo-google-fonts/public-sans";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
@@ -38,6 +50,10 @@ import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
 import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
 import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
 import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
+import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
+import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
+import DockTabBar from "./src/components/DockTabBar";
+import { DOCK_BAR_HEIGHT } from "./src/lib/dockNav";
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // The splash module is unavailable on web.
@@ -61,6 +77,26 @@ const normalizeUserRole = (user) => {
   return role;
 };
 
+/**
+ * Hosts the bottom dock. Needs the theme (for the palette) and the visibility
+ * context, both of which are provided further up the tree, so it lives in its
+ * own component rather than inline in `App`'s return.
+ *
+ * `NavigationContainer` renders its children into a plain flex column, so the
+ * dock's `position: absolute; bottom: 0` resolves against the full screen -
+ * which is what we want for a bottom bar.
+ */
+function DockHost({ navigationRef, currentRouteName }) {
+  return (
+    <DockVisibilityProvider>
+      <DockTabBar
+        navigationRef={navigationRef}
+        currentRouteName={currentRouteName}
+      />
+    </DockVisibilityProvider>
+  );
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [userRole, setUserRole] = useState(null);
@@ -68,6 +104,25 @@ export default function App() {
   const [authInitialized, setAuthInitialized] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
   const navigationRef = useRef(null);
+  // Route name of the focused screen. The dock highlights the matching tab; the
+  // app uses a single Stack.Navigator (not tabs), so this has to be tracked off
+  // the navigation container rather than read from tab descriptors.
+  const [currentRouteName, setCurrentRouteName] = useState(null);
+
+  // Fraunces carries the display voice, Public Sans the UI voice. Loading them
+  // before the splash hides avoids a visible reflow on first paint.
+  const [fontsLoaded, fontError] = useFonts({
+    Fraunces_600SemiBold,
+    Fraunces_700Bold,
+    PublicSans_400Regular,
+    PublicSans_500Medium,
+    PublicSans_600SemiBold,
+    PublicSans_700Bold,
+    PublicSans_800ExtraBold,
+  });
+
+  const fontsReady = fontsLoaded || Boolean(fontError);
+
   const {
     versionChecked,
     canEnterApp,
@@ -289,110 +344,132 @@ export default function App() {
 
   // Keep Expo's native splash visible until the app is ready to render.
   useEffect(() => {
-    const splashCanHide = versionChecked && (!canEnterApp || authInitialized);
+    const splashCanHide =
+      fontsReady && versionChecked && (!canEnterApp || authInitialized);
 
     if (splashCanHide) {
       SplashScreen.hideAsync().catch(() => {
         // SplashScreen is a no-op on web.
       });
     }
-  }, [versionChecked, canEnterApp, authInitialized]);
+  }, [fontsReady, versionChecked, canEnterApp, authInitialized]);
 
   return (
     <KeyboardProvider preload={false} statusBarTranslucent>
       <SafeAreaProvider>
         <NotificationProvider>
-          {canEnterApp ? (
-            <NavigationContainer ref={navigationRef}>
-              <Stack.Navigator
-                screenOptions={{ headerShown: false }}
-                initialRouteName={
-                  isResettingPassword
-                    ? "ResetPassword"
-                    : user
-                      ? "Home"
-                      : "Login"
+          <ThemeProvider>
+            {canEnterApp && fontsReady ? (
+              <NavigationContainer
+                ref={navigationRef}
+                // The dock highlights whichever tab matches the focused screen,
+                // so the route has to be tracked from the container.
+                onStateChange={() =>
+                  setCurrentRouteName(
+                    navigationRef.current?.getCurrentRoute()?.name ?? null,
+                  )
                 }
               >
-                {user && !isResettingPassword ? (
-                  <>
-                    <Stack.Screen name="Home" component={HomeScreen} />
-                    <Stack.Screen name="Profile" component={ProfileScreen} />
-                    <Stack.Screen
-                      name="PrivacyPolicy"
-                      component={PrivacyPolicyScreen}
-                    />
-                    <Stack.Screen
-                      name="Notifications"
-                      component={NotificationsScreen}
-                    />
-                    <Stack.Screen name="Data" component={DataScreen} />
-                    <Stack.Screen
-                      name="SuperAgentManagement"
-                      component={SuperAgentManagementScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentOffers"
-                      component={SuperAgentOffersScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentTierManagement"
-                      component={SuperAgentTierManagementScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentAgents"
-                      component={SuperAgentAgentsScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentPaystack"
-                      component={SuperAgentPaystackScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentAnalytics"
-                      component={SuperAgentAnalyticsScreen}
-                    />
-                    <Stack.Screen
-                      name="SuperAgentHeldOrders"
-                      component={SuperAgentHeldOrdersScreen}
-                    />
-                    <Stack.Screen name="Receipt" component={ReceiptScreen} />
-                    <Stack.Screen name="History" component={HistoryScreen} />
-                    <Stack.Screen
-                      name="WalletTopUp"
-                      component={WalletTopUpScreen}
-                    />
-                    <Stack.Screen
-                      name="AfaRegistration"
-                      component={AfaRegistrationScreen}
-                    />
-                  </>
-                ) : (
-                  <>
-                    <Stack.Screen name="Login" component={LoginScreen} />
-                    <Stack.Screen name="Signup" component={SignupScreen} />
-                    <Stack.Screen
-                      name="ForgotPassword"
-                      component={ForgotPasswordScreen}
-                    />
-                    <Stack.Screen
-                      name="ResetPassword"
-                      component={ResetPasswordScreen}
-                      initialParams={{ isResetting: isResettingPassword }}
-                    />
-                  </>
-                )}
-              </Stack.Navigator>
-            </NavigationContainer>
-          ) : null}
-          <UpdateNotification
-            visible={updateModal.visible}
-            title={updateModal.title}
-            message={updateModal.message}
-            downloadUrl={updateModal.downloadUrl}
-            releaseNotes={updateModal.releaseNotes}
-            onDownload={handleDownload}
-          />
-          <InstallAppBanner />
+                <Stack.Navigator
+                  screenOptions={{ headerShown: false }}
+                  initialRouteName={
+                    isResettingPassword
+                      ? "ResetPassword"
+                      : user
+                        ? "Home"
+                        : "Login"
+                  }
+                >
+                  {user && !isResettingPassword ? (
+                    <>
+                      <Stack.Screen name="Home" component={HomeScreen} />
+                      <Stack.Screen name="Profile" component={ProfileScreen} />
+                      <Stack.Screen
+                        name="PrivacyPolicy"
+                        component={PrivacyPolicyScreen}
+                      />
+                      <Stack.Screen
+                        name="Notifications"
+                        component={NotificationsScreen}
+                      />
+                      <Stack.Screen name="Data" component={DataScreen} />
+                      <Stack.Screen
+                        name="SuperAgentManagement"
+                        component={SuperAgentManagementScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentOffers"
+                        component={SuperAgentOffersScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentTierManagement"
+                        component={SuperAgentTierManagementScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentAgents"
+                        component={SuperAgentAgentsScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentPaystack"
+                        component={SuperAgentPaystackScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentAnalytics"
+                        component={SuperAgentAnalyticsScreen}
+                      />
+                      <Stack.Screen
+                        name="SuperAgentHeldOrders"
+                        component={SuperAgentHeldOrdersScreen}
+                      />
+                      <Stack.Screen name="Receipt" component={ReceiptScreen} />
+                      <Stack.Screen name="History" component={HistoryScreen} />
+                      <Stack.Screen
+                        name="WalletTopUp"
+                        component={WalletTopUpScreen}
+                      />
+                      <Stack.Screen
+                        name="AfaRegistration"
+                        component={AfaRegistrationScreen}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <Stack.Screen name="Login" component={LoginScreen} />
+                      <Stack.Screen name="Signup" component={SignupScreen} />
+                      <Stack.Screen
+                        name="ForgotPassword"
+                        component={ForgotPasswordScreen}
+                      />
+                      <Stack.Screen
+                        name="ResetPassword"
+                        component={ResetPasswordScreen}
+                        initialParams={{ isResetting: isResettingPassword }}
+                      />
+                    </>
+                  )}
+                </Stack.Navigator>
+                {/* Bottom dock, native only. The web build keeps the top-bar
+                    overflow menu, so the dock is gated on Platform.OS. It sits
+                    inside the container as a sibling of the navigator so it
+                    floats over the active screen rather than pushing layout. */}
+                {Platform.OS !== "web" ? (
+                  <DockHost
+                    navigationRef={navigationRef}
+                    currentRouteName={currentRouteName}
+                  />
+                ) : null}
+              </NavigationContainer>
+            ) : null}
+            <UpdateNotification
+              visible={updateModal.visible}
+              title={updateModal.title}
+              message={updateModal.message}
+              downloadUrl={updateModal.downloadUrl}
+              releaseNotes={updateModal.releaseNotes}
+              onDownload={handleDownload}
+            />
+            <InstallAppBanner />
+          </ThemeProvider>
         </NotificationProvider>
       </SafeAreaProvider>
     </KeyboardProvider>

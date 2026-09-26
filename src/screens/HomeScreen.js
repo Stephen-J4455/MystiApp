@@ -1,23 +1,144 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   TouchableOpacity,
   Text,
   View,
-  Image,
   ScrollView,
   Linking,
   ImageBackground,
   Animated,
   StyleSheet,
+  Platform,
 } from "react-native";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import colors from "../components/theme";
+import { useTheme } from "../contexts/ThemeContext";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
+import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
+import { fonts, networks } from "../components/theme";
+
+const SUPPORT_WHATSAPP = "233532973455";
+const ADMIN_WHATSAPP = "45GU7PROOYDFE1";
+
+// Width of the super-agent drawer. Doubles as the closed slide distance so
+// the panel parks fully off-screen instead of peeking past the right edge.
+const DRAWER_WIDTH = 292;
+
+const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
+const openWhatsApp = (number, message) =>
+  Linking.openURL(
+    `https://wa.me/${number}?text=${encodeURIComponent(message)}`,
+  ).catch((error) => console.warn("Could not open WhatsApp:", error));
+
+// Order status -> label + pill colours. Delegates to the shared, per-scheme
+// tone table in theme.js so every screen agrees on wording and colour.
+// "cancelled" is deliberately distinct from "failed": both read red (a dead
+// order is an error signal) but the label keeps them distinguishable, which
+// matches ReceiptScreen rendering the raw status.
+const statusTone = (status, tones) => {
+  switch (String(status || "").toLowerCase()) {
+    case "completed":
+    case "success":
+      return tones.completed;
+    case "processing":
+      return tones.processing;
+    case "pending":
+      return tones.pending;
+    case "failed":
+      return tones.failed;
+    case "cancelled":
+    case "canceled": // US spelling, in case the backend ever uses it
+      return tones.cancelled;
+    case "refunded":
+      return tones.refunded;
+    default:
+      return null;
+  }
+};
+
+const relativeTime = (iso) => {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const diff = Date.now() - then;
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+
+  if (diff < minute) return "Just now";
+  if (diff < hour) return `${Math.floor(diff / minute)}m ago`;
+  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
+  if (diff < 7 * day) return `${Math.floor(diff / day)}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+  });
+};
+
+// Builds an entrance style: fade + rise, staggered by `index`.
+const useEntrance = (index, duration = 520) => {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const animation = Animated.timing(progress, {
+      toValue: 1,
+      duration,
+      delay: 90 * index,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [progress, duration, index]);
+
+  return {
+    opacity: progress,
+    transform: [
+      {
+        translateY: progress.interpolate({
+          inputRange: [0, 1],
+          outputRange: [22, 0],
+        }),
+      },
+    ],
+  };
+};
+
+// `styles` and `c` are passed in rather than read from module scope: the
+// stylesheet is per-colour-scheme now, so this helper has no way to reach
+// the active palette on its own.
+function SectionHead({ eyebrow, title, action, onAction, styles, c }) {
+  return (
+    <View style={styles.sectionHead}>
+      <View style={styles.sectionHeadText}>
+        {eyebrow ? <Text style={styles.sectionEyebrow}>{eyebrow}</Text> : null}
+        <Text style={styles.sectionTitle}>{title}</Text>
+      </View>
+      {action ? (
+        <TouchableOpacity
+          style={styles.sectionAction}
+          onPress={onAction}
+          activeOpacity={0.7}
+          hitSlop={8}
+        >
+          <Text style={styles.sectionActionText}>{action}</Text>
+          <Ionicons name="arrow-forward" size={13} color={c.mint} />
+        </TouchableOpacity>
+      ) : null}
+    </View>
+  );
+}
 
 export default function HomeScreen({ navigation }) {
+  const { c, isDark, statusTone: tones } = useTheme();
+  const styles = useStyles(c);
+  // Clears the floating bottom dock so the footer text is never trapped
+  // underneath it. Zero on web, where there is no dock.
+  const dockPadding = useDockBottomPadding(16);
   const [user, setUser] = useState(null);
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgent, setIsSuperAgent] = useState(false);
@@ -29,12 +150,86 @@ export default function HomeScreen({ navigation }) {
   const [currentAdIndex, setCurrentAdIndex] = useState(0);
   const [viewedAds, setViewedAds] = useState(new Set()); // Track viewed ads for impressions
   const [menuOpen, setMenuOpen] = useState(false);
+  // The drawer host is a full-screen absolute overlay, so keeping it mounted
+  // while closed means it sits on top of the very button that opens it. That
+  // is fragile - whether it swallows the tap depends on how the platform
+  // resolves pointerEvents - and the failure mode is silent: the button looks
+  // dead. Tracking mount state explicitly removes the ambiguity; `menuOpen`
+  // only drives the animation, `menuMounted` drives the presence in the tree.
+  const [menuMounted, setMenuMounted] = useState(false);
   const [isEnterpriseSuperAgent, setIsEnterpriseSuperAgent] = useState(true);
+  const [walletBalance, setWalletBalance] = useState(null);
+  const [loadingWallet, setLoadingWallet] = useState(false);
   const adsScrollViewRef = useRef(null);
   const autoScrollIntervalRef = useRef(null);
   const adRefs = useRef({}); // Refs for each ad component
   const { showSuccess } = useNotification();
   const transactionsSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
+  const drawerAnim = useRef(new Animated.Value(0)).current;
+
+  // Open: mount first, then slide in. Close: slide out, then unmount once the
+  // animation settles. Unmounting immediately would make the panel disappear
+  // mid-slide instead of sliding away, which is why the mount flag exists
+  // rather than gating the render on `menuOpen` alone.
+  useEffect(() => {
+    if (menuOpen) {
+      setMenuMounted(true);
+      const anim = Animated.timing(drawerAnim, {
+        toValue: 1,
+        duration: 220,
+        useNativeDriver: true,
+      });
+      anim.start();
+      return () => anim.stop();
+    }
+
+    const anim = Animated.timing(drawerAnim, {
+      toValue: 0,
+      duration: 220,
+      useNativeDriver: true,
+    });
+    anim.start(({ finished }) => {
+      if (finished) setMenuMounted(false);
+    });
+    return () => anim.stop();
+  }, [drawerAnim, menuOpen]);
+
+  const toggleMenu = () => {
+    if (menuOpen) {
+      setMenuOpen(false);
+    } else {
+      setMenuMounted(true);
+      setMenuOpen(true);
+    }
+  };
+
+  const drawerStyle = useMemo(
+    () => ({
+      transform: [
+        {
+          translateX: drawerAnim.interpolate({
+            inputRange: [0, 1],
+            outputRange: [DRAWER_WIDTH + 40, 0],
+          }),
+        },
+      ],
+    }),
+    [drawerAnim],
+  );
+
+  const heroEntrance = useEntrance(0);
+  const quickEntrance = useEntrance(1);
+  const suiteEntrance = useEntrance(2);
+  const networkEntrance = useEntrance(3);
+  const activityEntrance = useEntrance(4);
+  const promoEntrance = useEntrance(5);
+
+  const badgeValue = String(
+    user?.user_metadata?.super_agent_badge ||
+      user?.app_metadata?.super_agent_badge ||
+      "enterprise",
+  ).toLowerCase();
+  const isProSuperAgent = isSuperAgent && badgeValue === "pro";
 
   const networkCards = [
     {
@@ -43,7 +238,7 @@ export default function HomeScreen({ navigation }) {
       desc: "Super Fast Data",
       sub: "5G Ready",
       tag: "Best Value",
-      accent: colors.warning,
+      accent: networks.mtn,
       image: require("../../assets/mtn.jpg"),
     },
     {
@@ -52,7 +247,7 @@ export default function HomeScreen({ navigation }) {
       desc: "Voice & Bundles",
       sub: "Flexible Plans",
       tag: "Popular",
-      accent: colors.success,
+      accent: networks.telecel,
       image: require("../../assets/telecel.jpg"),
     },
     {
@@ -61,7 +256,7 @@ export default function HomeScreen({ navigation }) {
       desc: "Stay Connected",
       sub: "Daily Deals",
       tag: "Hot",
-      accent: colors.primary,
+      accent: networks.airteltigo,
       image: require("../../assets/airteltigo.jpg"),
     },
   ];
@@ -110,7 +305,7 @@ export default function HomeScreen({ navigation }) {
         } = await supabase.auth.getUser();
         if (user) {
           subscriptionRef.current = supabase
-            .channel("notification_count_realtime")
+            .channel(uniqueTopic("notification_count_realtime"))
             .on(
               "postgres_changes",
               {
@@ -187,9 +382,7 @@ export default function HomeScreen({ navigation }) {
 
     // Cleanup subscription on unmount
     return () => {
-      if (subscriptionRef.current) {
-        supabase.removeChannel(subscriptionRef.current);
-      }
+      removeChannelSafe(subscriptionRef.current);
     };
   }, []);
 
@@ -206,7 +399,7 @@ export default function HomeScreen({ navigation }) {
         if (user) {
           // Subscribe to regular orders
           ordersSubscription = supabase
-            .channel("home_orders_realtime")
+            .channel(uniqueTopic("home_orders_realtime"))
             .on(
               "postgres_changes",
               {
@@ -236,7 +429,7 @@ export default function HomeScreen({ navigation }) {
             user.user_metadata?.super_agent_id
           ) {
             agentOrdersSubscription = supabase
-              .channel("home_agent_orders_realtime")
+              .channel(uniqueTopic("home_agent_orders_realtime"))
               .on(
                 "postgres_changes",
                 {
@@ -268,14 +461,74 @@ export default function HomeScreen({ navigation }) {
     setupTransactionsRealtime();
 
     return () => {
-      if (ordersSubscription) {
-        supabase.removeChannel(ordersSubscription);
-      }
-      if (agentOrdersSubscription) {
-        supabase.removeChannel(agentOrdersSubscription);
-      }
+      removeChannelSafe(ordersSubscription);
+      removeChannelSafe(agentOrdersSubscription);
     };
   }, []);
+
+  // Super-agent wallet balance for the hero card, kept live.
+  useEffect(() => {
+    if (!isSuperAgent) {
+      setWalletBalance(null);
+      return;
+    }
+
+    let cancelled = false;
+    // Keyed by user id: the channel needs the id in its filter, which is only
+    // known after `getUser()` resolves. Registering the channel in a ref as
+    // soon as it exists is what makes cleanup reliable - a plain closure
+    // variable is still null if the effect is torn down during the awaits, and
+    // the channel then leaks and collides with the next mount.
+    const walletChannelRef = { current: null };
+
+    const loadWallet = async () => {
+      try {
+        setLoadingWallet(true);
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user || cancelled) return;
+
+        const { data, error } = await supabase
+          .from("super_agent_wallets")
+          .select("balance")
+          .eq("super_agent_id", user.id)
+          .maybeSingle();
+
+        if (cancelled) return;
+        if (error) {
+          console.error("Wallet balance fetch error:", error);
+        } else {
+          setWalletBalance(Number(data?.balance || 0));
+        }
+
+        walletChannelRef.current = supabase
+          .channel(uniqueTopic("home_wallet_balance_realtime"))
+          .on(
+            "postgres_changes",
+            {
+              event: "UPDATE",
+              schema: "public",
+              table: "super_agent_wallets",
+              filter: `super_agent_id=eq.${user.id}`,
+            },
+            (payload) => setWalletBalance(Number(payload.new.balance || 0)),
+          )
+          .subscribe();
+      } catch (error) {
+        console.error("Wallet balance error:", error);
+      } finally {
+        if (!cancelled) setLoadingWallet(false);
+      }
+    };
+
+    loadWallet();
+
+    return () => {
+      cancelled = true;
+      removeChannelSafe(walletChannelRef.current);
+    };
+  }, [isSuperAgent]);
 
   // Auto-scroll ads effect
   useEffect(() => {
@@ -665,489 +918,930 @@ export default function HomeScreen({ navigation }) {
   };
 
   const renderRecentTransactionPlaceholders = () => (
-    <View style={styles.placeholderList}>
+    <View style={styles.skeletonList}>
       {[0, 1, 2].map((index) => (
         <Animated.View
           key={`transaction-placeholder-${index}`}
-          style={[
-            styles.transactionPlaceholder,
-            { opacity: transactionsSkeletonOpacity },
-          ]}
+          style={[styles.skeletonRow, { opacity: transactionsSkeletonOpacity }]}
         >
-          <View style={styles.placeholderLeft}>
-            <View style={styles.placeholderLine} />
-            <View style={styles.placeholderLineShort} />
+          <View style={styles.skeletonMark} />
+          <View style={styles.skeletonBody}>
+            <View style={styles.skeletonLineWide} />
+            <View style={styles.skeletonLineNarrow} />
           </View>
-          <View style={styles.placeholderRight}>
-            <View style={styles.placeholderAmount} />
-            <View style={styles.placeholderDate} />
+          <View style={styles.skeletonTail}>
+            <View style={styles.skeletonLineAmount} />
+            <View style={styles.skeletonLineTiny} />
           </View>
         </Animated.View>
       ))}
     </View>
   );
 
+  const quickActions = [
+    {
+      key: "history",
+      label: "Orders",
+      icon: "receipt-outline",
+      tint: c.mint,
+      onPress: () => navigation.navigate("History"),
+    },
+    {
+      key: "afa",
+      label: "AFA Reg",
+      icon: "shield-checkmark-outline",
+      tint: c.sky,
+      onPress: () => navigation.navigate("AfaRegistration"),
+    },
+    {
+      key: "support",
+      label: "Support",
+      icon: "chatbubbles-outline",
+      tint: c.amber,
+      onPress: () =>
+        openWhatsApp(
+          SUPPORT_WHATSAPP,
+          "Hi, I need help with the Mystiwan E-Business app",
+        ),
+    },
+    {
+      key: "settings",
+      label: "Settings",
+      icon: "options-outline",
+      tint: c.textSecondary,
+      onPress: () => navigation.navigate("Profile"),
+    },
+  ];
+
+  const suiteItems = [
+    {
+      key: "analytics",
+      label: "Analytics",
+      icon: "stats-chart-outline",
+      tint: c.sky,
+      onPress: () => navigation.navigate("SuperAgentAnalytics"),
+    },
+    {
+      key: "offers",
+      label: "Offers",
+      icon: "pricetags-outline",
+      tint: c.mint,
+      onPress: () => navigation.navigate("SuperAgentOffers"),
+    },
+    {
+      key: "agents",
+      label: "Agents",
+      icon: "people-outline",
+      tint: c.amber,
+      onPress: () => navigation.navigate("SuperAgentAgents"),
+    },
+    ...(isEnterpriseSuperAgent
+      ? [
+          {
+            key: "tiers",
+            label: "Tiers",
+            icon: "layers-outline",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentTierManagement"),
+          },
+          {
+            key: "paystack",
+            label: "Paystack",
+            icon: "card-outline",
+            tint: c.sky,
+            onPress: () => navigation.navigate("SuperAgentPaystack"),
+          },
+        ]
+      : []),
+    {
+      key: "topup",
+      label: "Top Up",
+      icon: "wallet-outline",
+      tint: c.amber,
+      onPress: () => navigation.navigate("WalletTopUp"),
+    },
+  ];
+
+  const menuItems = [
+    ...(isEnterpriseSuperAgent
+      ? [
+          {
+            key: "orders",
+            icon: "receipt-outline",
+            label: "All Orders",
+            tint: c.mint,
+            onPress: () => navigation.navigate("History"),
+          },
+          {
+            key: "tiers",
+            icon: "layers-outline",
+            label: "Tier Management",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentTierManagement"),
+          },
+          {
+            key: "offers",
+            icon: "pricetags-outline",
+            label: "Offer Management",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentOffers"),
+          },
+          {
+            key: "agents",
+            icon: "people-outline",
+            label: "Agents",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentAgents"),
+          },
+          {
+            key: "analytics",
+            icon: "stats-chart-outline",
+            label: "Business Analytics",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentAnalytics"),
+          },
+          {
+            key: "paystack",
+            icon: "card-outline",
+            label: "Paystack Sub-Account",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentPaystack"),
+          },
+        ]
+      : []),
+    {
+      key: "afa",
+      icon: "shield-checkmark-outline",
+      label: "AFA Registration",
+      tint: c.sky,
+      onPress: () => navigation.navigate("AfaRegistration"),
+    },
+    {
+      key: "topup",
+      icon: "wallet-outline",
+      label: "Wallet Top-up",
+      tint: c.mint,
+      onPress: () => navigation.navigate("WalletTopUp"),
+    },
+    {
+      key: "settings",
+      icon: "options-outline",
+      label: "Settings",
+      tint: c.mint,
+      onPress: () => navigation.navigate("Profile"),
+    },
+    {
+      key: "admin",
+      icon: "logo-whatsapp",
+      label: "Contact Admin",
+      tint: c.mint,
+      onPress: () =>
+        openWhatsApp(
+          ADMIN_WHATSAPP,
+          "Hi Admin, I need help with my Super Agent account on the Mystiwan E-Business app.",
+        ),
+    },
+  ];
+
+  const displayName =
+    user?.user_metadata?.full_name || user?.email?.split("@")[0] || "User";
+
+  const greeting = (() => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good morning";
+    if (hour < 17) return "Good afternoon";
+    return "Good evening";
+  })();
+
   return (
-    <SafeAreaProvider style={{ flex: 1, backgroundColor: colors.white }}>
-      <ScrollView vertical showsVerticalScrollIndicator={false}>
-        <SafeAreaView style={styles.safeArea}>
-          <StatusBar style="dark" translucent backgroundColor="transparent" />
+    <View style={styles.root}>
+      <StatusBar style={isDark ? "light" : "dark"} />
+      <ScrollView
+        vertical
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingBottom: dockPadding },
+        ]}
+      >
+        {/* Ambient glow anchored behind the hero */}
+        <View pointerEvents="none" style={styles.ambientGlow} />
 
-          {/* Header Section */}
-          <View style={styles.headerSection}>
+        <SafeAreaView edges={["top"]} style={styles.safeArea}>
+          {/* ---------- Top bar ---------- */}
+          <Animated.View style={[styles.topBar, heroEntrance]}>
             <TouchableOpacity
-              style={styles.profileContainer}
+              style={styles.identity}
               onPress={() => navigation.navigate("Profile")}
+              activeOpacity={0.75}
             >
-              <View style={styles.avatarContainer}>
-                <Ionicons name="person" size={24} color={colors.white} />
-              </View>
-              {user && (
-                <View style={styles.userInfo}>
-                  <Text style={styles.welcomeText}>Welcome back,</Text>
-                  <Text
-                    style={styles.usernameText}
-                    numberOfLines={2}
-                    ellipsizeMode="tail"
-                    adjustsFontSizeToFit
-                    minimumFontScale={0.8}
-                  >
-                    {user.user_metadata?.full_name ||
-                      user.email?.split("@")[0] ||
-                      "User"}
-                  </Text>
-                  {isSuperAgent ? (
-                    <View
-                      style={[
-                        styles.roleBadge,
-                        String(
-                          user?.user_metadata?.super_agent_badge ||
-                            user?.app_metadata?.super_agent_badge ||
-                            "enterprise",
-                        ).toLowerCase() === "pro"
-                          ? styles.proBadge
-                          : styles.enterpriseBadge,
-                      ]}
-                    >
-                      <Ionicons
-                        name={
-                          String(
-                            user?.user_metadata?.super_agent_badge ||
-                              user?.app_metadata?.super_agent_badge ||
-                              "enterprise",
-                          ).toLowerCase() === "pro"
-                            ? "flash"
-                            : "business"
-                        }
-                        size={11}
-                        color={colors.white}
-                        style={{ marginRight: 4 }}
-                      />
-                      <Text style={styles.roleBadgeText}>
-                        {String(
-                          user?.user_metadata?.super_agent_badge ||
-                            user?.app_metadata?.super_agent_badge ||
-                            "enterprise",
-                        ).toLowerCase() === "pro"
-                          ? "Pro"
-                          : "Enterprise"}
-                      </Text>
-                    </View>
-                  ) : isAgent ? (
-                    <View style={[styles.roleBadge, styles.agentBadge]}>
-                      <Ionicons
-                        name="people"
-                        size={11}
-                        color={colors.white}
-                        style={{ marginRight: 4 }}
-                      />
-                      <Text style={styles.roleBadgeText}>Agent</Text>
-                    </View>
-                  ) : null}
-                </View>
-              )}
-            </TouchableOpacity>
-            <View style={styles.headerActions}>
-              <TouchableOpacity
-                style={styles.notificationContainer}
-                onPress={() => navigation.navigate("Notifications")}
+              <LinearGradient
+                colors={[c.heroVia, c.heroTo]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.avatar}
               >
-                <View style={styles.iconCircle}>
-                  <Ionicons
-                    name="notifications"
-                    size={24}
-                    color={colors.primary}
-                  />
-                  {unreadCount > 0 && (
-                    <View style={styles.notificationBadge}>
-                      <Text style={styles.badgeText}>
-                        {unreadCount > 99 ? "99+" : unreadCount}
-                      </Text>
-                    </View>
-                  )}
-                </View>
-              </TouchableOpacity>
+                <Text style={styles.avatarInitial}>
+                  {displayName.charAt(0).toUpperCase()}
+                </Text>
+              </LinearGradient>
 
-              {isSuperAgent && (
-                <TouchableOpacity
-                  style={styles.menuButton}
-                  onPress={() => setMenuOpen((prev) => !prev)}
-                >
-                  <Ionicons name="menu" size={28} color={colors.primary} />
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
-
-          {isSuperAgent && menuOpen && (
-            <View style={styles.superAgentMenuOverlay}>
-              <TouchableOpacity
-                style={styles.superAgentMenuBackdrop}
-                activeOpacity={1}
-                onPress={() => setMenuOpen(false)}
-              />
-              <View style={styles.superAgentMenuCard}>
-                <Text style={styles.superAgentMenuTitle}>Super Agent Menu</Text>
-
-                {isEnterpriseSuperAgent && (
-                  <TouchableOpacity
-                    style={styles.superAgentMenuItem}
-                    onPress={() => {
-                      setMenuOpen(false);
-                      navigation.navigate("SuperAgentTierManagement");
-                    }}
-                  >
-                    <Ionicons name="layers" size={18} color={colors.primary} />
-                    <Text style={styles.superAgentMenuText}>
-                      Tier Management
-                    </Text>
-                  </TouchableOpacity>
-                )}
-
-                {isEnterpriseSuperAgent && (
-                  <TouchableOpacity
-                    style={styles.superAgentMenuItem}
-                    onPress={() => {
-                      setMenuOpen(false);
-                      navigation.navigate("SuperAgentOffers");
-                    }}
+              <View style={styles.identityText}>
+                <Text style={styles.greeting} numberOfLines={1}>
+                  {greeting}
+                </Text>
+                <Text style={styles.displayName} numberOfLines={1}>
+                  {displayName}
+                </Text>
+                {isSuperAgent ? (
+                  <View
+                    style={[
+                      styles.roleBadge,
+                      isProSuperAgent
+                        ? styles.roleBadgePro
+                        : styles.roleBadgeEnterprise,
+                    ]}
                   >
                     <Ionicons
-                      name="business"
-                      size={18}
-                      color={colors.primary}
+                      name={isProSuperAgent ? "flash" : "business"}
+                      size={9}
+                      color={isProSuperAgent ? c.amber : c.mint}
                     />
-                    <Text style={styles.superAgentMenuText}>
-                      Offer Management
-                    </Text>
-                  </TouchableOpacity>
-                )}
-
-                {isEnterpriseSuperAgent && (
-                  <TouchableOpacity
-                    style={styles.superAgentMenuItem}
-                    onPress={() => {
-                      setMenuOpen(false);
-                      navigation.navigate("SuperAgentAgents");
-                    }}
-                  >
-                    <Ionicons name="people" size={18} color={colors.primary} />
-                    <Text style={styles.superAgentMenuText}>Agents</Text>
-                  </TouchableOpacity>
-                )}
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("History");
-                  }}
-                >
-                  <Ionicons name="receipt" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Orders</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("SuperAgentAnalytics");
-                  }}
-                >
-                  <Ionicons name="analytics" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>
-                    Business Analytics
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("AfaRegistration");
-                  }}
-                >
-                  <Ionicons
-                    name="shield-checkmark"
-                    size={18}
-                    color={colors.secondary}
-                  />
-                  <Text style={styles.superAgentMenuText}>
-                    AFA Registration
-                  </Text>
-                </TouchableOpacity>
-
-                {isEnterpriseSuperAgent && (
-                  <TouchableOpacity
-                    style={styles.superAgentMenuItem}
-                    onPress={() => {
-                      setMenuOpen(false);
-                      navigation.navigate("SuperAgentPaystack");
-                    }}
-                  >
-                    <Ionicons name="card" size={18} color={colors.primary} />
-                    <Text style={styles.superAgentMenuText}>
-                      Paystack Sub-Account
-                    </Text>
-                  </TouchableOpacity>
-                )}
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("WalletTopUp");
-                  }}
-                >
-                  <Ionicons name="wallet" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Wallet Top-up</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    navigation.navigate("Profile");
-                  }}
-                >
-                  <Ionicons name="settings" size={18} color={colors.primary} />
-                  <Text style={styles.superAgentMenuText}>Settings</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.superAgentMenuItem}
-                  onPress={() => {
-                    setMenuOpen(false);
-                    const message =
-                      "Hi Admin, I need help with my Super Agent account on the Mystiwan E-Business app.";
-                    const whatsappUrl = `https://wa.me/message/45GU7PROOYDFE1?text=${encodeURIComponent(
-                      message,
-                    )}`;
-                    Linking.openURL(whatsappUrl);
-                  }}
-                >
-                  <Ionicons
-                    name="logo-whatsapp"
-                    size={18}
-                    color={colors.secondary}
-                  />
-                  <Text style={styles.superAgentMenuText}>Contact Admin</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          )}
-
-          {/* Ads Section */}
-          {ads.length > 0 ? (
-            <React.Fragment>
-              <ScrollView
-                ref={adsScrollViewRef}
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.adsScrollView}
-                contentContainerStyle={{
-                  ...styles.adsScrollContent,
-                  paddingHorizontal: 30,
-                  paddingVertical: 15,
-                }}
-                bounces={false}
-                onScroll={handleScroll}
-                onScrollBeginDrag={() => {
-                  if (autoScrollIntervalRef.current) {
-                    clearInterval(autoScrollIntervalRef.current);
-                  }
-                }}
-                onScrollEndDrag={() => {
-                  if (ads.length > 1) {
-                    autoScrollIntervalRef.current = setInterval(() => {
-                      setCurrentAdIndex((prevIndex) => {
-                        const nextIndex = (prevIndex + 1) % (ads.length + 1);
-                        if (adsScrollViewRef.current) {
-                          adsScrollViewRef.current.scrollTo({
-                            x: nextIndex * 280,
-                            animated: true,
-                          });
-                        }
-                        return nextIndex;
-                      });
-                    }, 4000);
-                  }
-                }}
-                onMomentumScrollEnd={(event) => {
-                  const scrollPosition = event.nativeEvent.contentOffset.x;
-                  const newIndex = Math.round(scrollPosition / 295);
-                  if (
-                    newIndex !== currentAdIndex &&
-                    newIndex >= 0 &&
-                    newIndex < ads.length + 1
-                  ) {
-                    setCurrentAdIndex(newIndex);
-                    if (newIndex > 0 && ads[newIndex - 1]) {
-                      updateAdImpression(ads[newIndex - 1].id);
-                    }
-                  }
-                }}
-                scrollEventThrottle={16}
-              >
-                {/* Static WhatsApp Ad Card (always first) */}
-                <TouchableOpacity
-                  key="whatsapp-inapp-ad"
-                  style={[
-                    styles.individualAdCard,
-                    { backgroundColor: colors.primary },
-                  ]}
-                  onPress={() => {
-                    const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
-                      "Hi, I want to advertise my business on your app",
-                    )}`;
-                    Linking.openURL(whatsappUrl);
-                  }}
-                >
-                  <View style={styles.adOverlay}>
-                    <Text style={[styles.adTitle, { fontSize: 20 }]}>
-                      Advertise your business here
-                    </Text>
-                    <Text style={[styles.adDescription, { fontSize: 14 }]}>
-                      Reach thousands of users instantly. Tap to contact us on
-                      WhatsApp!
-                    </Text>
                     <Text
                       style={[
-                        styles.adActionText,
-                        {
-                          color: colors.light,
-                          fontWeight: "bold",
-                          fontSize: 16,
-                        },
+                        styles.roleBadgeText,
+                        { color: isProSuperAgent ? c.amber : c.mint },
                       ]}
                     >
-                      Contact via WhatsApp
+                      {isProSuperAgent ? "Pro Agent" : "Enterprise"}
                     </Text>
                   </View>
+                ) : isAgent ? (
+                  <View style={[styles.roleBadge, styles.roleBadgeAgent]}>
+                    <Ionicons name="people" size={9} color={c.sky} />
+                    <Text style={[styles.roleBadgeText, { color: c.sky }]}>
+                      Agent
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            </TouchableOpacity>
+
+            <View style={styles.topBarActions}>
+              <TouchableOpacity
+                style={styles.iconButton}
+                onPress={() => navigation.navigate("Notifications")}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name="notifications-outline"
+                  size={20}
+                  color={c.textPrimary}
+                />
+                {unreadCount > 0 && (
+                  <View style={styles.notificationBadge}>
+                    <Text style={styles.badgeText}>
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+
+              {isSuperAgent ? (
+                /* The bottom dock's centre button owns the overflow menu on
+                   native, and the in-tree drawer never reliably received its
+                   own open tap. Native therefore shows the profile button here
+                   and reaches every destination through the dock instead. */
+                Platform.OS === "web" ? (
+                  <TouchableOpacity
+                    style={styles.iconButton}
+                    onPress={toggleMenu}
+                    activeOpacity={0.7}
+                    hitSlop={6}
+                  >
+                    <Ionicons
+                      name="ellipsis-horizontal"
+                      size={20}
+                      color={c.textPrimary}
+                    />
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.iconButton}
+                    onPress={() => navigation.navigate("Profile")}
+                    activeOpacity={0.7}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={20}
+                      color={c.textPrimary}
+                    />
+                  </TouchableOpacity>
+                )
+              ) : (
+                <TouchableOpacity
+                  style={styles.iconButton}
+                  onPress={() => navigation.navigate("Profile")}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons
+                    name="person-outline"
+                    size={20}
+                    color={c.textPrimary}
+                  />
                 </TouchableOpacity>
-                {ads.map((ad, index) => {
-                  const AdComponent = ad.image_url
-                    ? ImageBackground
-                    : TouchableOpacity;
-                  const adProps = ad.image_url
-                    ? { source: { uri: ad.image_url }, resizeMode: "cover" }
-                    : {};
-                  return (
-                    <AdComponent
-                      key={ad.id || index}
-                      ref={(ref) => (adRefs.current[ad.id] = ref)}
-                      style={styles.individualAdCard}
-                      {...adProps}
-                      onLayout={() => {
-                        // Check visibility when ad is laid out
-                        const checkVisibilityWithRetry = (retries = 3) => {
-                          const adRef = adRefs.current[ad.id];
-                          if (adRef && typeof adRef.measure === "function") {
-                            setTimeout(
-                              () => checkAdVisibility(ad.id, adRef),
-                              100,
-                            );
-                          } else if (retries > 0) {
-                            setTimeout(
-                              () => checkVisibilityWithRetry(retries - 1),
-                              200,
-                            );
-                          }
-                        };
-                        checkVisibilityWithRetry();
-                      }}
-                      onPress={async () => {
-                        await updateAdClick(ad.id);
-                        if (ad?.website_url) {
-                          Linking.openURL(ad.website_url);
-                        } else if (ad?.action_url) {
-                          if (ad.action_url.startsWith("http")) {
-                            Linking.openURL(ad.action_url);
-                          } else {
-                            switch (ad.action_url) {
-                              case "data":
-                                navigation.navigate("Data");
-                                break;
-                              case "payments":
-                                showSuccess(
-                                  "Payments",
-                                  "Multiple payment options available!",
-                                );
-                                break;
-                              case "airtime":
-                                showSuccess(
-                                  "Airtime",
-                                  "Airtime top-up coming soon!",
-                                );
-                                break;
-                              case "shop":
-                                showSuccess(
-                                  "Shopping",
-                                  "Online shopping coming soon!",
-                                );
-                                break;
-                              case "business":
-                                showSuccess(
-                                  "Business",
-                                  "Contact us for business solutions!",
-                                );
-                                break;
-                              case "signup":
-                                showSuccess(
-                                  "Welcome!",
-                                  "Enjoy your free data bonus!",
-                                );
-                                break;
-                              default:
-                                showSuccess(
-                                  "Ad",
-                                  ad.action_text || "Learn More",
-                                );
-                            }
-                          }
-                        } else {
-                          showSuccess("Ad", ad.action_text || "Learn More");
-                        }
-                      }}
+              )}
+            </View>
+          </Animated.View>
+
+          {/* ---------- Hero ---------- */}
+          <Animated.View style={[styles.heroWrap, heroEntrance]}>
+            <LinearGradient
+              colors={[c.heroFrom, c.heroVia, c.heroTo]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.hero}
+            >
+              <View pointerEvents="none" style={styles.heroHalo} />
+              <View pointerEvents="none" style={styles.heroArc} />
+
+              <View style={styles.heroTopRow}>
+                <View style={styles.heroLabelRow}>
+                  <Ionicons
+                    name={isSuperAgent ? "wallet" : "sparkles"}
+                    size={13}
+                    color={c.textSecondary}
+                  />
+                  <Text style={styles.heroLabel}>
+                    {isSuperAgent ? "Available balance" : "Your data hub"}
+                  </Text>
+                </View>
+                <View style={styles.heroPill}>
+                  <View style={styles.heroPillDot} />
+                  <Text style={styles.heroPillText}>
+                    {isSuperAgent
+                      ? isProSuperAgent
+                        ? "Pro"
+                        : "Enterprise"
+                      : "Live"}
+                  </Text>
+                </View>
+              </View>
+
+              {isSuperAgent ? (
+                <>
+                  <Text style={styles.heroAmount}>
+                    {loadingWallet && walletBalance === null
+                      ? "Ghc —.—"
+                      : formatGhc(walletBalance)}
+                  </Text>
+                  <Text style={styles.heroFootnote}>
+                    Operational balance for agent orders
+                  </Text>
+
+                  <View style={styles.heroActions}>
+                    <TouchableOpacity
+                      style={styles.heroPrimaryAction}
+                      onPress={() =>
+                        navigation.navigate("Data", { network: "mtn" })
+                      }
+                      activeOpacity={0.85}
                     >
-                      <View style={styles.adOverlay}>
-                        <Text style={styles.adTitle}>{ad.title}</Text>
-                        {ad.description && (
-                          <Text style={styles.adDescription}>
-                            {ad.description}
+                      <Ionicons name="flash" size={15} color="#04231F" />
+                      <Text style={styles.heroPrimaryText}>Buy Data</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.heroGhostAction}
+                      onPress={() => navigation.navigate("WalletTopUp")}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="add" size={16} color={c.mint} />
+                      <Text style={styles.heroGhostText}>Top Up</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.heroTagline}>
+                    {"Airtime, bundles and\ndata across all networks."}
+                  </Text>
+                  <View style={styles.heroActions}>
+                    <TouchableOpacity
+                      style={styles.heroPrimaryAction}
+                      onPress={() =>
+                        navigation.navigate("Data", { network: "mtn" })
+                      }
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="flash" size={15} color="#04231F" />
+                      <Text style={styles.heroPrimaryText}>Buy Data</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.heroGhostAction}
+                      onPress={() => navigation.navigate("History")}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="receipt" size={15} color={c.mint} />
+                      <Text style={styles.heroGhostText}>My Orders</Text>
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </LinearGradient>
+          </Animated.View>
+
+          {/* ---------- Quick services ---------- */}
+          <Animated.View style={quickEntrance}>
+            <View style={styles.quickGrid}>
+              {quickActions.map((action) => (
+                <TouchableOpacity
+                  key={action.key}
+                  style={styles.quickTile}
+                  onPress={action.onPress}
+                  activeOpacity={0.75}
+                >
+                  <View
+                    style={[
+                      styles.quickIcon,
+                      { borderColor: `${action.tint}33` },
+                    ]}
+                  >
+                    <Ionicons
+                      name={action.icon}
+                      size={19}
+                      color={action.tint}
+                    />
+                  </View>
+                  <Text style={styles.quickLabel} numberOfLines={1}>
+                    {action.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </Animated.View>
+
+          {/* ---------- Business suite (super agents) ---------- */}
+          {isSuperAgent ? (
+            <Animated.View style={[styles.section, suiteEntrance]}>
+              <SectionHead
+                styles={styles}
+                c={c}
+                eyebrow="Manage"
+                title="Business Suite"
+                action="Analytics"
+                onAction={() => navigation.navigate("SuperAgentAnalytics")}
+              />
+              <View style={styles.suiteGrid}>
+                {suiteItems.map((item) => (
+                  <TouchableOpacity
+                    key={item.key}
+                    style={styles.suiteTile}
+                    onPress={item.onPress}
+                    activeOpacity={0.75}
+                  >
+                    <View
+                      style={[
+                        styles.suiteIcon,
+                        { backgroundColor: `${item.tint}1A` },
+                      ]}
+                    >
+                      <Ionicons name={item.icon} size={18} color={item.tint} />
+                    </View>
+                    <Text style={styles.suiteLabel} numberOfLines={1}>
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </Animated.View>
+          ) : null}
+
+          {/* ---------- Networks ---------- */}
+          <Animated.View style={[styles.section, networkEntrance]}>
+            <SectionHead
+              styles={styles}
+              c={c}
+              eyebrow="Buy"
+              title="Choose a network"
+              action="Browse"
+              onAction={() => navigation.navigate("Data")}
+            />
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.networkScrollContent}
+            >
+              {networkCards.map((card) => (
+                <TouchableOpacity
+                  key={card.key}
+                  style={styles.networkCardTouchable}
+                  onPress={() =>
+                    navigation.navigate("Data", { network: card.key })
+                  }
+                  activeOpacity={0.88}
+                >
+                  <ImageBackground
+                    source={card.image}
+                    style={styles.networkCard}
+                    imageStyle={styles.networkImage}
+                    resizeMode="cover"
+                  >
+                    {/* Scrim dims the network photo so the white copy and the
+                        brand accent stay legible.
+
+                        No `locations` here on purpose: the Android native
+                        gradient has historically been unreliable with 3+ stops
+                        when a locations array is also supplied, and a failed
+                        stop makes the whole overlay drop out - the dim then
+                        only exists on web. Two evenly-spaced stops render
+                        identically on both platforms.
+
+                        8-digit rgba() hex is also avoided; plain rgba() with
+                        explicit alpha is the form the Android parser
+                        accepts consistently. */}
+                    <LinearGradient
+                      colors={[`${c.scrim}`, `${c.scrim}`]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 0, y: 1 }}
+                      style={styles.networkScrim}
+                    />
+
+                    <View style={styles.networkCardContent}>
+                      {/* Tag only - the old bordered pill + badge pair was
+                          two competing chips for one idea. */}
+                      <View style={styles.networkTagRow}>
+                        <View
+                          style={[
+                            styles.networkDot,
+                            { backgroundColor: card.accent },
+                          ]}
+                        />
+                        <Text
+                          style={[
+                            styles.networkTagText,
+                            { color: card.accent },
+                          ]}
+                        >
+                          {card.tag}
+                        </Text>
+                      </View>
+
+                      <View>
+                        <Text style={styles.networkName}>{card.name}</Text>
+                        <Text style={styles.networkTitle} numberOfLines={2}>
+                          {card.desc}
+                        </Text>
+                        <Text style={styles.networkSubtitle}>{card.sub}</Text>
+
+                        <View style={styles.networkActionRow}>
+                          <Text
+                            style={[
+                              styles.networkActionText,
+                              { color: card.accent },
+                            ]}
+                          >
+                            Browse bundles
+                          </Text>
+                          <View
+                            style={[
+                              styles.networkActionIcon,
+                              {
+                                backgroundColor: card.accent,
+                                borderColor: card.accent,
+                              },
+                            ]}
+                          >
+                            <Ionicons
+                              name="arrow-forward"
+                              size={13}
+                              color="#04231F"
+                            />
+                          </View>
+                        </View>
+                      </View>
+                    </View>
+                  </ImageBackground>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </Animated.View>
+
+          {/* ---------- Recent activity ---------- */}
+          <Animated.View style={[styles.section, activityEntrance]}>
+            <SectionHead
+              styles={styles}
+              c={c}
+              eyebrow="Latest"
+              title="Recent activity"
+              action="View all"
+              onAction={() => navigation.navigate("History")}
+            />
+
+            <View style={styles.activityCard}>
+              {loadingTransactions ? (
+                renderRecentTransactionPlaceholders()
+              ) : transactions.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <View style={styles.emptyGlyph}>
+                    <Ionicons
+                      name="receipt-outline"
+                      size={26}
+                      color={c.textMuted}
+                    />
+                  </View>
+                  <Text style={styles.emptyTitle}>No activity yet</Text>
+                  <Text style={styles.emptyMessage}>
+                    Your purchases will appear here once you buy data.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.emptyCta}
+                    onPress={() => navigation.navigate("Data")}
+                    activeOpacity={0.85}
+                  >
+                    <Text style={styles.emptyCtaText}>Browse bundles</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                transactions.map((transaction, index) => {
+                  const tone = statusTone(transaction.status, tones);
+                  return (
+                    <TouchableOpacity
+                      key={transaction.id}
+                      style={styles.activityRow}
+                      activeOpacity={0.7}
+                      onPress={() =>
+                        navigation.navigate("Receipt", { transaction })
+                      }
+                    >
+                      <View
+                        style={[
+                          styles.activityMarker,
+                          index === transactions.length - 1 &&
+                            styles.activityMarkerLast,
+                        ]}
+                      />
+                      <View style={styles.activityBody}>
+                        <Text style={styles.activityTitle} numberOfLines={1}>
+                          {transaction.offer_title || "Data purchase"}
+                        </Text>
+                        <Text style={styles.activityMeta} numberOfLines={1}>
+                          {transaction.network
+                            ? `${String(transaction.network).toUpperCase()} · `
+                            : ""}
+                          {transaction.data_amount || "Bundle"}
+                        </Text>
+                      </View>
+
+                      <View style={styles.activityTail}>
+                        <Text style={styles.activityAmount}>
+                          {transaction.amount
+                            ? `-${formatGhc(transaction.amount)}`
+                            : "N/A"}
+                        </Text>
+                        {tone ? (
+                          <View
+                            style={[
+                              styles.statusPill,
+                              { backgroundColor: tone.bg },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                styles.statusPillText,
+                                { color: tone.color },
+                              ]}
+                            >
+                              {tone.label}
+                            </Text>
+                          </View>
+                        ) : (
+                          <Text style={styles.activityTime}>
+                            {relativeTime(transaction.created_at) || "—"}
                           </Text>
                         )}
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })
+              )}
+            </View>
+          </Animated.View>
+
+          {/* ---------- Promotions ---------- */}
+          <Animated.View style={[styles.section, promoEntrance]}>
+            <SectionHead
+              styles={styles}
+              c={c}
+              eyebrow="Discover"
+              title="Offers & promos"
+            />
+
+            <ScrollView
+              ref={adsScrollViewRef}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.adsScrollView}
+              contentContainerStyle={styles.adsScrollContent}
+              bounces={false}
+              onScroll={handleScroll}
+              onScrollBeginDrag={() => {
+                if (autoScrollIntervalRef.current) {
+                  clearInterval(autoScrollIntervalRef.current);
+                }
+              }}
+              onScrollEndDrag={() => {
+                if (ads.length > 1) {
+                  autoScrollIntervalRef.current = setInterval(() => {
+                    setCurrentAdIndex((prevIndex) => {
+                      const nextIndex = (prevIndex + 1) % (ads.length + 1);
+                      if (adsScrollViewRef.current) {
+                        adsScrollViewRef.current.scrollTo({
+                          x: nextIndex * 295,
+                          animated: true,
+                        });
+                      }
+                      return nextIndex;
+                    });
+                  }, 4000);
+                }
+              }}
+              onMomentumScrollEnd={(event) => {
+                const scrollPosition = event.nativeEvent.contentOffset.x;
+                const newIndex = Math.round(scrollPosition / 295);
+                if (
+                  newIndex !== currentAdIndex &&
+                  newIndex >= 0 &&
+                  newIndex < ads.length + 1
+                ) {
+                  setCurrentAdIndex(newIndex);
+                  if (newIndex > 0 && ads[newIndex - 1]) {
+                    updateAdImpression(ads[newIndex - 1].id);
+                  }
+                }
+              }}
+              scrollEventThrottle={16}
+            >
+              {/* Static WhatsApp promo card (always first) */}
+              <TouchableOpacity
+                key="whatsapp-inapp-ad"
+                style={styles.adCard}
+                activeOpacity={0.9}
+                onPress={() =>
+                  openWhatsApp(
+                    SUPPORT_WHATSAPP,
+                    "Hi, I want to advertise my business on your app",
+                  )
+                }
+              >
+                <LinearGradient
+                  colors={["#0B3B33", "#00A88F"]}
+                  start={{ x: 0, y: 1 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.adCardFill}
+                >
+                  <View style={styles.adBadge}>
+                    <Ionicons name="megaphone" size={10} color="#04231F" />
+                    <Text style={styles.adBadgeText}>Promo</Text>
+                  </View>
+                  <Text style={styles.adTitle}>
+                    Advertise your business here
+                  </Text>
+                  <Text style={styles.adDescription}>
+                    Reach thousands of users instantly.
+                  </Text>
+                  <View style={styles.adActionRow}>
+                    <Text style={styles.adActionText}>Contact us</Text>
+                    <Ionicons name="arrow-forward" size={13} color={c.mint} />
+                  </View>
+                </LinearGradient>
+              </TouchableOpacity>
+
+              {loadingAds
+                ? [0, 1].map((index) => (
+                    <View key={`ad-skeleton-${index}`} style={styles.adCard}>
+                      <Animated.View
+                        style={[
+                          styles.adCardFill,
+                          { opacity: transactionsSkeletonOpacity },
+                        ]}
+                      />
+                    </View>
+                  ))
+                : null}
+
+              {ads.map((ad, index) => {
+                const AdComponent = ad.image_url
+                  ? ImageBackground
+                  : TouchableOpacity;
+                const adProps = ad.image_url
+                  ? { source: { uri: ad.image_url }, resizeMode: "cover" }
+                  : {};
+                return (
+                  <AdComponent
+                    key={ad.id || index}
+                    ref={(ref) => (adRefs.current[ad.id] = ref)}
+                    style={styles.adCard}
+                    {...adProps}
+                    onLayout={() => {
+                      // Check visibility when ad is laid out
+                      const checkVisibilityWithRetry = (retries = 3) => {
+                        const adRef = adRefs.current[ad.id];
+                        if (adRef && typeof adRef.measure === "function") {
+                          setTimeout(
+                            () => checkAdVisibility(ad.id, adRef),
+                            100,
+                          );
+                        } else if (retries > 0) {
+                          setTimeout(
+                            () => checkVisibilityWithRetry(retries - 1),
+                            200,
+                          );
+                        }
+                      };
+                      checkVisibilityWithRetry();
+                    }}
+                    onPress={async () => {
+                      await updateAdClick(ad.id);
+                      if (ad?.website_url) {
+                        Linking.openURL(ad.website_url);
+                      } else if (ad?.action_url) {
+                        if (ad.action_url.startsWith("http")) {
+                          Linking.openURL(ad.action_url);
+                        } else {
+                          switch (ad.action_url) {
+                            case "data":
+                              navigation.navigate("Data");
+                              break;
+                            case "payments":
+                              showSuccess(
+                                "Payments",
+                                "Multiple payment options available!",
+                              );
+                              break;
+                            case "airtime":
+                              showSuccess(
+                                "Airtime",
+                                "Airtime top-up coming soon!",
+                              );
+                              break;
+                            case "shop":
+                              showSuccess(
+                                "Shopping",
+                                "Online shopping coming soon!",
+                              );
+                              break;
+                            case "business":
+                              showSuccess(
+                                "Business",
+                                "Contact us for business solutions!",
+                              );
+                              break;
+                            case "signup":
+                              showSuccess(
+                                "Welcome!",
+                                "Enjoy your free data bonus!",
+                              );
+                              break;
+                            default:
+                              showSuccess("Ad", ad.action_text || "Learn More");
+                          }
+                        }
+                      } else {
+                        showSuccess("Ad", ad.action_text || "Learn More");
+                      }
+                    }}
+                  >
+                    <LinearGradient
+                      colors={[`${c.adScrim}`, `${c.adScrim}`]}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 0, y: 1 }}
+                      style={styles.adCardFill}
+                    >
+                      <Text style={styles.adTitle}>{ad.title}</Text>
+                      {ad.description ? (
+                        <Text style={styles.adDescription} numberOfLines={3}>
+                          {ad.description}
+                        </Text>
+                      ) : null}
+                      <View style={styles.adActionRow}>
                         <Text style={styles.adActionText}>
                           {ad.action_text || "Learn More"}
                         </Text>
+                        <Ionicons
+                          name="arrow-forward"
+                          size={13}
+                          color={c.mint}
+                        />
                       </View>
-                    </AdComponent>
-                  );
-                })}
-                {/* Spacer to allow scrolling to last card */}
-                <View style={{ width: 20 }} />
-              </ScrollView>
-              {/* Ad Indicators */}
+                    </LinearGradient>
+                  </AdComponent>
+                );
+              })}
+
+              <View style={{ width: 8 }} />
+            </ScrollView>
+
+            {ads.length > 0 ? (
               <View style={styles.adIndicators}>
                 {[{ id: "whatsapp-inapp-ad" }, ...ads].map((_, index) => (
                   <TouchableOpacity
@@ -1159,7 +1853,6 @@ export default function HomeScreen({ navigation }) {
                     onPress={() => {
                       setCurrentAdIndex(index);
                       if (adsScrollViewRef.current) {
-                        // For the last item, scroll to end to ensure it's fully visible
                         if (index === ads.length) {
                           adsScrollViewRef.current.scrollToEnd({
                             animated: true,
@@ -1175,760 +1868,942 @@ export default function HomeScreen({ navigation }) {
                   />
                 ))}
               </View>
-            </React.Fragment>
-          ) : (
-            <View style={styles.centeredAdContainer}>
-              <TouchableOpacity
-                key="whatsapp-inapp-ad"
-                style={[
-                  styles.individualAdCard,
-                  { backgroundColor: colors.primary },
-                ]}
-                onPress={() => {
-                  const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
-                    "Hi, I want to advertise my business on your app",
-                  )}`;
-                  Linking.openURL(whatsappUrl);
-                }}
-              >
-                <View style={styles.adOverlay}>
-                  <Text style={[styles.adTitle, { fontSize: 20 }]}>
-                    Advertise your business here
-                  </Text>
-                  <Text style={[styles.adDescription, { fontSize: 14 }]}>
-                    Reach thousands of users instantly. Tap to contact us on
-                    WhatsApp!
-                  </Text>
-                  <Text
-                    style={[
-                      styles.adActionText,
-                      { color: colors.light, fontWeight: "bold", fontSize: 16 },
-                    ]}
-                  >
-                    Contact via WhatsApp
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            </View>
-          )}
+            ) : null}
+          </Animated.View>
 
-          {/* Quick Actions Section */}
-          <Text style={styles.header}>Quick Services</Text>
-          <View style={styles.quickActions}>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate("History")}
-            >
-              <Ionicons name="receipt" size={24} color={colors.primary} />
-              <Text style={styles.actionText}>History</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => {
-                const message =
-                  "Hi, I need help with the Mystiwan E-Business app";
-                const whatsappUrl = `https://wa.me/233532973455?text=${encodeURIComponent(
-                  message,
-                )}`;
-                Linking.openURL(whatsappUrl);
-              }}
-            >
-              <Ionicons
-                name="chatbubble-ellipses"
-                size={24}
-                color={colors.primary}
-              />
-              <Text style={styles.actionText}>Support</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate("AfaRegistration")}
-            >
-              <Ionicons
-                name="shield-checkmark"
-                size={24}
-                color={colors.secondary}
-              />
-              <Text style={styles.actionText}>AFA Reg</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate("Profile")}
-            >
-              <Ionicons name="settings" size={24} color={colors.primary} />
-              <Text style={styles.actionText}>Settings</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/*Network Card Section */}
-          <Text style={styles.header}>Mobile Networks</Text>
-          <View style={styles.networkContainer}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.networkScrollContent}
-            >
-              {networkCards.map((card) => (
-                <TouchableOpacity
-                  key={card.key}
-                  style={styles.networkCardTouchable}
-                  onPress={() =>
-                    navigation.navigate("Data", { network: card.key })
-                  }
-                  activeOpacity={0.9}
-                >
-                  <ImageBackground
-                    source={card.image}
-                    style={styles.networkCard}
-                    imageStyle={styles.networkImage}
-                    resizeMode="cover"
-                  >
-                    <View style={styles.networkCardShade} />
-                    <View style={styles.networkCardContent}>
-                      <View style={styles.networkCardTopRow}>
-                        <View style={styles.networkPill}>
-                          <View
-                            style={[
-                              styles.networkDot,
-                              { backgroundColor: card.accent },
-                            ]}
-                          />
-                          <Text style={styles.networkPillText}>
-                            {card.name}
-                          </Text>
-                        </View>
-                        <View style={styles.networkBadge}>
-                          <Ionicons
-                            name="flash"
-                            size={12}
-                            color={colors.white}
-                          />
-                          <Text style={styles.networkBadgeText}>
-                            {card.tag}
-                          </Text>
-                        </View>
-                      </View>
-                      <View style={styles.networkCardBottom}>
-                        <Text style={styles.networkTitle}>{card.desc}</Text>
-                        <Text style={styles.networkSubtitle}>{card.sub}</Text>
-                        <View style={styles.networkActionRow}>
-                          <Text style={styles.networkActionText}>Buy Data</Text>
-                          <View style={styles.networkActionIcon}>
-                            <Ionicons
-                              name="arrow-forward"
-                              size={12}
-                              color={colors.white}
-                            />
-                          </View>
-                        </View>
-                      </View>
-                    </View>
-                  </ImageBackground>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-
-          {/* transaction history section */}
-          <Text style={styles.header}>Recent Transactions</Text>
-          <View style={styles.historyContainer}>
-            {loadingTransactions ? (
-              renderRecentTransactionPlaceholders()
-            ) : transactions.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Ionicons name="receipt" size={48} color={colors.tint} />
-                <Text style={styles.emptyTitle}>No Transactions</Text>
-                <Text style={styles.emptyMessage}>
-                  Your transaction history will appear here
-                </Text>
-              </View>
-            ) : (
-              transactions.map((transaction) => (
-                <TouchableOpacity
-                  key={transaction.id}
-                  style={styles.transactionItem}
-                  onPress={() =>
-                    navigation.navigate("Receipt", { transaction })
-                  }
-                >
-                  <View style={styles.transactionLeft}>
-                    <Text style={styles.transactionTitle}>
-                      {transaction.offer_title || "Purchase"}
-                    </Text>
-                    <Text style={styles.transactionDesc}>
-                      {transaction.network
-                        ? `${transaction.network.toUpperCase()} - `
-                        : ""}
-                      {transaction.data_amount || "Data Bundle"}
-                    </Text>
-                  </View>
-                  <View style={styles.transactionRight}>
-                    <Text
-                      style={[
-                        styles.transactionAmount,
-                        transaction.status?.toLowerCase() === "completed" &&
-                          styles.transactionAmountCompleted,
-                        transaction.status?.toLowerCase() === "processing" &&
-                          styles.transactionAmountProcessing,
-                        transaction.status?.toLowerCase() === "pending" &&
-                          styles.transactionAmountPending,
-                      ]}
-                    >
-                      -
-                      {transaction.amount ? `Ghc ${transaction.amount}` : "N/A"}
-                    </Text>
-                    <Text style={styles.transactionDate}>
-                      {transaction.created_at
-                        ? new Date(transaction.created_at).toLocaleDateString()
-                        : "N/A"}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))
-            )}
-          </View>
-
-          {/* Footer */}
+          {/* ---------- Footer ---------- */}
           <View style={styles.footer}>
-            <Text style={styles.footerText}>Powered by Mysiwan-E-Business</Text>
+            <View style={styles.footerMark}>
+              <Ionicons name="shield-checkmark" size={13} color={c.mint} />
+            </View>
+            <Text style={styles.footerText}>
+              Powered by Mystiwan E-Business
+            </Text>
             <Text style={styles.footerSubText}>
-              Secure & Reliable Transactions
+              Secure &amp; reliable transactions
             </Text>
           </View>
         </SafeAreaView>
       </ScrollView>
-    </SafeAreaProvider>
+
+      {/* ---------- Overflow drawer ---------- */}
+      {/* Full-height edge drawer, not a floating card: it is opaque, spans
+          top to bottom, and carries no drop shadow. There is deliberately no
+          dimmed backdrop - the page stays readable behind it and the panel is
+          dismissed with the close button or by picking a destination. */}
+      {isSuperAgent && menuMounted && Platform.OS === "web" ? (
+        // `box-none` so the host never captures a touch on the page behind it -
+        // only the panel itself is interactive.
+        <View
+          pointerEvents="box-none"
+          style={[styles.menuOverlay, styles.menuOverlayPassThrough]}
+        >
+          <Animated.View
+            style={[
+              styles.menuDrawer,
+              drawerStyle,
+              menuOpen ? null : styles.menuDrawerHidden,
+            ]}
+          >
+            <SafeAreaView edges={["top", "bottom"]} style={styles.menuSafeArea}>
+              <View style={styles.menuHeader}>
+                <Text style={styles.menuTitle}>Super Agent Menu</Text>
+                <TouchableOpacity
+                  onPress={() => setMenuOpen(false)}
+                  hitSlop={10}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="close" size={18} color={c.textMuted} />
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView
+                style={styles.menuScroll}
+                showsVerticalScrollIndicator={false}
+              >
+                {menuItems.map((item) => (
+                  <TouchableOpacity
+                    key={`${item.key}-${item.label}`}
+                    style={styles.menuItem}
+                    onPress={() => {
+                      setMenuOpen(false);
+                      item.onPress();
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={[
+                        styles.menuIcon,
+                        { backgroundColor: `${item.tint}1A` },
+                      ]}
+                    >
+                      <Ionicons name={item.icon} size={16} color={item.tint} />
+                    </View>
+                    <Text style={styles.menuItemText}>{item.label}</Text>
+                    <Ionicons
+                      name="chevron-forward"
+                      size={14}
+                      color={c.textMuted}
+                    />
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </SafeAreaView>
+          </Animated.View>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
-const styles = {
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  headerSection: {
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    paddingBottom: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  profileContainer: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    marginRight: 10,
-  },
-  avatarContainer: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: colors.primary,
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  userInfo: {
-    flex: 1,
-    minWidth: 0,
-    marginLeft: 12,
-  },
-  welcomeText: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.6,
-    fontWeight: "500",
-  },
-  usernameText: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-    width: "100%",
-  },
-  roleBadge: {
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    alignItems: "center",
-    borderRadius: 999,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    marginTop: 4,
-    flexShrink: 0,
-  },
-  agentBadge: {
-    backgroundColor: colors.accent,
-  },
-  proBadge: {
-    backgroundColor: colors.danger || "#b91c1c",
-  },
-  enterpriseBadge: {
-    backgroundColor: colors.secondary,
-  },
-  roleBadgeText: {
-    color: colors.white,
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
-  },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  iconCircle: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-    position: "relative",
-  },
-  menuButton: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  notificationBadge: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    backgroundColor: colors.danger,
-    borderRadius: 8,
-    minWidth: 16,
-    height: 16,
-    justifyContent: "center",
-    alignItems: "center",
-    borderWidth: 2,
-    borderColor: colors.white,
-  },
-  badgeText: {
-    color: colors.white,
-    fontSize: 8,
-    fontWeight: "bold",
-  },
-  superAgentMenuOverlay: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    left: 0,
-    bottom: 0,
-    zIndex: 20,
-    justifyContent: "flex-start",
-    alignItems: "flex-end",
-  },
-  superAgentMenuBackdrop: {
-    position: "absolute",
-    top: 0,
-    right: 0,
-    left: 0,
-    bottom: 0,
-    backgroundColor: "rgba(15, 23, 42, 0.18)",
-  },
-  superAgentMenuCard: {
-    position: "relative",
-    marginTop: 84,
-    marginRight: 20,
-    width: 260,
-    backgroundColor: colors.white,
-    borderRadius: 20,
-    padding: 18,
-    shadowColor: "#000",
-    shadowOpacity: 0.14,
-    shadowRadius: 18,
-    elevation: 8,
-  },
-  superAgentMenuTitle: {
-    color: colors.primary,
-    fontSize: 16,
-    fontWeight: "800",
-    marginBottom: 12,
-  },
-  superAgentMenuItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 12,
-    gap: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  superAgentMenuText: {
-    color: colors.dark,
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  superAgentAction: {
-    marginHorizontal: 20,
-    marginTop: 10,
-    marginBottom: 18,
-    backgroundColor: colors.primary,
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-  },
-  superAgentActionText: {
-    color: colors.white,
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  header: {
-    fontSize: 20,
-    fontWeight: "700",
-    marginLeft: 20,
-    marginTop: 20,
-    marginBottom: 15,
-    color: colors.dark,
-  },
-  quickActions: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-  },
-  actionButton: {
-    backgroundColor: colors.white,
-    padding: 16,
-    borderRadius: 20,
-    alignItems: "center",
-    width: "23%",
-    marginBottom: 15,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-  },
-  actionText: {
-    fontSize: 10,
-    fontWeight: "600",
-    color: colors.dark,
-    marginTop: 8,
-    textAlign: "center",
-  },
-  networkContainer: {
-    marginBottom: 20,
-  },
-  networkScrollContent: {
-    paddingHorizontal: 20,
-  },
-  networkCardTouchable: {
-    marginRight: 16,
-    marginBottom: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.18,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  networkCard: {
-    width: 220,
-    height: 220,
-    borderRadius: 26,
-    overflow: "hidden",
-    justifyContent: "space-between",
-    backgroundColor: colors.primary,
-  },
-  networkImage: {
-    borderRadius: 26,
-  },
-  networkCardShade: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(0, 0, 0, 0.35)",
-  },
-  networkCardContent: {
-    flex: 1,
-    padding: 16,
-    justifyContent: "space-between",
-  },
-  networkCardTopRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  networkPill: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 14,
-  },
-  networkDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 6,
-  },
-  networkPillText: {
-    color: colors.white,
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.3,
-  },
-  networkBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.45)",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  networkBadgeText: {
-    color: colors.white,
-    fontSize: 10,
-    fontWeight: "700",
-    marginLeft: 4,
-  },
-  networkCardBottom: {
-    backgroundColor: "rgba(0, 0, 0, 0.35)",
-    padding: 14,
-    borderRadius: 18,
-  },
-  networkTitle: {
-    color: colors.white,
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  networkSubtitle: {
-    color: colors.white,
-    fontSize: 12,
-    opacity: 0.9,
-    marginTop: 4,
-  },
-  networkActionRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 12,
-  },
-  networkActionText: {
-    color: colors.white,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  networkActionIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: "rgba(255, 255, 255, 0.2)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  historyContainer: {
-    marginHorizontal: 20,
-    backgroundColor: colors.light,
-    borderRadius: 24,
-    padding: 10,
-    marginBottom: 30,
-  },
-  placeholderList: {
-    paddingVertical: 6,
-  },
-  transactionPlaceholder: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 16,
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    marginBottom: 10,
-  },
-  placeholderLeft: {
-    flex: 1,
-    marginRight: 12,
-  },
-  placeholderRight: {
-    alignItems: "flex-end",
-  },
-  placeholderLine: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "70%",
-  },
-  placeholderLineShort: {
-    height: 10,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "45%",
-    marginTop: 8,
-  },
-  placeholderAmount: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: 60,
-  },
-  placeholderDate: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.border,
-    width: 50,
-    marginTop: 8,
-  },
-  transactionItem: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 16,
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    marginBottom: 10,
-    elevation: 2,
-  },
-  transactionLeft: {
-    flex: 1,
-  },
-  transactionTitle: {
-    fontWeight: "700",
-    color: colors.dark,
-    fontSize: 15,
-  },
-  transactionDesc: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.6,
-    marginTop: 2,
-  },
-  transactionRight: {
-    alignItems: "flex-end",
-  },
-  transactionAmount: {
-    fontWeight: "bold",
-    color: colors.danger,
-    fontSize: 15,
-  },
-  transactionAmountCompleted: {
-    color: colors.success,
-  },
-  transactionAmountProcessing: {
-    color: colors.primary,
-  },
-  transactionAmountPending: {
-    color: colors.warning,
-  },
-  transactionDate: {
-    fontSize: 10,
-    color: colors.dark,
-    opacity: 0.4,
-    marginTop: 4,
-  },
-  footer: {
-    alignItems: "center",
-    padding: 30,
-    backgroundColor: colors.light,
-    borderTopLeftRadius: 32,
-    borderTopRightRadius: 32,
-  },
-  footerText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: colors.primary,
-  },
-  footerSubText: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.5,
-    marginTop: 4,
-  },
-  individualAdCard: {
-    borderRadius: 24,
-    width: 300,
-    height: 180,
-    marginRight: 15,
-    overflow: "hidden",
-    backgroundColor: colors.primary,
-  },
-  adOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.4)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  adTitle: {
-    fontSize: 22,
-    fontWeight: "bold",
-    color: colors.white,
-    textAlign: "center",
-    marginBottom: 10,
-  },
-  adDescription: {
-    fontSize: 14,
-    color: colors.white,
-    opacity: 0.9,
-    textAlign: "center",
-    marginBottom: 15,
-    lineHeight: 20,
-  },
-  adActionText: {
-    fontSize: 14,
-    color: colors.white,
-    fontWeight: "bold",
-    textDecorationLine: "underline",
-  },
-  adIndicators: {
-    flexDirection: "row",
-    justifyContent: "center",
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  adIndicator: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.border,
-    marginHorizontal: 4,
-  },
-  adIndicatorActive: {
-    backgroundColor: colors.primary,
-    width: 15,
-  },
-  centeredAdContainer: {
-    alignItems: "center",
-    marginVertical: 20,
-  },
-  loadingContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 40,
-  },
-  loadingText: {
-    fontSize: 14,
-    color: colors.secondary,
-  },
-  emptyContainer: {
-    alignItems: "center",
-    paddingVertical: 40,
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: colors.primary,
-    marginTop: 10,
-    marginBottom: 5,
-  },
-  emptyMessage: {
-    fontSize: 12,
-    color: colors.secondary,
-    textAlign: "center",
-  },
-};
+// Cross-platform elevation. `boxShadow` keeps the web build from flattening
+// the cards the way `shadow*` props do under react-native-web. Takes the
+// palette so the shadow colour is a token rather than hardcoded black - pure
+// black shadows read fine on a near-black canvas but muddy on white.
+const shadow = (elevation, shadowOpacity = 0.3, tone = "#000000") =>
+  Platform.select({
+    ios: {
+      shadowColor: tone,
+      shadowOffset: { width: 0, height: elevation },
+      shadowOpacity,
+      shadowRadius: elevation * 1.6,
+    },
+    android: { elevation },
+    default: {
+      // Web wants one composite value; the hex tone plus a hex alpha is the
+      // only form react-native-web accepts here.
+      boxShadow: `${tone}${Math.round(shadowOpacity * 255)
+        .toString(16)
+        .padStart(2, "0")} 0px ${elevation}px ${elevation * 1.8}px`,
+    },
+  });
+
+// One stylesheet instance per colour scheme, rebuilt only when the scheme
+// flips. Keeps every style lookup below a plain `styles.x` reference.
+const useStyles = (c) => useMemo(() => buildStyles(c), [c]);
+
+// Stylesheet is a function of the palette: `c` is the light or dark token
+// set from useTheme(). Building it per scheme is cheaper than threading
+// dynamic styles through 40+ call sites, and keeps this file declarative.
+const buildStyles = (c) =>
+  StyleSheet.create({
+    root: {
+      flex: 1,
+      backgroundColor: c.canvas,
+      // The parked drawer sits past the right edge; without this the root
+      // can scroll horizontally on web and flash a sliver of the panel.
+      overflow: "hidden",
+    },
+    scrollContent: {
+      // Replaced per-render with the dock-aware value; see `dockPadding` in the
+      // component. Zero here so the static style alone never adds dead space.
+      paddingBottom: 0,
+    },
+    safeArea: {
+      flex: 1,
+    },
+    ambientGlow: {
+      position: "absolute",
+      top: -190,
+      left: -110,
+      width: 460,
+      height: 460,
+      borderRadius: 230,
+      backgroundColor: c.heroGlow,
+      opacity: 0.16,
+    },
+
+    /* ---------- Top bar ---------- */
+    topBar: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      paddingTop: 10,
+      paddingBottom: 18,
+    },
+    identity: {
+      flexDirection: "row",
+      alignItems: "center",
+      flex: 1,
+      marginRight: 12,
+    },
+    avatar: {
+      width: 46,
+      height: 46,
+      borderRadius: 16,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.18)",
+    },
+    avatarInitial: {
+      fontFamily: fonts.displayBold,
+      fontSize: 20,
+      color: "#04231F",
+    },
+    identityText: {
+      flex: 1,
+      marginLeft: 12,
+    },
+    greeting: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+    },
+    displayName: {
+      fontFamily: fonts.display,
+      fontSize: 19,
+      color: c.textPrimary,
+      marginTop: 2,
+    },
+    roleBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 4,
+      borderWidth: 1,
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      marginTop: 5,
+    },
+    roleBadgeEnterprise: {
+      borderColor: "rgba(92,240,200,0.45)",
+      backgroundColor: "rgba(92,240,200,0.10)",
+    },
+    roleBadgePro: {
+      borderColor: "rgba(245,196,81,0.5)",
+      backgroundColor: "rgba(245,196,81,0.12)",
+    },
+    roleBadgeAgent: {
+      borderColor: "rgba(111,200,245,0.45)",
+      backgroundColor: "rgba(111,200,245,0.10)",
+    },
+    roleBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      letterSpacing: 0.5,
+    },
+    topBarActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    iconButton: {
+      width: 42,
+      height: 42,
+      borderRadius: 14,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    notificationBadge: {
+      position: "absolute",
+      top: 6,
+      right: 6,
+      backgroundColor: c.rose,
+      borderRadius: 8,
+      minWidth: 16,
+      height: 16,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 2,
+      borderColor: c.canvas,
+    },
+    badgeText: {
+      fontFamily: fonts.bodyBold,
+      color: "#1A0500",
+      fontSize: 8,
+    },
+
+    /* ---------- Hero ---------- */
+    heroWrap: {
+      paddingHorizontal: 20,
+    },
+    hero: {
+      borderRadius: 28,
+      padding: 22,
+      overflow: "hidden",
+      ...shadow(10, 0.4, c.shadow),
+    },
+    heroHalo: {
+      position: "absolute",
+      top: -80,
+      right: -60,
+      width: 240,
+      height: 240,
+      borderRadius: 120,
+      backgroundColor: "rgba(255,255,255,0.14)",
+    },
+    heroArc: {
+      position: "absolute",
+      bottom: -120,
+      left: -40,
+      width: 220,
+      height: 220,
+      borderRadius: 110,
+      borderWidth: 34,
+      borderColor: "rgba(255,255,255,0.06)",
+    },
+    heroTopRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    heroLabelRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+    },
+    heroLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.textSecondary,
+      letterSpacing: 0.3,
+    },
+    heroPill: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      backgroundColor: "rgba(4,35,31,0.32)",
+      borderRadius: 999,
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+    },
+    heroPillDot: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.mint,
+    },
+    heroPillText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      color: c.mint,
+      letterSpacing: 0.5,
+      textTransform: "uppercase",
+    },
+    heroAmount: {
+      fontFamily: fonts.displayBold,
+      fontSize: 34,
+      color: "#FFFFFF",
+      marginTop: 14,
+      letterSpacing: -0.5,
+    },
+    heroTagline: {
+      fontFamily: fonts.display,
+      fontSize: 24,
+      lineHeight: 31,
+      color: "#FFFFFF",
+      marginTop: 12,
+    },
+    heroFootnote: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textSecondary,
+      marginTop: 6,
+    },
+    heroActions: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginTop: 20,
+    },
+    heroPrimaryAction: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      backgroundColor: c.mint,
+      borderRadius: 999,
+      paddingHorizontal: 18,
+      paddingVertical: 11,
+    },
+    heroPrimaryText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: "#04231F",
+    },
+    heroGhostAction: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.32)",
+      borderRadius: 999,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+    },
+    heroGhostText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: "#FFFFFF",
+    },
+
+    /* ---------- Quick services ---------- */
+    quickGrid: {
+      flexDirection: "row",
+      gap: 10,
+      paddingHorizontal: 20,
+      marginTop: 18,
+    },
+    quickTile: {
+      flex: 1,
+      alignItems: "center",
+      paddingVertical: 14,
+      borderRadius: 20,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    quickIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+      borderWidth: 1,
+    },
+    quickLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+      marginTop: 8,
+    },
+
+    /* ---------- Sections ---------- */
+    section: {
+      marginTop: 30,
+    },
+    sectionHead: {
+      flexDirection: "row",
+      alignItems: "flex-end",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      marginBottom: 14,
+    },
+    sectionHeadText: {
+      flex: 1,
+    },
+    sectionEyebrow: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 10,
+      color: c.mintDim,
+      letterSpacing: 1.4,
+      textTransform: "uppercase",
+    },
+    sectionTitle: {
+      fontFamily: fonts.display,
+      fontSize: 22,
+      color: c.textPrimary,
+      marginTop: 3,
+    },
+    sectionAction: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      paddingBottom: 3,
+    },
+    sectionActionText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.mint,
+    },
+
+    /* ---------- Business suite ---------- */
+    suiteGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      gap: 10,
+      paddingHorizontal: 20,
+    },
+    suiteTile: {
+      // 30.5% + 2 gaps of 10 fits 3-up on every phone width (a 3x 31.5% row plus
+      // gaps overflows the container and collapses to 2 columns on ~360dp
+      // screens). Fixed fraction rather than `flex` so a 4-item Pro row wraps
+      // as 3 + 1 instead of stretching one lonely tile.
+      width: "30.5%",
+      alignItems: "center",
+      paddingVertical: 16,
+      borderRadius: 20,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    suiteIcon: {
+      width: 38,
+      height: 38,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    suiteLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+      marginTop: 9,
+    },
+
+    /* ---------- Networks ---------- */
+    networkScrollContent: {
+      paddingHorizontal: 20,
+    },
+    networkCardTouchable: {
+      marginRight: 14,
+    },
+    networkCard: {
+      width: 214,
+      height: 216,
+      borderRadius: 24,
+      overflow: "hidden",
+      justifyContent: "space-between",
+      // Solid base under the scrim. If the gradient ever fails to paint on a
+      // given platform the photo still reads as a dimmed card instead of
+      // blowing out to full brightness with unreadable copy on top of it.
+      backgroundColor: c.canvas,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.10)",
+      ...shadow(6, 0.35, c.shadow),
+    },
+    networkImage: {
+      borderRadius: 24,
+    },
+    networkScrim: {
+      // Spelled out rather than ...StyleSheet.absoluteFillObject. absoluteFill
+      // resolves against the nearest positioned ancestor, and inside
+      // ImageBackground on Android that is not reliably the card - the scrim
+      // collapses to zero height and the dim silently disappears. Explicit
+      // insets only need the card to establish the bounds, which it does via
+      // its fixed width/height.
+      position: "absolute",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+    },
+    networkCardContent: {
+      flex: 1,
+      padding: 16,
+      justifyContent: "space-between",
+    },
+    // Single accent chip in the corner. Replaces the previous
+    // pill + bordered-badge pair, which competed for attention.
+    networkTagRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 6,
+      backgroundColor: c.scrim,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.12)",
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: 999,
+    },
+    networkDot: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+    },
+    networkTagText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      letterSpacing: 0.5,
+      textTransform: "uppercase",
+    },
+    // Network name leads the card now; the marketing line sits beneath it.
+    networkName: {
+      fontFamily: fonts.bodyBlack,
+      fontSize: 22,
+      lineHeight: 26,
+      letterSpacing: -0.3,
+      color: "#FFFFFF",
+    },
+    networkTitle: {
+      // Body sans, not the display serif. The card titles sit on top of busy
+      // network photography, and a decorative face loses legibility there while
+      // also reading as inconsistent next to every other title on the page.
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      lineHeight: 18,
+      color: "#FFFFFF",
+      marginTop: 3,
+    },
+    networkSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 11.5,
+      color: c.textSecondary,
+      marginTop: 2,
+    },
+    networkActionRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginTop: 14,
+    },
+    networkActionText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 12,
+      letterSpacing: 0.2,
+    },
+    networkActionIcon: {
+      width: 28,
+      height: 28,
+      borderRadius: 14,
+      borderWidth: 1,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+
+    /* ---------- Activity ---------- */
+    activityCard: {
+      marginHorizontal: 20,
+      backgroundColor: c.surface,
+      borderRadius: 24,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      paddingVertical: 6,
+    },
+    activityRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 14,
+      paddingHorizontal: 16,
+    },
+    activityMarker: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: c.mintDim,
+      marginRight: 13,
+    },
+    activityMarkerLast: {
+      backgroundColor: c.textMuted,
+    },
+    activityBody: {
+      flex: 1,
+      marginRight: 10,
+    },
+    activityTitle: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    activityMeta: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 3,
+    },
+    activityTail: {
+      alignItems: "flex-end",
+    },
+    activityAmount: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    activityTime: {
+      fontFamily: fonts.body,
+      fontSize: 10,
+      color: c.textMuted,
+      marginTop: 4,
+    },
+    statusPill: {
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      marginTop: 5,
+    },
+    statusPillText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      letterSpacing: 0.3,
+    },
+
+    /* ---------- Skeletons ---------- */
+    skeletonList: {
+      paddingVertical: 8,
+    },
+    skeletonRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 14,
+      paddingHorizontal: 16,
+    },
+    skeletonMark: {
+      width: 8,
+      height: 8,
+      borderRadius: 4,
+      backgroundColor: c.surfaceHover,
+      marginRight: 13,
+    },
+    skeletonBody: {
+      flex: 1,
+    },
+    skeletonLineWide: {
+      height: 11,
+      width: "68%",
+      borderRadius: 6,
+      backgroundColor: c.surfaceHover,
+    },
+    skeletonLineNarrow: {
+      height: 9,
+      width: "42%",
+      borderRadius: 5,
+      backgroundColor: c.surfaceHover,
+      marginTop: 8,
+    },
+    skeletonTail: {
+      alignItems: "flex-end",
+    },
+    skeletonLineAmount: {
+      height: 11,
+      width: 62,
+      borderRadius: 6,
+      backgroundColor: c.surfaceHover,
+    },
+    skeletonLineTiny: {
+      height: 8,
+      width: 44,
+      borderRadius: 4,
+      backgroundColor: c.surfaceHover,
+      marginTop: 8,
+    },
+
+    /* ---------- Empty state ---------- */
+    emptyState: {
+      alignItems: "center",
+      paddingVertical: 34,
+      paddingHorizontal: 30,
+    },
+    emptyGlyph: {
+      width: 58,
+      height: 58,
+      borderRadius: 20,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surfaceHover,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    emptyTitle: {
+      fontFamily: fonts.display,
+      fontSize: 17,
+      color: c.textPrimary,
+      marginTop: 14,
+    },
+    emptyMessage: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      lineHeight: 18,
+      color: c.textMuted,
+      textAlign: "center",
+      marginTop: 6,
+    },
+    emptyCta: {
+      marginTop: 16,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      borderRadius: 999,
+      paddingHorizontal: 18,
+      paddingVertical: 9,
+    },
+    emptyCtaText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.mint,
+    },
+
+    /* ---------- Ads ---------- */
+    adsScrollView: {
+      overflow: "visible",
+    },
+    adsScrollContent: {
+      paddingHorizontal: 20,
+      paddingVertical: 2,
+    },
+    adCard: {
+      width: 280,
+      height: 168,
+      borderRadius: 24,
+      overflow: "hidden",
+      marginRight: 15,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    adCardFill: {
+      flex: 1,
+      justifyContent: "center",
+      padding: 18,
+    },
+    adBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      alignSelf: "flex-start",
+      gap: 4,
+      backgroundColor: c.mint,
+      borderRadius: 999,
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      marginBottom: 10,
+    },
+    adBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9,
+      color: "#04231F",
+      letterSpacing: 0.4,
+      textTransform: "uppercase",
+    },
+    adTitle: {
+      fontFamily: fonts.display,
+      fontSize: 19,
+      color: "#FFFFFF",
+    },
+    adDescription: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      lineHeight: 17,
+      color: c.textSecondary,
+      marginTop: 5,
+    },
+    adActionRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      marginTop: 12,
+    },
+    adActionText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 12,
+      color: c.mint,
+    },
+    adIndicators: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 5,
+      paddingHorizontal: 20,
+      marginTop: 12,
+    },
+    adIndicator: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      backgroundColor: c.surfaceHover,
+    },
+    adIndicatorActive: {
+      width: 18,
+      backgroundColor: c.mint,
+    },
+
+    /* ---------- Footer ---------- */
+    footer: {
+      alignItems: "center",
+      paddingTop: 40,
+      paddingBottom: 44,
+      marginTop: 32,
+      borderTopWidth: 1,
+      borderTopColor: c.hairline,
+    },
+    footerMark: {
+      width: 30,
+      height: 30,
+      borderRadius: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: "rgba(92,240,200,0.10)",
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+    },
+    footerText: {
+      fontFamily: fonts.display,
+      fontSize: 14,
+      color: c.textSecondary,
+      marginTop: 12,
+    },
+    footerSubText: {
+      fontFamily: fonts.body,
+      fontSize: 10,
+      color: c.textMuted,
+      marginTop: 3,
+    },
+
+    /* ---------- Overflow drawer ---------- */
+    // Host is a zero-padding absolute overlay so it neither consumes layout
+    // space nor clips the panel, but the drawer itself is anchored to the
+    // right edge and full height.
+    menuOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 30,
+    },
+    // The host is present only while the drawer is opening, open, or playing
+    // its exit slide, but it still spans the whole screen. `box-none` keeps it
+    // transparent to touches so the page underneath - including the button
+    // that opened it - stays live while the slide is in flight. It is applied
+    // in both the prop and the style because the `pointerEvents` prop is
+    // deprecated (and ignored) under the new architecture.
+    menuOverlayPassThrough: {
+      pointerEvents: "box-none",
+    },
+    // Belt and braces for the exit slide: the panel is on screen but closing,
+    // so it should not be pressable until the next open.
+    menuDrawerHidden: {
+      pointerEvents: "none",
+    },
+    menuDrawer: {
+      position: "absolute",
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: DRAWER_WIDTH,
+      backgroundColor: c.canvasRaised,
+      borderLeftWidth: 1,
+      borderLeftColor: c.hairlineStrong,
+    },
+    menuSafeArea: {
+      flex: 1,
+    },
+    menuHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 18,
+      paddingTop: 10,
+      paddingBottom: 14,
+    },
+    menuTitle: {
+      fontFamily: fonts.display,
+      fontSize: 17,
+      color: c.textPrimary,
+    },
+    menuScroll: {
+      flex: 1,
+    },
+    menuItem: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 18,
+      paddingVertical: 14,
+      borderTopWidth: 1,
+      borderTopColor: c.hairline,
+    },
+    menuIcon: {
+      width: 32,
+      height: 32,
+      borderRadius: 11,
+      alignItems: "center",
+      justifyContent: "center",
+      marginRight: 11,
+    },
+    menuItemText: {
+      flex: 1,
+      fontFamily: fonts.bodyMedium,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+  });

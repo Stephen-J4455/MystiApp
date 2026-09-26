@@ -1,4 +1,4 @@
-import React, {
+﻿import React, {
   useState,
   useEffect,
   useMemo,
@@ -16,20 +16,23 @@ import {
   ImageBackground,
   Alert,
   StatusBar,
+  Platform,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import colors from "../components/theme";
+import { useTheme } from "../contexts/ThemeContext";
+import { EmptyState } from "../components/ui";
+import { fonts, networks } from "../components/theme";
 import { WebView } from "react-native-webview";
 import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
 import { Modal } from "react-native";
-import { Platform } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { getPaystackPublicKey } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 
 import {
   loadSubAgentPackages,
@@ -50,7 +53,21 @@ const BUNDLE_FAMILY_ORDER = [
 ];
 
 export default function DataScreen({ navigation, route }) {
-  const { network } = route.params;
+  // Several call sites reach this screen without params (the "Browse" action,
+  // the empty-state CTA, ad deep links). `route.params` is undefined there, so
+  // this must not destructure directly. MTN is the default landing network -
+  // it matches the hero "Buy Data" button and the first network card.
+  const network = route.params?.network || "mtn";
+  const { c, isDark } = useTheme();
+  const s = useDataStyles(c);
+  // Clears the floating bottom dock so the last bundle row stays reachable.
+  const dockPadding = useDockBottomPadding(12);
+  // The app is edge-to-edge on Android and this screen has no navigator header,
+  // so it must inset itself below the status bar. iOS already spaces its
+  // content, so the inset is only consumed there.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [bundles, setBundles] = useState([]);
   const [activeFamily, setActiveFamily] = useState(null);
@@ -60,7 +77,6 @@ export default function DataScreen({ navigation, route }) {
   const [recipientModalVisible, setRecipientModalVisible] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
-  const [recipientName, setRecipientName] = useState("");
   const [userPhone, setUserPhone] = useState("");
   const [purchaseType, setPurchaseType] = useState("self"); // 'self' or 'others'
   const [isAgent, setIsAgent] = useState(false);
@@ -192,7 +208,6 @@ export default function DataScreen({ navigation, route }) {
               : purchaseType === "self"
                 ? userPhone
                 : recipientPhone.trim().replace(/\s+/g, ""),
-            recipient_name: isAgent ? recipientName.trim() : null,
             super_agent_id: superAgentId,
             paystack_subaccount_code: resolvedSubaccountCode,
             base_price: getAgentPaymentBreakdown()?.baseAmount || 0,
@@ -323,7 +338,6 @@ export default function DataScreen({ navigation, route }) {
     [
       selectedBundle,
       isAgent,
-      recipientName,
       purchaseType,
       userPhone,
       recipientPhone,
@@ -1180,11 +1194,6 @@ export default function DataScreen({ navigation, route }) {
   };
 
   const continueAgentPurchase = async () => {
-    if (!recipientName.trim()) {
-      showError("Recipient Name Required", "Please enter the recipient's name");
-      return;
-    }
-
     if (!recipientPhone.trim()) {
       showError(
         "Phone Number Required",
@@ -1496,15 +1505,17 @@ export default function DataScreen({ navigation, route }) {
   };
 
   const getNetworkColor = (networkName) => {
+    // Brand tokens from theme.js rather than inline hexes, so the network
+    // badge matches the same colours the home-screen network cards use.
     switch (networkName) {
       case "MTN":
-        return "#ffcc00";
+        return networks.mtn;
       case "TELECEL":
-        return "#00ccff";
+        return networks.telecel;
       case "AIRTELTIGO":
-        return "#ff6600";
+        return networks.airteltigo;
       default:
-        return colors.primary;
+        return c.mintDim;
     }
   };
 
@@ -1522,108 +1533,97 @@ export default function DataScreen({ navigation, route }) {
   };
 
   const renderBundlePlaceholders = () => (
-    <View>
+    <View style={s.bundleList}>
       {[0, 1, 2, 3, 4].map((index) => (
         <Animated.View
           key={`bundle-placeholder-${index}`}
-          style={[
-            styles.bundlePlaceholderCard,
-            { opacity: bundleSkeletonOpacity },
-          ]}
+          style={[s.bundleCard, { opacity: bundleSkeletonOpacity }]}
         >
-          <View style={styles.bundlePlaceholderLeft}>
-            <View style={styles.bundlePlaceholderLine} />
-            <View style={styles.bundlePlaceholderLineShort} />
+          <View style={s.skeletonBody}>
+            <View style={s.skeletonLine} />
+            <View style={s.skeletonLineShort} />
           </View>
-          <View style={styles.bundlePlaceholderPrice} />
+          <View style={s.skeletonPrice} />
         </Animated.View>
       ))}
     </View>
   );
 
   return (
-    <View style={styles.container}>
+    <View style={s.screen}>
       <StatusBar
         translucent
         backgroundColor="transparent"
-        barStyle="dark-content"
+        barStyle={isDark ? "light-content" : "dark-content"}
       />
 
-      {/* Floating Back Button */}
-      <TouchableOpacity
-        style={styles.floatingBackButton}
-        onPress={() => navigation.goBack()}
+      <ScrollView
+        contentContainerStyle={[
+          s.scrollContent,
+          { paddingTop: topInset, paddingBottom: dockPadding },
+        ]}
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.backButtonCircle}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </View>
-      </TouchableOpacity>
-
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        <View style={styles.networkHeader}>
+        {/* Network header. The photo sits under a dark scrim (ad imagery and
+            carrier art have no guaranteed brightness), and the badge initial
+            uses the carrier brand token. */}
+        <View style={s.hero}>
           {getNetworkImage(displayNetwork) ? (
             <ImageBackground
               source={getNetworkImage(displayNetwork)}
-              style={styles.networkHeaderBackground}
+              style={s.heroImage}
               resizeMode="cover"
             >
-              <View style={styles.networkOverlay}>
-                <View
-                  style={[
-                    styles.networkIcon,
-                    { backgroundColor: getNetworkColor(displayNetwork) },
-                  ]}
-                >
-                  <Text style={styles.networkInitial}>
-                    {displayNetwork.charAt(0)}
-                  </Text>
-                </View>
-                <Text style={[styles.networkTitle, { color: "#fff" }]}>
-                  {displayNetwork} Network
-                </Text>
-                <Text style={[styles.networkSubtitle, { color: "#fff" }]}>
-                  Choose your preferred data bundle
-                </Text>
-              </View>
+              <View style={s.heroScrim} />
             </ImageBackground>
-          ) : (
-            <View style={styles.networkHeaderContent}>
+          ) : null}
+          <View style={s.heroContent}>
+            <View style={s.heroTop}>
               <View
                 style={[
-                  styles.networkIcon,
+                  s.networkBadgeLarge,
                   { backgroundColor: getNetworkColor(displayNetwork) },
                 ]}
               >
-                <Text style={styles.networkInitial}>
+                <Text style={s.networkInitialLarge}>
                   {displayNetwork.charAt(0)}
                 </Text>
               </View>
-              <Text style={styles.networkTitle}>{displayNetwork} Network</Text>
-              <Text style={styles.networkSubtitle}>
-                Choose your preferred data bundle
-              </Text>
+              <View style={s.heroHeadText}>
+                <Text style={s.heroTitle}>{displayNetwork}</Text>
+                <Text style={s.heroSubtitle}>
+                  Choose your preferred data bundle
+                </Text>
+              </View>
             </View>
-          )}
+            <Text style={s.heroCount}>
+              {loading || !agentChecked
+                ? "Loading packages…"
+                : `${visibleBundles.length} package${
+                    visibleBundles.length === 1 ? "" : "s"
+                  } available`}
+            </Text>
+          </View>
         </View>
 
         {/* Super agent package source - shown to sub-agents only */}
-        {isAgent && (
-          <View style={styles.agentTierBanner}>
-            <Ionicons name="pricetags" size={18} color={colors.primary} />
-            <Text style={styles.agentTierBannerText}>
+        {isAgent ? (
+          <View style={s.tierBanner}>
+            <Ionicons name="pricetags" size={16} color={c.mintDim} />
+            <Text style={s.tierBannerText}>
               {agentTier
-                ? `Packages for the ${agentTier} tier — prices set by your super agent.`
-                : "Packages and prices set by your super agent."}
+                ? `${agentTier} tier · prices set by your super agent`
+                : "Packages and prices set by your super agent"}
             </Text>
           </View>
-        )}
+        ) : null}
 
         {showFamilyTabs ? (
-          <View style={styles.familyTabsWrap}>
+          <View style={s.familyTabsWrap}>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.familyTabsContent}
+              contentContainerStyle={s.familyTabsContent}
             >
               {bundleFamilies.map((family) => {
                 const meta =
@@ -1634,10 +1634,7 @@ export default function DataScreen({ navigation, route }) {
                 return (
                   <TouchableOpacity
                     key={family.key}
-                    style={[
-                      styles.familyTab,
-                      isActive && styles.familyTabActive,
-                    ]}
+                    style={[s.familyTab, isActive ? s.familyTabActive : null]}
                     onPress={() => setActiveFamily(family.key)}
                     activeOpacity={0.85}
                     accessibilityRole="tab"
@@ -1646,27 +1643,27 @@ export default function DataScreen({ navigation, route }) {
                   >
                     <Ionicons
                       name={meta.icon}
-                      size={14}
-                      color={isActive ? "#fff" : colors.primary}
+                      size={13}
+                      color={isActive ? c.onAccent : c.textMuted}
                     />
                     <Text
                       style={[
-                        styles.familyTabText,
-                        isActive && styles.familyTabTextActive,
+                        s.familyTabText,
+                        isActive ? s.familyTabTextActive : null,
                       ]}
                     >
                       {meta.label}
                     </Text>
                     <View
                       style={[
-                        styles.familyTabCount,
-                        isActive && styles.familyTabCountActive,
+                        s.familyTabCount,
+                        isActive ? s.familyTabCountActive : null,
                       ]}
                     >
                       <Text
                         style={[
-                          styles.familyTabCountText,
-                          isActive && styles.familyTabCountTextActive,
+                          s.familyTabCountText,
+                          isActive ? s.familyTabCountTextActive : null,
                         ]}
                       >
                         {family.count}
@@ -1679,29 +1676,30 @@ export default function DataScreen({ navigation, route }) {
           </View>
         ) : null}
 
-        <View style={styles.bundlesContainer}>
-          {loading || !agentChecked ? (
-            renderBundlePlaceholders()
-          ) : visibleBundles.length === 0 ? (
-            <View style={styles.emptyContainer}>
-              <Ionicons name="wifi" size={64} color={colors.tint} />
-              <Text style={styles.emptyTitle}>No Data Bundles</Text>
-              <Text style={styles.emptyMessage}>
-                {bundles.length > 0
-                  ? "No packages in this data type. Try another tab."
-                  : isAgent
-                    ? "Your super agent has not published packages for this network in your tier yet."
-                    : `No data bundles available for ${displayNetwork} at the moment.`}
-              </Text>
-            </View>
-          ) : (
-            Object.entries(visibleBundlesByNetwork).map(
+        {loading || !agentChecked ? (
+          renderBundlePlaceholders()
+        ) : visibleBundles.length === 0 ? (
+          <EmptyState
+            icon="wifi-outline"
+            title="No data bundles"
+            message={
+              bundles.length > 0
+                ? "No packages in this data type. Try another tab."
+                : isAgent
+                  ? "Your super agent has not published packages for this network in your tier yet."
+                  : `No data bundles available for ${displayNetwork} at the moment.`
+            }
+          />
+        ) : (
+          <View style={s.bundleList}>
+            {Object.entries(visibleBundlesByNetwork).map(
               ([networkName, networkBundles]) => (
-                <View key={networkName} style={{ marginBottom: 20 }}>
+                <View key={networkName} style={s.group}>
                   {networkBundles.map((bundle) => (
                     <TouchableOpacity
                       key={bundle.id}
-                      style={styles.bundleCard}
+                      style={s.bundleCard}
+                      activeOpacity={0.85}
                       onPress={() => {
                         if (isAgent) {
                           handleAgentPurchase(bundle);
@@ -1709,55 +1707,86 @@ export default function DataScreen({ navigation, route }) {
                           openNormalPurchase(bundle);
                         }
                       }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${bundle.name}, ${bundle.price}`}
                     >
-                      <View style={styles.bundleCardContent}>
-                        <View style={styles.bundleInfo}>
-                          <View style={styles.bundleHeader}>
-                            <View style={styles.networkBadge}>
-                              <Text style={styles.networkBadgeText}>
-                                {bundle.network}
-                              </Text>
-                            </View>
-                            <Text style={styles.bundleType}>{bundle.type}</Text>
+                      <View style={s.bundleBody}>
+                        <View style={s.bundleHead}>
+                          <View
+                            style={[
+                              s.networkBadge,
+                              {
+                                backgroundColor: `${getNetworkColor(
+                                  displayNetwork,
+                                )}26`,
+                              },
+                            ]}
+                          >
+                            <Text
+                              style={[
+                                s.networkBadgeText,
+                                { color: getNetworkColor(displayNetwork) },
+                              ]}
+                            >
+                              {bundle.network}
+                            </Text>
                           </View>
-                          <View style={styles.bundleDetailsRow}>
-                            <View style={styles.bundleDetail}>
-                              <Text style={styles.bundleDetailLabel}>Data</Text>
-                              <Text style={styles.bundleDetailValue}>
-                                {bundle.dataSize}
-                              </Text>
-                            </View>
-                            <View style={styles.bundleDetail}>
-                              <Text style={styles.bundleDetailLabel}>
-                                Bundle
-                              </Text>
-                              <Text style={styles.bundleDetailValue}>
-                                {bundle.type}
-                              </Text>
-                            </View>
-                          </View>
+                          <Text style={s.bundleType} numberOfLines={1}>
+                            {bundle.type}
+                          </Text>
                         </View>
-                        <View style={styles.bundlePriceContainer}>
-                          <Text style={styles.bundlePrice}>{bundle.price}</Text>
-                          <Text style={styles.bundlePriceLabel}>Price</Text>
+
+                        <View style={s.bundleMeta}>
+                          <View style={s.metaItem}>
+                            <Text style={s.metaLabel}>Data</Text>
+                            <Text style={s.metaValue}>{bundle.dataSize}</Text>
+                          </View>
+                          <View style={s.metaDivider} />
+                          <View style={s.metaItem}>
+                            <Text style={s.metaLabel}>Price</Text>
+                            <Text style={s.metaValueStrong}>
+                              {bundle.price}
+                            </Text>
+                          </View>
                         </View>
                       </View>
+
+                      <Ionicons
+                        name="chevron-forward"
+                        size={16}
+                        color={c.textMuted}
+                        style={s.bundleChevron}
+                      />
                     </TouchableOpacity>
                   ))}
                 </View>
               ),
-            )
-          )}
-        </View>
+            )}
+          </View>
+        )}
 
-        <View style={styles.infoSection}>
-          <Text style={styles.infoTitle}>Important Information</Text>
-          <Text style={styles.infoText}>
-            • Data bundles are automatically activated upon purchase{"\n"}•
-            Validity periods start from the time of activation{"\n"}• Unused
-            data expires at the end of the validity period{"\n"}• All prices are
-            inclusive of applicable taxes
-          </Text>
+        <View style={s.infoCard}>
+          <View style={s.infoHead}>
+            <Ionicons
+              name="information-circle-outline"
+              size={16}
+              color={c.mintDim}
+            />
+            <Text style={s.infoTitle}>Good to know</Text>
+          </View>
+          <View style={s.infoList}>
+            {[
+              "Data bundles activate automatically on purchase",
+              "Validity starts from the moment of activation",
+              "Unused data expires at the end of the validity period",
+              "All prices include applicable taxes",
+            ].map((line) => (
+              <View key={line} style={s.infoRow}>
+                <View style={s.infoBullet} />
+                <Text style={s.infoText}>{line}</Text>
+              </View>
+            ))}
+          </View>
         </View>
       </ScrollView>
 
@@ -1768,40 +1797,35 @@ export default function DataScreen({ navigation, route }) {
           animationType="slide"
           onRequestClose={() => setRecipientModalVisible(false)}
         >
-          <View style={styles.recipientModalOverlay}>
+          <View style={s.recipientModalOverlay}>
             <KeyboardAvoidingView
-              style={styles.recipientModalAvoidingView}
+              style={s.recipientModalAvoidingView}
               behavior="padding"
             >
-              <View style={styles.recipientModalCard}>
-                <View style={styles.recipientModalContent}>
-                  <View style={styles.recipientModalHeader}>
+              <View style={s.recipientModalCard}>
+                <View style={s.recipientModalContent}>
+                  <View style={s.recipientModalHeader}>
                     <View>
-                      <Text style={styles.recipientModalTitle}>
+                      <Text style={s.recipientModalTitle}>
                         Who is this data for?
                       </Text>
-                      <Text style={styles.recipientModalSubtitle}>
+                      <Text style={s.recipientModalSubtitle}>
                         {selectedBundle.name}
                       </Text>
                     </View>
                     <TouchableOpacity
                       onPress={() => setRecipientModalVisible(false)}
-                      style={styles.recipientModalClose}
+                      style={s.recipientModalClose}
                     >
-                      <Ionicons
-                        name="close"
-                        size={22}
-                        color={colors.secondary}
-                      />
+                      <Ionicons name="close" size={22} color={c.textMuted} />
                     </TouchableOpacity>
                   </View>
 
-                  <View style={styles.purchaseTypeButtons}>
+                  <View style={s.purchaseTypeButtons}>
                     <TouchableOpacity
                       style={[
-                        styles.purchaseTypeButton,
-                        purchaseType === "self" &&
-                          styles.purchaseTypeButtonActive,
+                        s.purchaseTypeButton,
+                        purchaseType === "self" && s.purchaseTypeButtonActive,
                       ]}
                       onPress={() => setPurchaseType("self")}
                     >
@@ -1809,16 +1833,14 @@ export default function DataScreen({ navigation, route }) {
                         name="person"
                         size={18}
                         color={
-                          purchaseType === "self"
-                            ? colors.white
-                            : colors.primary
+                          purchaseType === "self" ? c.onAccent : c.textSecondary
                         }
                       />
                       <Text
                         style={[
-                          styles.purchaseTypeButtonText,
+                          s.purchaseTypeButtonText,
                           purchaseType === "self" &&
-                            styles.purchaseTypeButtonTextActive,
+                            s.purchaseTypeButtonTextActive,
                         ]}
                       >
                         For Myself
@@ -1826,9 +1848,8 @@ export default function DataScreen({ navigation, route }) {
                     </TouchableOpacity>
                     <TouchableOpacity
                       style={[
-                        styles.purchaseTypeButton,
-                        purchaseType === "others" &&
-                          styles.purchaseTypeButtonActive,
+                        s.purchaseTypeButton,
+                        purchaseType === "others" && s.purchaseTypeButtonActive,
                       ]}
                       onPress={() => setPurchaseType("others")}
                     >
@@ -1837,15 +1858,15 @@ export default function DataScreen({ navigation, route }) {
                         size={18}
                         color={
                           purchaseType === "others"
-                            ? colors.white
-                            : colors.primary
+                            ? c.onAccent
+                            : c.textSecondary
                         }
                       />
                       <Text
                         style={[
-                          styles.purchaseTypeButtonText,
+                          s.purchaseTypeButtonText,
                           purchaseType === "others" &&
-                            styles.purchaseTypeButtonTextActive,
+                            s.purchaseTypeButtonTextActive,
                         ]}
                       >
                         For Others
@@ -1854,13 +1875,13 @@ export default function DataScreen({ navigation, route }) {
                   </View>
 
                   {purchaseType === "self" && (
-                    <View style={styles.userPhoneContainer}>
+                    <View style={s.userPhoneContainer}>
                       <Ionicons
                         name="phone-portrait"
                         size={20}
-                        color={colors.primary}
+                        color={c.mintDim}
                       />
-                      <Text style={styles.userPhoneText}>
+                      <Text style={s.userPhoneText}>
                         Data will be sent to:{" "}
                         {userPhone || "your profile phone"}
                       </Text>
@@ -1869,20 +1890,20 @@ export default function DataScreen({ navigation, route }) {
 
                   {purchaseType === "others" && (
                     <>
-                      <Text style={styles.phoneInputLabel}>
+                      <Text style={s.phoneInputLabel}>
                         Recipient Phone Number
                       </Text>
-                      <View style={styles.phoneInputWrapper}>
+                      <View style={s.phoneInputWrapper}>
                         <Ionicons
                           name="call"
                           size={20}
-                          color={colors.secondary}
-                          style={styles.phoneIcon}
+                          color={c.textMuted}
+                          style={s.phoneIcon}
                         />
                         <TextInput
-                          style={styles.phoneInput}
+                          style={s.phoneInput}
                           placeholder="Enter phone number (e.g., 0532973455)"
-                          placeholderTextColor={colors.secondary}
+                          placeholderTextColor={c.textMuted}
                           value={recipientPhone}
                           onChangeText={setRecipientPhone}
                           keyboardType="phone-pad"
@@ -1893,10 +1914,10 @@ export default function DataScreen({ navigation, route }) {
                   )}
 
                   <TouchableOpacity
-                    style={styles.recipientContinueButton}
+                    style={s.recipientContinueButton}
                     onPress={continueNormalPurchase}
                   >
-                    <Text style={styles.recipientContinueText}>
+                    <Text style={s.recipientContinueText}>
                       Continue to Payment
                     </Text>
                   </TouchableOpacity>
@@ -1914,76 +1935,55 @@ export default function DataScreen({ navigation, route }) {
           animationType="slide"
           onRequestClose={() => setRecipientModalVisible(false)}
         >
-          <View style={styles.recipientModalOverlay}>
+          <View style={s.recipientModalOverlay}>
             <KeyboardAvoidingView
-              style={styles.recipientModalAvoidingView}
+              style={s.recipientModalAvoidingView}
               behavior="padding"
             >
-              <View style={styles.recipientModalCard}>
-                <View style={styles.recipientModalContent}>
-                  <View style={styles.recipientModalHeader}>
+              <View style={s.recipientModalCard}>
+                <View style={s.recipientModalContent}>
+                  <View style={s.recipientModalHeader}>
                     <View>
-                      <Text style={styles.recipientModalTitle}>
+                      <Text style={s.recipientModalTitle}>
                         Recipient Details
                       </Text>
-                      <Text style={styles.recipientModalSubtitle}>
+                      <Text style={s.recipientModalSubtitle}>
                         {selectedBundle.name}
                       </Text>
                     </View>
                     <TouchableOpacity
                       onPress={() => setRecipientModalVisible(false)}
-                      style={styles.recipientModalClose}
+                      style={s.recipientModalClose}
                     >
-                      <Ionicons
-                        name="close"
-                        size={22}
-                        color={colors.secondary}
-                      />
+                      <Ionicons name="close" size={22} color={c.textMuted} />
                     </TouchableOpacity>
                   </View>
 
-                  <Text style={styles.phoneInputLabel}>Recipient Name</Text>
-                  <View style={styles.phoneInputWrapper}>
-                    <Ionicons
-                      name="person"
-                      size={20}
-                      color={colors.secondary}
-                      style={styles.phoneIcon}
-                    />
-                    <TextInput
-                      style={styles.phoneInput}
-                      placeholder="Enter recipient name"
-                      placeholderTextColor={colors.secondary}
-                      value={recipientName}
-                      onChangeText={setRecipientName}
-                      autoFocus
-                    />
-                  </View>
-
-                  <Text style={styles.phoneInputLabel}>Phone Number</Text>
-                  <View style={styles.phoneInputWrapper}>
+                  <Text style={s.phoneInputLabel}>Phone Number</Text>
+                  <View style={s.phoneInputWrapper}>
                     <Ionicons
                       name="call"
                       size={20}
-                      color={colors.secondary}
-                      style={styles.phoneIcon}
+                      color={c.textMuted}
+                      style={s.phoneIcon}
                     />
                     <TextInput
-                      style={styles.phoneInput}
+                      style={s.phoneInput}
                       placeholder="Enter phone number (e.g., 0532973455)"
-                      placeholderTextColor={colors.secondary}
+                      placeholderTextColor={c.textMuted}
                       value={recipientPhone}
                       onChangeText={setRecipientPhone}
                       keyboardType="phone-pad"
                       maxLength={13}
+                      autoFocus
                     />
                   </View>
 
                   <TouchableOpacity
-                    style={styles.recipientContinueButton}
+                    style={s.recipientContinueButton}
                     onPress={continueAgentPurchase}
                   >
-                    <Text style={styles.recipientContinueText}>
+                    <Text style={s.recipientContinueText}>
                       Continue to Payment
                     </Text>
                   </TouchableOpacity>
@@ -2028,19 +2028,19 @@ export default function DataScreen({ navigation, route }) {
                       width: 60,
                       height: 60,
                       borderRadius: 30,
-                      backgroundColor: colors.light,
+                      backgroundColor: c.surfaceSunken,
                       justifyContent: "center",
                       alignItems: "center",
                       marginBottom: 15,
                     }}
                   >
-                    <Ionicons name="card" size={30} color={colors.primary} />
+                    <Ionicons name="card" size={30} color={c.mint} />
                   </View>
                   <Text
                     style={{
                       fontSize: 24,
                       fontWeight: "bold",
-                      color: colors.primary,
+                      color: c.textPrimary,
                       textAlign: "center",
                     }}
                   >
@@ -2050,7 +2050,7 @@ export default function DataScreen({ navigation, route }) {
                 {/* Amount display */}
                 <View
                   style={{
-                    backgroundColor: colors.light,
+                    backgroundColor: c.surfaceSunken,
                     paddingHorizontal: 16,
                     paddingVertical: 15,
                     borderRadius: 12,
@@ -2061,7 +2061,7 @@ export default function DataScreen({ navigation, route }) {
                   <Text
                     style={{
                       fontSize: 13,
-                      color: colors.secondary,
+                      color: c.textMuted,
                       marginBottom: 4,
                       textAlign: "center",
                       fontWeight: "600",
@@ -2073,7 +2073,7 @@ export default function DataScreen({ navigation, route }) {
                     style={{
                       fontSize: 27,
                       fontWeight: "bold",
-                      color: colors.primary,
+                      color: c.mint,
                       textAlign: "center",
                       marginBottom: 12,
                     }}
@@ -2084,13 +2084,13 @@ export default function DataScreen({ navigation, route }) {
                       parseFloat(selectedBundle.price.replace("Ghc ", ""))
                     ).toFixed(2)}
                   </Text>
-                  <View style={styles.paymentBreakdownRow}>
-                    <Text style={styles.paymentBreakdownLabel}>
+                  <View style={s.paymentBreakdownRow}>
+                    <Text style={s.paymentBreakdownLabel}>
                       {isAgent && !isSuperAgentUser
                         ? "Package price"
                         : "Base data price"}
                     </Text>
-                    <Text style={styles.paymentBreakdownValue}>
+                    <Text style={s.paymentBreakdownValue}>
                       GHS{" "}
                       {isAgent && !isSuperAgentUser
                         ? (
@@ -2103,11 +2103,9 @@ export default function DataScreen({ navigation, route }) {
                           ).toFixed(2)}
                     </Text>
                   </View>
-                  <View style={styles.paymentBreakdownRow}>
-                    <Text style={styles.paymentBreakdownLabel}>
-                      Transaction fee
-                    </Text>
-                    <Text style={styles.paymentBreakdownFee}>
+                  <View style={s.paymentBreakdownRow}>
+                    <Text style={s.paymentBreakdownLabel}>Transaction fee</Text>
+                    <Text style={s.paymentBreakdownFee}>
                       GHS{" "}
                       {(
                         getAgentPaymentBreakdown()?.transactionFee || 0
@@ -2115,15 +2113,12 @@ export default function DataScreen({ navigation, route }) {
                     </Text>
                   </View>
                   <View
-                    style={[
-                      styles.paymentBreakdownRow,
-                      styles.paymentBreakdownTotal,
-                    ]}
+                    style={[s.paymentBreakdownRow, s.paymentBreakdownTotal]}
                   >
-                    <Text style={styles.paymentBreakdownTotalLabel}>
+                    <Text style={s.paymentBreakdownTotalLabel}>
                       Total payment
                     </Text>
-                    <Text style={styles.paymentBreakdownTotalValue}>
+                    <Text style={s.paymentBreakdownTotalValue}>
                       GHS{" "}
                       {(
                         getAgentPaymentBreakdown()?.grossAmount ||
@@ -2136,8 +2131,8 @@ export default function DataScreen({ navigation, route }) {
                   <View
                     style={{
                       alignSelf: "stretch",
-                      backgroundColor: "#f0faf5",
-                      borderColor: "#b9e5ce",
+                      backgroundColor: `${c.mint}12`,
+                      borderColor: `${c.mint}33`,
                       borderWidth: 1,
                       borderRadius: 12,
                       padding: 14,
@@ -2154,12 +2149,12 @@ export default function DataScreen({ navigation, route }) {
                       <Ionicons
                         name="shield-checkmark"
                         size={19}
-                        color={colors.secondary}
+                        color={c.mintDim}
                         style={{ marginRight: 7 }}
                       />
                       <Text
                         style={{
-                          color: colors.secondary,
+                          color: c.textPrimary,
                           fontWeight: "700",
                           fontSize: 15,
                         }}
@@ -2169,7 +2164,7 @@ export default function DataScreen({ navigation, route }) {
                     </View>
                     <Text
                       style={{
-                        color: colors.dark,
+                        color: c.textPrimary,
                         fontWeight: "600",
                         fontSize: 15,
                         marginBottom: 3,
@@ -2180,7 +2175,7 @@ export default function DataScreen({ navigation, route }) {
                     {paystackSubaccount?.settlement_bank && (
                       <Text
                         style={{
-                          color: colors.secondary,
+                          color: c.textMuted,
                           fontSize: 13,
                           marginBottom: 2,
                         }}
@@ -2192,7 +2187,7 @@ export default function DataScreen({ navigation, route }) {
                 )}
                 <TouchableOpacity
                   style={{
-                    backgroundColor: colors.primary,
+                    backgroundColor: c.mint,
                     paddingHorizontal: 40,
                     paddingVertical: 16,
                     borderRadius: 12,
@@ -2235,7 +2230,7 @@ export default function DataScreen({ navigation, route }) {
                 >
                   <Text
                     style={{
-                      color: "white",
+                      color: c.onAccent,
                       fontSize: 18,
                       fontWeight: "bold",
                     }}
@@ -2250,7 +2245,7 @@ export default function DataScreen({ navigation, route }) {
                   }}
                   onPress={() => setPaystackModalVisible(false)}
                 >
-                  <Text style={{ color: colors.secondary, fontSize: 16 }}>
+                  <Text style={{ color: c.textMuted, fontSize: 16 }}>
                     Cancel
                   </Text>
                 </TouchableOpacity>
@@ -2344,7 +2339,6 @@ export default function DataScreen({ navigation, route }) {
                             : purchaseType === "self"
                               ? userPhone
                               : recipientPhone.trim().replace(/\s+/g, ""), // Clean phone number
-                          recipient_name: isAgent ? recipientName.trim() : null,
                           super_agent_id: superAgentId,
                           paystack_subaccount_code: resolvedSubaccountCode,
                           base_price: selectedBundle.base_price || 0,
@@ -2482,623 +2476,488 @@ export default function DataScreen({ navigation, route }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 20,
-    zIndex: 10,
-  },
-  backButtonCircle: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: "rgba(255, 255, 255, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-  },
-  headerTitleContainer: {
-    flex: 1,
-    alignItems: "center",
-  },
-  agentBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.primary,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginTop: 4,
-  },
-  agentBadgeText: {
-    color: colors.white,
-    fontSize: 10,
-    fontWeight: "bold",
-    marginLeft: 4,
-  },
-  balanceContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 4,
-  },
-  balanceText: {
-    fontSize: 12,
-    color: colors.primary,
-    fontWeight: "600",
-    marginLeft: 4,
-  },
-  content: {
-    flex: 1,
-    paddingTop: 25,
-  },
-  networkHeader: {
-    margin: 20,
-    borderRadius: 24,
-    overflow: "hidden",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-  },
-  networkHeaderBackground: {
-    height: 180,
-    width: "100%",
-  },
-  networkHeaderContent: {
-    alignItems: "center",
-    padding: 20,
-    backgroundColor: colors.white,
-    height: 150,
-    justifyContent: "center",
-  },
-  networkOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.4)",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 20,
-  },
-  networkIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 10,
-    borderWidth: 3,
-    borderColor: colors.white,
-  },
-  networkInitial: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: colors.white,
-  },
-  networkTitle: {
-    fontSize: 24,
-    fontWeight: "bold",
-    color: colors.white,
-    marginBottom: 4,
-  },
-  networkSubtitle: {
-    fontSize: 14,
-    color: colors.white,
-    opacity: 0.9,
-  },
-  bundlesContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  familyTabsWrap: {
-    marginTop: 18,
-  },
-  familyTabsContent: {
-    paddingHorizontal: 20,
-    gap: 9,
-    paddingBottom: 4,
-  },
-  familyTab: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: "#d9e7e5",
-    backgroundColor: colors.white,
-  },
-  familyTabActive: {
-    borderColor: colors.primary,
-    backgroundColor: colors.primary,
-  },
-  familyTabText: {
-    color: colors.primary,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  familyTabTextActive: {
-    color: "#fff",
-  },
-  familyTabCount: {
-    minWidth: 20,
-    paddingHorizontal: 5,
-    paddingVertical: 1,
-    borderRadius: 8,
-    alignItems: "center",
-    backgroundColor: "#eef4f3",
-  },
-  familyTabCountActive: {
-    backgroundColor: "rgba(255,255,255,0.25)",
-  },
-  familyTabCountText: {
-    color: colors.secondary,
-    fontSize: 10,
-    fontWeight: "800",
-  },
-  familyTabCountTextActive: {
-    color: "#fff",
-  },
-  bundleCard: {
-    borderRadius: 24,
-    marginBottom: 15,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    overflow: "hidden",
-  },
-  bundlePlaceholderCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderRadius: 24,
-    marginBottom: 15,
-    padding: 20,
-    backgroundColor: colors.white,
-  },
-  bundlePlaceholderLeft: {
-    flex: 1,
-    marginRight: 16,
-  },
-  bundlePlaceholderLine: {
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: colors.border,
-    width: "70%",
-    marginBottom: 8,
-  },
-  bundlePlaceholderLineShort: {
-    height: 10,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "50%",
-  },
-  bundlePlaceholderPrice: {
-    height: 20,
-    width: 70,
-    borderRadius: 10,
-    backgroundColor: colors.border,
-  },
-  bundleCardContent: {
-    padding: 20,
-    backgroundColor: colors.white,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  bundleInfo: {
-    flex: 1,
-  },
-  bundleHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  bundleType: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-  },
-  networkBadge: {
-    backgroundColor: colors.primary,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-    marginRight: 8,
-  },
-  networkBadgeText: {
-    color: colors.white,
-    fontSize: 11,
-    fontWeight: "bold",
-  },
-  bundleDetailsRow: {
-    flexDirection: "row",
-    marginTop: 8,
-    gap: 16,
-  },
-  bundleDetail: {
-    alignItems: "flex-start",
-  },
-  bundleDetailLabel: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.5,
-    marginBottom: 2,
-  },
-  bundleDetailValue: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.dark,
-  },
-  bundlePriceContainer: {
-    backgroundColor: colors.light,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 12,
-    alignItems: "flex-end",
-  },
-  bundlePrice: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: colors.primary,
-  },
-  bundlePriceLabel: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.5,
-    marginTop: 2,
-  },
-  paymentBreakdownRow: {
-    alignItems: "center",
-    borderTopColor: colors.border,
-    borderTopWidth: 1,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 6,
-  },
-  paymentBreakdownLabel: {
-    color: colors.secondary,
-    fontSize: 12,
-  },
-  paymentBreakdownValue: {
-    color: colors.dark,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  paymentBreakdownFee: {
-    color: colors.warning,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  paymentBreakdownTotal: {
-    borderTopColor: colors.primary,
-    marginTop: 2,
-    paddingTop: 9,
-  },
-  paymentBreakdownTotalLabel: {
-    color: colors.dark,
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  paymentBreakdownTotalValue: {
-    color: colors.primary,
-    fontSize: 15,
-    fontWeight: "900",
-  },
-  purchaseTypeContainer: {
-    backgroundColor: colors.white,
-    marginHorizontal: 20,
-    marginVertical: 10,
-    padding: 20,
-    borderRadius: 24,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  purchaseTypeLabel: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.dark,
-    marginBottom: 15,
-    textAlign: "center",
-  },
-  purchaseTypeButtons: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    backgroundColor: colors.light,
-    borderRadius: 16,
-    padding: 4,
-  },
-  purchaseTypeButton: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "center",
-  },
-  purchaseTypeButtonActive: {
-    backgroundColor: colors.primary,
-    elevation: 4,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-  },
-  purchaseTypeButtonText: {
-    fontSize: 14,
-    fontWeight: "600",
-    color: colors.dark,
-    opacity: 0.7,
-    marginLeft: 8,
-  },
-  purchaseTypeButtonTextActive: {
-    color: colors.white,
-    opacity: 1,
-  },
-  phoneInputContainer: {
-    backgroundColor: colors.white,
-    marginHorizontal: 20,
-    marginVertical: 10,
-    padding: 20,
-    borderRadius: 24,
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  phoneInputLabel: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.dark,
-    marginBottom: 12,
-  },
-  phoneInputWrapper: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 16,
-    paddingHorizontal: 15,
-    backgroundColor: colors.light,
-  },
-  phoneInput: {
-    flex: 1,
-    fontSize: 16,
-    color: colors.dark,
-    paddingVertical: 14,
-  },
-  phoneInputHint: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.5,
-    marginTop: 8,
-    fontStyle: "italic",
-  },
-  recipientModalOverlay: {
-    flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0, 0, 0, 0.45)",
-  },
-  recipientModalAvoidingView: {
-    width: "100%",
-    maxHeight: "90%",
-  },
-  recipientModalCard: {
-    overflow: "hidden",
-    backgroundColor: colors.white,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-  },
-  recipientModalContent: {
-    padding: 24,
-    paddingBottom: 32,
-  },
-  recipientModalHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    marginBottom: 24,
-  },
-  recipientModalTitle: {
-    color: colors.dark,
-    fontSize: 20,
-    fontWeight: "800",
-  },
-  recipientModalSubtitle: {
-    color: colors.secondary,
-    fontSize: 13,
-    marginTop: 4,
-  },
-  recipientModalClose: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.light,
-  },
-  recipientContinueButton: {
-    backgroundColor: colors.primary,
-    borderRadius: 14,
-    alignItems: "center",
-    paddingVertical: 15,
-    marginTop: 24,
-  },
-  recipientContinueText: {
-    color: colors.white,
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  userPhoneContainer: {
-    backgroundColor: colors.light,
-    marginHorizontal: 20,
-    marginBottom: 20,
-    padding: 15,
-    borderRadius: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.primary,
-    opacity: 0.8,
-  },
-  userPhoneText: {
-    fontSize: 14,
-    color: colors.primary,
-    marginLeft: 10,
-    fontWeight: "600",
-  },
-  purchaseButton: {
-    backgroundColor: colors.light,
-    paddingVertical: 16,
-    borderRadius: 16,
-    alignItems: "center",
-    flexDirection: "row",
-    justifyContent: "center",
-    marginTop: 10,
-  },
-  purchaseButtonActive: {
-    backgroundColor: colors.primary,
-  },
-  purchaseButtonText: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: colors.primary,
-  },
-  purchaseButtonTextActive: {
-    color: colors.white,
-  },
-  infoSection: {
-    backgroundColor: colors.white,
-    marginHorizontal: 20,
-    marginBottom: 40,
-    padding: 20,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  infoTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: colors.dark,
-    marginBottom: 10,
-  },
-  infoText: {
-    fontSize: 13,
-    color: colors.dark,
-    opacity: 0.7,
-    lineHeight: 20,
-  },
-  loadingContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 60,
-  },
-  loadingText: {
-    fontSize: 14,
-    color: colors.dark,
-    opacity: 0.5,
-  },
-  emptyContainer: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 80,
-  },
-  networkSectionHeader: {
-    backgroundColor: colors.white,
-    marginHorizontal: 20,
-    marginBottom: 12,
-    marginTop: 8,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderRadius: 16,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-  },
-  networkSectionTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-  },
-  networkSectionSubtitle: {
-    fontSize: 13,
-    color: colors.dark,
-    opacity: 0.5,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: colors.dark,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  emptyMessage: {
-    fontSize: 14,
-    color: colors.dark,
-    opacity: 0.5,
-    textAlign: "center",
-    paddingHorizontal: 40,
-  },
-  agentTierBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.tint,
-    borderRadius: 14,
-    padding: 14,
-    marginHorizontal: 20,
-    marginBottom: 16,
-  },
-  agentTierBannerText: {
-    flex: 1,
-    marginLeft: 10,
-    color: colors.dark,
-    fontSize: 13,
-    lineHeight: 19,
-  },
-});
+// Cross-platform elevation. Mirrors HomeScreen/ProfileScreen: `boxShadow` for
+// web (where `shadow*` flattens), native props elsewhere, palette tone.
+const shadow = (elevation, shadowOpacity = 0.16, tone = "#000000") =>
+  Platform.select({
+    ios: {
+      shadowColor: tone,
+      shadowOffset: { width: 0, height: elevation },
+      shadowOpacity,
+      shadowRadius: elevation * 1.6,
+    },
+    android: { elevation },
+    default: {
+      boxShadow: `${tone}${Math.round(shadowOpacity * 255)
+        .toString(16)
+        .padStart(2, "0")} 0px ${elevation}px ${elevation * 1.8}px`,
+    },
+  });
+
+const useDataStyles = (c) => useMemo(() => buildStyles(c), [c]);
+
+// One stylesheet per colour scheme, rebuilt only when the scheme flips. The
+// modal/payment styles that used to be a hardcoded light sheet are included
+// here too, so the checkout sheets follow the scheme as well.
+const buildStyles = (c) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: c.canvas,
+    },
+    scrollContent: {
+      paddingHorizontal: 20,
+      paddingBottom: 36,
+    },
+
+    /* ---------- Network hero ---------- */
+    hero: {
+      borderRadius: 26,
+      overflow: "hidden",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      marginTop: 8,
+      ...shadow(5, 0.18, c.shadow),
+    },
+    heroImage: {
+      ...StyleSheet.absoluteFillObject,
+    },
+    // Explicit top/left/right/bottom rather than absoluteFill: on Android
+    // absoluteFill inside a background image can collapse to zero height.
+    heroScrim: {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: c.adScrim,
+    },
+    heroContent: {
+      padding: 18,
+    },
+    heroTop: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 14,
+    },
+    heroHeadText: {
+      flex: 1,
+    },
+    heroTitle: {
+      fontFamily: fonts.display,
+      fontSize: 22,
+      color: c.textPrimary,
+    },
+    heroSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    heroCount: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11.5,
+      color: c.mintDim,
+      marginTop: 14,
+    },
+    networkBadgeLarge: {
+      width: 48,
+      height: 48,
+      borderRadius: 16,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    networkInitialLarge: {
+      fontFamily: fonts.displayBold,
+      fontSize: 22,
+      color: "#04231F",
+    },
+
+    /* ---------- Agent tier banner ---------- */
+    tierBanner: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 9,
+      marginTop: 14,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      borderRadius: 16,
+      backgroundColor: `${c.mint}12`,
+      borderWidth: 1,
+      borderColor: `${c.mint}33`,
+    },
+    tierBannerText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textSecondary,
+    },
+
+    /* ---------- Family tabs ---------- */
+    familyTabsWrap: {
+      marginTop: 18,
+    },
+    familyTabsContent: {
+      gap: 8,
+      paddingRight: 20,
+    },
+    familyTab: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 7,
+      paddingHorizontal: 14,
+      height: 38,
+      borderRadius: 999,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    familyTabActive: {
+      backgroundColor: c.mint,
+      borderColor: c.mint,
+    },
+    familyTabText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12.5,
+      color: c.textSecondary,
+    },
+    familyTabTextActive: {
+      color: c.onAccent,
+    },
+    familyTabCount: {
+      minWidth: 20,
+      height: 20,
+      borderRadius: 10,
+      paddingHorizontal: 6,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surfaceHover,
+    },
+    familyTabCountActive: {
+      backgroundColor: "rgba(0, 0, 0, 0.18)",
+    },
+    familyTabCountText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 10.5,
+      color: c.textMuted,
+    },
+    familyTabCountTextActive: {
+      color: c.onAccent,
+    },
+
+    /* ---------- Bundle cards ---------- */
+    bundleList: {
+      gap: 10,
+      marginTop: 16,
+    },
+    group: {
+      gap: 10,
+    },
+    bundleCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 14,
+      ...shadow(3, 0.14, c.shadow),
+    },
+    bundleBody: {
+      flex: 1,
+    },
+    bundleHead: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 9,
+    },
+    bundleType: {
+      flex: 1,
+      fontFamily: fonts.bodySemi,
+      fontSize: 14.5,
+      color: c.textPrimary,
+    },
+    networkBadge: {
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      borderRadius: 999,
+    },
+    networkBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 9.5,
+      letterSpacing: 0.6,
+    },
+    bundleMeta: {
+      flexDirection: "row",
+      alignItems: "center",
+      marginTop: 12,
+      gap: 14,
+    },
+    metaItem: {
+      gap: 3,
+    },
+    metaDivider: {
+      width: StyleSheet.hairlineWidth,
+      height: 26,
+      backgroundColor: c.hairline,
+    },
+    metaLabel: {
+      fontFamily: fonts.body,
+      fontSize: 10.5,
+      color: c.textMuted,
+      letterSpacing: 0.3,
+    },
+    metaValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textSecondary,
+    },
+    metaValueStrong: {
+      fontFamily: fonts.displayBold,
+      fontSize: 15,
+      color: c.mint,
+    },
+    bundleChevron: {
+      marginLeft: 10,
+    },
+
+    /* ---------- Skeleton ---------- */
+    skeletonBody: {
+      flex: 1,
+      gap: 9,
+    },
+    skeletonLine: {
+      height: 12,
+      borderRadius: 6,
+      backgroundColor: c.surfaceHover,
+      width: "60%",
+    },
+    skeletonLineShort: {
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: c.surfaceHover,
+      width: "38%",
+    },
+    skeletonPrice: {
+      height: 22,
+      borderRadius: 8,
+      backgroundColor: c.surfaceHover,
+      width: 72,
+    },
+
+    /* ---------- Info card ---------- */
+    infoCard: {
+      marginTop: 24,
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 16,
+    },
+    infoHead: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 12,
+    },
+    infoTitle: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13.5,
+      color: c.textPrimary,
+    },
+    infoList: {
+      gap: 9,
+    },
+    infoRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 10,
+    },
+    infoBullet: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.mintDim,
+      marginTop: 7,
+    },
+    infoText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      lineHeight: 18,
+      color: c.textMuted,
+    },
+
+    /* ---------- Recipient / checkout modals ---------- */
+    recipientModalOverlay: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      justifyContent: "flex-end",
+    },
+    recipientModalAvoidingView: {
+      width: "100%",
+    },
+    recipientModalCard: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 28,
+      borderTopRightRadius: 28,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      maxHeight: "88%",
+    },
+    recipientModalContent: {
+      padding: 22,
+    },
+    recipientModalHeader: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      justifyContent: "space-between",
+      marginBottom: 18,
+    },
+    recipientModalTitle: {
+      fontFamily: fonts.display,
+      fontSize: 20,
+      color: c.textPrimary,
+    },
+    recipientModalSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textMuted,
+      marginTop: 3,
+    },
+    recipientModalClose: {
+      width: 34,
+      height: 34,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surfaceHover,
+    },
+    purchaseTypeButtons: {
+      flexDirection: "row",
+      gap: 10,
+      marginBottom: 18,
+    },
+    purchaseTypeButton: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      height: 50,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    purchaseTypeButtonActive: {
+      backgroundColor: c.mint,
+      borderColor: c.mint,
+    },
+    purchaseTypeButtonText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13.5,
+      color: c.textSecondary,
+    },
+    purchaseTypeButtonTextActive: {
+      color: c.onAccent,
+    },
+    userPhoneContainer: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      padding: 14,
+      borderRadius: 16,
+      backgroundColor: c.surfaceSunken,
+      marginBottom: 18,
+    },
+    userPhoneText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textSecondary,
+    },
+    phoneInputLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11.5,
+      color: c.textSecondary,
+      letterSpacing: 0.3,
+      marginBottom: 7,
+    },
+    phoneInputWrapper: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      height: 52,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      paddingHorizontal: 14,
+      marginBottom: 16,
+    },
+    phoneIcon: {
+      marginRight: 2,
+    },
+    phoneInput: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 15,
+      color: c.textPrimary,
+      // Android adds its own vertical padding that misaligns the row.
+      paddingVertical: 0,
+    },
+    recipientContinueButton: {
+      height: 52,
+      borderRadius: 999,
+      backgroundColor: c.mint,
+      alignItems: "center",
+      justifyContent: "center",
+      marginTop: 4,
+    },
+    recipientContinueText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 15,
+      color: c.onAccent,
+    },
+
+    /* ---------- Payment breakdown (web checkout) ---------- */
+    paymentBreakdownRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingTop: 8,
+      marginTop: 8,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.hairline,
+    },
+    paymentBreakdownLabel: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textMuted,
+    },
+    paymentBreakdownValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12.5,
+      color: c.textSecondary,
+    },
+    paymentBreakdownFee: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12.5,
+      color: c.amber,
+    },
+    paymentBreakdownTotal: {
+      borderTopColor: c.hairlineStrong,
+    },
+    paymentBreakdownTotalLabel: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+    paymentBreakdownTotalValue: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 13,
+      color: c.mint,
+    },
+  });

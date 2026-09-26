@@ -15,6 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import colors from "../components/theme";
 import { useNotification } from "../contexts/NotificationContext";
+import { ThemedScreen } from "../components/ui";
 
 export default function ResetPasswordScreen({ navigation }) {
   const [password, setPassword] = useState("");
@@ -110,7 +111,7 @@ export default function ResetPasswordScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
+    <ThemedScreen style={styles.container}>
       <StatusBar
         translucent
         backgroundColor="transparent"
@@ -207,7 +208,7 @@ export default function ResetPasswordScreen({ navigation }) {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
-    </View>
+    </ThemedScreen>
   );
 }
 

@@ -6,12 +6,19 @@ import {
   ScrollView,
   StyleSheet,
   StatusBar,
+  Platform,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import colors from "../components/theme";
+import { ThemedScreen } from "../components/ui";
 
 export default function ReceiptScreen({ navigation, route }) {
+  // The floating back button is absolutely positioned, so it must clear the
+  // Android status bar itself - a hardcoded `top: 50` does not adapt to the
+  // device inset. iOS already spaces this, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const backTop = Platform.OS === "android" ? insets.top + 10 : 50;
   const { transaction } = route.params;
   const isAgentOrder = transaction.orderType === "agent";
 
@@ -50,7 +57,7 @@ export default function ReceiptScreen({ navigation, route }) {
   };
 
   return (
-    <View style={styles.container}>
+    <ThemedScreen style={styles.container}>
       <StatusBar
         translucent
         backgroundColor="transparent"
@@ -59,7 +66,7 @@ export default function ReceiptScreen({ navigation, route }) {
 
       {/* Floating Back Button */}
       <TouchableOpacity
-        style={styles.floatingBackButton}
+        style={[styles.floatingBackButton, { top: backTop }]}
         onPress={() => navigation.goBack()}
       >
         <View style={styles.backButtonCircle}>
@@ -110,7 +117,7 @@ export default function ReceiptScreen({ navigation, route }) {
             <Text style={styles.detailLabel}>Service</Text>
             <Text style={styles.detailValue}>
               {isAgentOrder
-                ? `Agent Service - ${transaction.displayName || "Customer"}`
+                ? "Agent Service"
                 : transaction.offer_title || "Data Bundle Purchase"}
             </Text>
           </View>
@@ -171,11 +178,11 @@ export default function ReceiptScreen({ navigation, route }) {
           </Text>
 
           <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Name</Text>
+            <Text style={styles.detailLabel}>Phone</Text>
             <Text style={styles.detailValue}>
               {isAgentOrder
-                ? transaction.displayName || "N/A"
-                : transaction.user_name || "N/A"}
+                ? transaction.displayPhone || "N/A"
+                : transaction.phone || "N/A"}
             </Text>
           </View>
 
@@ -185,15 +192,6 @@ export default function ReceiptScreen({ navigation, route }) {
               <Text style={styles.detailValue}>{transaction.user_email}</Text>
             </View>
           )}
-
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Phone</Text>
-            <Text style={styles.detailValue}>
-              {isAgentOrder
-                ? transaction.displayPhone || "N/A"
-                : transaction.phone || "N/A"}
-            </Text>
-          </View>
 
           {transaction.country_code && (
             <View style={styles.detailRow}>
@@ -235,13 +233,15 @@ export default function ReceiptScreen({ navigation, route }) {
 
         {/* Footer */}
         <View style={styles.footer}>
-          <Text style={styles.footerText}>Thank you for using Mystiwan-E-Business</Text>
+          <Text style={styles.footerText}>
+            Thank you for using Mystiwan-E-Business
+          </Text>
           <Text style={styles.footerSubText}>
             For support, contact our customer service
           </Text>
         </View>
       </ScrollView>
-    </View>
+    </ThemedScreen>
   );
 }
 

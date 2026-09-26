@@ -7,16 +7,19 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  Platform,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
-import colors from "../components/theme";
+import { fonts } from "../components/theme";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useTheme } from "../contexts/ThemeContext";
 import {
   upsertTierOffer,
   fetchCatalogPackages,
@@ -118,6 +121,13 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   const [confirmDeleteTierId, setConfirmDeleteTierId] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const { showError, showSuccess, showInfo } = useNotification();
+  const theme = useTheme();
+  const c = theme.c;
+  // Edge-to-edge on Android with no navigator header, so the screen insets
+  // itself. iOS already spaces this header, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const styles = useTierStyles(c, topInset);
 
   const buildMaps = useCallback((tierRows, catalog, pricingRows, offers) => {
     const basePrices = {};
@@ -509,7 +519,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             value={priceInputs[inputKey] ?? ""}
             onChangeText={(text) => handlePriceChange(tier.id, pkgKey, text)}
             placeholder="0.00"
-            placeholderTextColor="#9AA5AF"
+            placeholderTextColor={c.textMuted}
             keyboardType="decimal-pad"
           />
         </View>
@@ -541,7 +551,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             <Ionicons
               name={isConfirmingDelete ? "warning" : "trash-outline"}
               size={18}
-              color="#fff"
+              color={c.onAccent}
             />
             <Text style={styles.deleteTierText}>
               {isConfirmingDelete ? "Sure?" : ""}
@@ -566,9 +576,14 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           disabled={isSaving || changedCount === 0}
         >
           {isSaving ? (
-            <ActivityIndicator size="small" color="#fff" />
+            <ActivityIndicator size="small" color={c.onAccent} />
           ) : (
-            <Text style={styles.saveTierText}>
+            <Text
+              style={[
+                styles.saveTierText,
+                (isSaving || changedCount === 0) && styles.saveTierTextDisabled,
+              ]}
+            >
               Save {tier.name} Prices
               {changedCount > 0 ? ` (${changedCount})` : ""}
             </Text>
@@ -580,23 +595,23 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <ThemedScreen style={styles.safeArea}>
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={colors.primary} />
+          <ActivityIndicator size="large" color={c.mint} />
           <Text style={styles.loadingText}>Loading tiers...</Text>
         </View>
-      </SafeAreaView>
+      </ThemedScreen>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <ThemedScreen style={styles.safeArea}>
       <View style={styles.header}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backButton}
         >
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          <Ionicons name="arrow-back" size={24} color={c.textPrimary} />
         </TouchableOpacity>
         <Text style={styles.title}>Tier Management</Text>
         <TouchableOpacity
@@ -607,7 +622,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           <Ionicons
             name={refreshing ? "sync" : "sync-outline"}
             size={20}
-            color={refreshing ? colors.border : colors.primary}
+            color={refreshing ? c.textMuted : c.mint}
           />
         </TouchableOpacity>
       </View>
@@ -618,11 +633,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.infoCard}>
-          <Ionicons
-            name="information-circle"
-            size={20}
-            color={colors.primary}
-          />
+          <Ionicons name="information-circle" size={20} color={c.mint} />
           <Text style={styles.infoText}>
             Every bundle starts at the admin base price. Adjust the amounts to
             set what your agents pay in this tier, then save. Fields you leave
@@ -633,7 +644,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
         {loadError ? (
           <View style={styles.errorCard}>
-            <Ionicons name="warning-outline" size={18} color={colors.danger} />
+            <Ionicons name="warning-outline" size={18} color={c.rose} />
             <Text style={styles.errorText}>{loadError}</Text>
           </View>
         ) : null}
@@ -645,14 +656,14 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             value={newTierName}
             onChangeText={setNewTierName}
             placeholder="Tier name (e.g. Gold)"
-            placeholderTextColor="#9AA5AF"
+            placeholderTextColor={c.textMuted}
           />
           <TextInput
             style={[styles.input, styles.inputMultiline]}
             value={newTierDescription}
             onChangeText={setNewTierDescription}
             placeholder="Description (optional)"
-            placeholderTextColor="#9AA5AF"
+            placeholderTextColor={c.textMuted}
             multiline
           />
           <TouchableOpacity
@@ -664,10 +675,14 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             disabled={creatingTier}
           >
             {creatingTier ? (
-              <ActivityIndicator size="small" color="#fff" />
+              <ActivityIndicator size="small" color={c.onAccent} />
             ) : (
               <>
-                <Ionicons name="add-circle-outline" size={18} color="#fff" />
+                <Ionicons
+                  name="add-circle-outline"
+                  size={18}
+                  color={c.onAccent}
+                />
                 <Text style={styles.createButtonText}>Add Tier</Text>
               </>
             )}
@@ -704,7 +719,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
         {tiers.length === 0 ? (
           <View style={styles.emptyCard}>
-            <Ionicons name="layers-outline" size={40} color={colors.primary} />
+            <Ionicons name="layers-outline" size={40} color={c.textMuted} />
             <Text style={styles.emptyTitle}>No tiers yet</Text>
             <Text style={styles.emptyText}>
               Create your first tier above (e.g. Gold, Silver), then set the
@@ -715,293 +730,244 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           tiers.map((tier) => renderTierSection(tier))
         )}
       </KeyboardAwareScrollView>
-    </SafeAreaView>
+    </ThemedScreen>
   );
 }
 
-const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: colors.light },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: colors.light,
-  },
-  loadingText: {
-    marginTop: 12,
-    color: colors.dark,
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 12,
-    backgroundColor: colors.white,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  title: {
-    flex: 1,
-    textAlign: "center",
-    fontSize: 20,
-    fontWeight: "800",
-    color: colors.dark,
-  },
-  refreshButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  content: {
-    padding: 20,
-    paddingBottom: 40,
-  },
-  infoCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.tint,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-  },
-  infoText: {
-    flex: 1,
-    marginLeft: 10,
-    color: colors.dark,
-    fontSize: 13,
-    lineHeight: 19,
-  },
-  errorCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#fdecea",
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 14,
-  },
-  errorText: {
-    flex: 1,
-    marginLeft: 10,
-    color: colors.danger,
-    fontSize: 13,
-    fontWeight: "500",
-  },
-  createCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 16,
-  },
-  createTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.primary,
-    marginBottom: 10,
-  },
-  input: {
-    backgroundColor: colors.light,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: colors.dark,
-    marginBottom: 10,
-  },
-  inputMultiline: {
-    minHeight: 64,
-    textAlignVertical: "top",
-  },
-  createButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.primary,
-    paddingVertical: 12,
-    borderRadius: 12,
-  },
-  createButtonDisabled: {
-    opacity: 0.6,
-  },
-  createButtonText: {
-    color: "#fff",
-    fontWeight: "700",
-    marginLeft: 6,
-  },
-  networkFilterRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 4,
-    marginBottom: 8,
-  },
-  networkChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginRight: 8,
-  },
-  networkChipActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  networkChipText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: colors.dark,
-  },
-  networkChipTextActive: {
-    color: "#fff",
-  },
-  tierCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 18,
-  },
-  tierHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    marginBottom: 12,
-  },
-  tierTitleWrap: {
-    flex: 1,
-  },
-  tierName: {
-    fontSize: 18,
-    fontWeight: "800",
-    color: colors.primary,
-  },
-  tierDescription: {
-    fontSize: 12,
-    color: colors.dark,
-    opacity: 0.7,
-    marginTop: 2,
-  },
-  deleteTierButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.border,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 10,
-  },
-  deleteTierButtonConfirm: {
-    backgroundColor: colors.danger,
-  },
-  deleteTierText: {
-    color: "#fff",
-    fontSize: 11,
-    fontWeight: "700",
-    marginLeft: 4,
-  },
-  packageRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.light,
-    borderRadius: 12,
-    padding: 10,
-    marginBottom: 8,
-  },
-  packageInfo: {
-    flex: 1,
-    marginRight: 8,
-  },
-  packageName: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: colors.dark,
-  },
-  packageMeta: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.65,
-    marginTop: 2,
-  },
-  priceInputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    height: 36,
-    width: 112,
-  },
-  currencyPrefix: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.6,
-    marginRight: 4,
-    fontWeight: "600",
-  },
-  priceInput: {
-    flex: 1,
-    fontSize: 13,
-    color: colors.dark,
-    paddingVertical: 0,
-    fontWeight: "700",
-  },
-  tierEmptyText: {
-    fontSize: 13,
-    color: colors.dark,
-    opacity: 0.6,
-    textAlign: "center",
-    paddingVertical: 12,
-  },
-  saveTierButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.primary,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginTop: 6,
-  },
-  saveTierButtonDisabled: {
-    backgroundColor: colors.border,
-  },
-  saveTierText: {
-    color: "#fff",
-    fontWeight: "700",
-    fontSize: 14,
-  },
-  emptyCard: {
-    backgroundColor: colors.white,
-    borderRadius: 18,
-    padding: 24,
-    alignItems: "center",
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: colors.primary,
-    marginTop: 10,
-  },
-  emptyText: {
-    fontSize: 13,
-    color: colors.dark,
-    opacity: 0.7,
-    textAlign: "center",
-    marginTop: 6,
-    lineHeight: 20,
-  },
-});
+// Layered on the shared kit: `themedStyles(c)` owns the surface, border and type
+// ramp, so this file only adds the tier-specific pieces and the semantic
+// tones (info strip, destructive confirm).
+const useTierStyles = (c, topInset = 0) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    safeArea: { ...base.screen },
+    loadingContainer: { ...base.center },
+    loadingText: { ...base.headerSubtitle, marginTop: 12, fontSize: 15 },
+
+    header: { ...base.header, paddingTop: 18 + topInset, paddingBottom: 12 },
+    backButton: { ...base.backButton, borderRadius: 999 },
+    refreshButton: { ...base.backButton, borderRadius: 999 },
+    title: { ...base.headerTitle, flex: 1, textAlign: "center", fontSize: 20 },
+
+    content: { ...base.body, paddingTop: 20, paddingBottom: 40 },
+
+    // Informational strip uses the mint tint so it reads as guidance, not an
+    // error; the error card below it is the rose-tinted counterpart.
+    infoCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: `${c.mint}14`,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: `${c.mint}2E`,
+      padding: 14,
+      marginBottom: 14,
+    },
+    infoText: {
+      flex: 1,
+      marginLeft: 10,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      lineHeight: 19,
+      color: c.textSecondary,
+    },
+    errorCard: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: `${c.rose}14`,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: `${c.rose}33`,
+      padding: 14,
+      marginBottom: 14,
+    },
+    errorText: {
+      flex: 1,
+      marginLeft: 10,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.rose,
+    },
+
+    createCard: {
+      ...base.card,
+      borderRadius: 22,
+      padding: 16,
+      marginBottom: 16,
+    },
+    createTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 10 },
+    input: {
+      backgroundColor: c.canvasRaised,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      borderRadius: 16,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      fontFamily: fonts.body,
+      fontSize: 14,
+      color: c.textPrimary,
+      marginBottom: 10,
+    },
+    inputMultiline: { minHeight: 64, textAlignVertical: "top" },
+    createButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.mint,
+      paddingVertical: 14,
+      borderRadius: 999,
+    },
+    createButtonDisabled: { opacity: 0.55 },
+    createButtonText: {
+      fontFamily: fonts.bodyBold,
+      color: c.onAccent,
+      marginLeft: 6,
+    },
+
+    networkFilterRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      paddingVertical: 4,
+      marginBottom: 8,
+    },
+    networkChip: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      marginRight: 8,
+    },
+    networkChipActive: { backgroundColor: c.mint, borderColor: c.mint },
+    networkChipText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.textSecondary,
+    },
+    networkChipTextActive: { color: c.onAccent },
+
+    tierCard: { ...base.card, borderRadius: 22, padding: 16, marginBottom: 18 },
+    tierHeader: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      marginBottom: 12,
+    },
+    tierTitleWrap: { flex: 1 },
+    tierName: { fontFamily: fonts.display, fontSize: 18, color: c.textPrimary },
+    tierDescription: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    // Idle delete is muted; the confirm state flips it to rose so the
+    // destructive intent is obvious before the second tap.
+    deleteTierButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surfaceHover,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+    },
+    deleteTierButtonConfirm: { backgroundColor: c.rose, borderColor: c.rose },
+    deleteTierText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 11,
+      color: c.textMuted,
+      marginLeft: 4,
+    },
+
+    packageRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.canvasRaised,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 10,
+      marginBottom: 8,
+    },
+    packageInfo: { flex: 1, marginRight: 8 },
+    packageName: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+    packageMeta: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    priceInputWrap: {
+      flexDirection: "row",
+      alignItems: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      borderRadius: 12,
+      paddingHorizontal: 8,
+      height: 38,
+      width: 112,
+    },
+    currencyPrefix: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textMuted,
+      marginRight: 4,
+    },
+    priceInput: {
+      flex: 1,
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+      paddingVertical: 0,
+    },
+    tierEmptyText: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+      textAlign: "center",
+      paddingVertical: 12,
+    },
+    saveTierButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.mint,
+      paddingVertical: 14,
+      borderRadius: 999,
+      marginTop: 6,
+    },
+    // Disabled save greys out rather than going invisible, so the row keeps
+    // its shape when there is nothing to save.
+    saveTierButtonDisabled: { backgroundColor: c.surfaceHover },
+    saveTierText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.onAccent,
+    },
+    saveTierTextDisabled: { color: c.textMuted },
+
+    emptyCard: {
+      ...base.card,
+      borderRadius: 22,
+      padding: 24,
+      alignItems: "center",
+    },
+    emptyTitle: { ...base.rowTitle, fontSize: 16, marginTop: 10 },
+    emptyText: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
+      textAlign: "center",
+      marginTop: 6,
+      lineHeight: 20,
+    },
+  });
+};

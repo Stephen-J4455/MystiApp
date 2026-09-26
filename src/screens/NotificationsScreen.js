@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   View,
   Text,
@@ -7,21 +7,54 @@ import {
   Animated,
   StyleSheet,
   StatusBar,
+  Platform,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
+import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { sendLocalNotification } from "../services/notifications";
-import colors from "../components/theme";
+import { useTheme } from "../contexts/ThemeContext";
+import { EmptyState, RowIcon } from "../components/ui";
+import { fonts } from "../components/theme";
+
+// Notification kind -> icon + palette token. The old screen used hardcoded
+// hexes here, which were invisible (or invisible-wrong) in light mode.
+const KIND_META = {
+  success: { icon: "checkmark-circle", tint: "mint" },
+  info: { icon: "information-circle", tint: "sky" },
+  security: { icon: "shield-checkmark", tint: "rose" },
+  reminder: { icon: "time", tint: "amber" },
+  welcome: { icon: "heart", tint: "mint" },
+};
+
+const kindMeta = (type) =>
+  KIND_META[type] || { icon: "notifications", tint: "mintDim" };
 
 export default function NotificationsScreen({ navigation }) {
+  const { c, isDark } = useTheme();
+  // Edge-to-edge on Android with no navigator header, so the screen insets
+  // itself. iOS already spaces this header, so the inset is Android-only.
+  const insets = useSafeAreaInsets();
+  const topInset = Platform.OS === "android" ? insets.top : 0;
+  const s = useNotifStyles(c, topInset);
+
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const skeletonOpacity = useRef(new Animated.Value(0.6)).current;
+  // The subscription is created inside an async setup fn, so it has to be
+  // parked in a ref that cleanup can reach. A closure variable is still null
+  // if the effect unmounts during the awaits, which leaks the channel and lets
+  // the next mount collide with it.
+  const notifChannelRef = useRef(null);
 
   useEffect(() => {
     fetchNotifications();
     setupRealtimeSubscription();
+
+    return () => {
+      removeChannelSafe(notifChannelRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -37,7 +70,7 @@ export default function NotificationsScreen({ navigation }) {
           duration: 800,
           useNativeDriver: true,
         }),
-      ])
+      ]),
     );
     animation.start();
     return () => animation.stop();
@@ -50,7 +83,7 @@ export default function NotificationsScreen({ navigation }) {
       } = await supabase.auth.getUser();
       if (user) {
         const channel = supabase
-          .channel("notifications_realtime")
+          .channel(uniqueTopic("notifications_realtime"))
           .on(
             "postgres_changes",
             {
@@ -67,11 +100,11 @@ export default function NotificationsScreen({ navigation }) {
               // Send push notification for all new notifications
               sendLocalNotification(
                 payload.new.title || "New Notification",
-                payload.new.message || "You have a new notification"
+                payload.new.message || "You have a new notification",
               ).catch((error) => {
                 console.error("Error sending local notification:", error);
               });
-            }
+            },
           )
           .on(
             "postgres_changes",
@@ -86,12 +119,12 @@ export default function NotificationsScreen({ navigation }) {
               // Update the notification in the list
               setNotifications((prev) =>
                 prev.map((notif) =>
-                  notif.id === payload.new.id ? payload.new : notif
-                )
+                  notif.id === payload.new.id ? payload.new : notif,
+                ),
               );
 
               // Note: Removed push notification for read status changes to avoid spam
-            }
+            },
           )
           .on(
             "postgres_changes",
@@ -105,13 +138,15 @@ export default function NotificationsScreen({ navigation }) {
               console.log("Notification deleted:", payload);
               // Remove the notification from the list
               setNotifications((prev) =>
-                prev.filter((notif) => notif.id !== payload.old.id)
+                prev.filter((notif) => notif.id !== payload.old.id),
               );
 
               // Note: Removed push notification for deletions to avoid confusion
-            }
+            },
           )
           .subscribe();
+
+        notifChannelRef.current = channel;
       }
     } catch (error) {
       console.error("Error setting up realtime subscription:", error);
@@ -157,8 +192,8 @@ export default function NotificationsScreen({ navigation }) {
         console.log("Notification marked as read successfully:", id);
         setNotifications(
           notifications.map((notif) =>
-            notif.id === id ? { ...notif, read: true } : notif
-          )
+            notif.id === id ? { ...notif, read: true } : notif,
+          ),
         );
       }
     } catch (error) {
@@ -180,7 +215,7 @@ export default function NotificationsScreen({ navigation }) {
 
         if (!error) {
           setNotifications(
-            notifications.map((notif) => ({ ...notif, read: true }))
+            notifications.map((notif) => ({ ...notif, read: true })),
           );
         }
       }
@@ -189,41 +224,22 @@ export default function NotificationsScreen({ navigation }) {
     }
   };
 
-  const getNotificationIcon = (type) => {
-    switch (type) {
-      case "success":
-        return "checkmark-circle";
-      case "info":
-        return "information-circle";
-      case "security":
-        return "shield-checkmark";
-      case "reminder":
-        return "time";
-      case "welcome":
-        return "heart";
-      default:
-        return "notifications";
-    }
-  };
-
-  const getNotificationColor = (type) => {
-    switch (type) {
-      case "success":
-        return "#27ae60";
-      case "info":
-        return "#3498db";
-      case "security":
-        return "#e74c3c";
-      case "reminder":
-        return "#f39c12";
-      case "welcome":
-        return "#9b59b6";
-      default:
-        return colors.primary;
-    }
-  };
-
   const unreadCount = notifications.filter((n) => !n.read).length;
+
+  // The old screen showed a truncated 5-word "title" ABOVE the full message,
+  // so every row displayed its body text twice. `notifications.title` is the
+  // real title field, so use it when present and fall back to the first clause
+  // of the message only when the row genuinely has no title.
+  const titleOf = (notification) => {
+    const title = String(notification?.title || "").trim();
+    if (title) return title;
+    const message = String(notification?.message || "");
+    const firstClause = message.split(/[.!?\n]/)[0]?.trim();
+    return firstClause || "Notification";
+  };
+
+  const messageOf = (notification) =>
+    String(notification?.message || "").trim();
 
   const formatTime = (timestamp) => {
     const now = new Date();
@@ -238,315 +254,287 @@ export default function NotificationsScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={s.screen}>
       <StatusBar
         translucent
         backgroundColor="transparent"
-        barStyle="dark-content"
+        barStyle={isDark ? "light-content" : "dark-content"}
       />
 
-      {/* Floating Back Button */}
-      <TouchableOpacity
-        style={styles.floatingBackButton}
-        onPress={() => navigation.goBack()}
+      <ScrollView
+        contentContainerStyle={s.scrollContent}
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.backButtonCircle}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
-        </View>
-      </TouchableOpacity>
-
-      <ScrollView style={styles.content}>
-        <View style={styles.contentHeader}>
-          <Text style={styles.screenTitle}>Notifications</Text>
-          {unreadCount > 0 && (
+        <View style={s.header}>
+          <TouchableOpacity
+            style={s.backButton}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.7}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
+            <Ionicons name="chevron-back" size={20} color={c.textPrimary} />
+          </TouchableOpacity>
+          <View style={s.headerTextWrap}>
+            <Text style={s.headerTitle}>Notifications</Text>
+            {unreadCount > 0 ? (
+              <Text style={s.headerSubtitle}>
+                {unreadCount} unread
+                {unreadCount === 1 ? "" : "s"}
+              </Text>
+            ) : null}
+          </View>
+          {unreadCount > 0 ? (
             <TouchableOpacity
-              style={styles.markAllButtonContent}
+              style={s.markAllButton}
               onPress={markAllAsRead}
+              activeOpacity={0.75}
+              accessibilityRole="button"
             >
-              <Text style={styles.markAllText}>Mark All Read</Text>
+              <Text style={s.markAllText}>Mark all read</Text>
             </TouchableOpacity>
-          )}
+          ) : null}
         </View>
+
         {loading ? (
-          <View style={styles.placeholderList}>
+          <View style={s.placeholderList}>
             {[0, 1, 2, 3].map((index) => (
               <Animated.View
                 key={`notification-placeholder-${index}`}
                 style={[
-                  styles.notificationPlaceholder,
+                  s.notificationPlaceholder,
                   { opacity: skeletonOpacity },
                 ]}
               >
-                <View style={styles.placeholderIcon} />
-                <View style={styles.placeholderContent}>
-                  <View style={styles.placeholderLine} />
-                  <View style={styles.placeholderLineShort} />
-                  <View style={styles.placeholderLineTiny} />
+                <View style={s.placeholderIcon} />
+                <View style={s.placeholderContent}>
+                  <View style={s.placeholderLine} />
+                  <View style={s.placeholderLineShort} />
                 </View>
               </Animated.View>
             ))}
           </View>
         ) : notifications.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Ionicons name="notifications-off" size={64} color={colors.tint} />
-            <Text style={styles.emptyTitle}>No Notifications</Text>
-            <Text style={styles.emptyMessage}>
-              You're all caught up! Check back later for updates.
-            </Text>
-          </View>
+          <EmptyState
+            icon="notifications-off-outline"
+            title="You're all caught up"
+            message="Order updates and account alerts will show up here."
+          />
         ) : (
-          notifications.map((notification) => (
-            <TouchableOpacity
-              key={notification.id}
-              style={[
-                styles.notificationItem,
-                !notification.read && styles.unreadItem,
-              ]}
-              onPress={() => markAsRead(notification.id)}
-            >
-              <View style={styles.notificationIcon}>
-                <Ionicons
-                  name={getNotificationIcon(notification.status || "info")}
-                  size={24}
-                  color={getNotificationColor(notification.status || "info")}
-                />
-              </View>
-              <View style={styles.notificationContent}>
-                <Text
-                  style={[
-                    styles.notificationTitle,
-                    !notification.read && styles.unreadText,
-                  ]}
+          <View style={s.list}>
+            {notifications.map((notification) => {
+              const meta = kindMeta(notification.status || "info");
+              const title = titleOf(notification);
+              const message = messageOf(notification);
+              return (
+                <TouchableOpacity
+                  key={notification.id}
+                  style={[s.item, notification.read ? null : s.itemUnread]}
+                  onPress={() => markAsRead(notification.id)}
+                  activeOpacity={0.75}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${title}. ${formatTime(
+                    notification.created_at,
+                  )}`}
                 >
-                  {notification.message.split(" ").slice(0, 5).join(" ")}...
-                </Text>
-                <Text style={styles.notificationMessage}>
-                  {notification.message}
-                </Text>
-                <Text style={styles.notificationTime}>
-                  {formatTime(notification.created_at)}
-                </Text>
-              </View>
-              {!notification.read && <View style={styles.unreadDot} />}
-            </TouchableOpacity>
-          ))
+                  <RowIcon icon={meta.icon} tint={c[meta.tint]} />
+                  <View style={s.itemBody}>
+                    <Text
+                      style={[
+                        s.itemTitle,
+                        notification.read ? null : s.itemTitleUnread,
+                      ]}
+                      numberOfLines={2}
+                    >
+                      {title}
+                    </Text>
+                    {message && message !== title ? (
+                      <Text style={s.itemMessage} numberOfLines={3}>
+                        {message}
+                      </Text>
+                    ) : null}
+                    <Text style={s.itemTime}>
+                      {formatTime(notification.created_at)}
+                    </Text>
+                  </View>
+                  {!notification.read ? <View style={s.unreadDot} /> : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
         )}
       </ScrollView>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 20,
-    zIndex: 10,
-  },
-  backButtonCircle: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: "rgba(255, 255, 255, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  contentHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingHorizontal: 20,
-    marginTop: 110, // Accounts for floating back button
-    marginBottom: 20,
-  },
-  screenTitle: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: colors.dark,
-  },
-  markAllButtonContent: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-    backgroundColor: colors.light,
-  },
-  header: {
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: colors.light,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: colors.dark,
-  },
-  markAllButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    backgroundColor: colors.light,
-  },
-  markAllText: {
-    color: colors.primary,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  content: {
-    flex: 1,
-  },
-  emptyState: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: 100,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: colors.dark,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  emptyMessage: {
-    fontSize: 14,
-    color: colors.dark,
-    opacity: 0.5,
-    textAlign: "center",
-    lineHeight: 22,
-  },
-  notificationItem: {
-    flexDirection: "row",
-    backgroundColor: colors.white,
-    marginHorizontal: 20,
-    marginVertical: 8,
-    padding: 16,
-    borderRadius: 20,
-    elevation: 3,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    alignItems: "center",
-  },
-  unreadItem: {
-    borderLeftWidth: 4,
-    borderLeftColor: colors.primary,
-    backgroundColor: "#F0F9F9",
-  },
-  notificationIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.white,
-    justifyContent: "center",
-    alignItems: "center",
-    marginRight: 15,
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-  },
-  notificationContent: {
-    flex: 1,
-  },
-  notificationTitle: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: colors.dark,
-    opacity: 0.8,
-    marginBottom: 2,
-  },
-  unreadText: {
-    fontWeight: "800",
-    opacity: 1,
-  },
-  notificationMessage: {
-    fontSize: 14,
-    color: colors.dark,
-    opacity: 0.6,
-    marginBottom: 6,
-    lineHeight: 20,
-  },
-  notificationTime: {
-    fontSize: 11,
-    color: colors.dark,
-    opacity: 0.4,
-    fontWeight: "600",
-  },
-  unreadDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: colors.primary,
-    marginLeft: 10,
-  },
-  placeholderList: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  notificationPlaceholder: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.white,
-    marginBottom: 16,
-    padding: 16,
-    borderRadius: 20,
-  },
-  placeholderIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: colors.border,
-    marginRight: 15,
-  },
-  placeholderContent: {
-    flex: 1,
-  },
-  placeholderLine: {
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "75%",
-    marginBottom: 8,
-  },
-  placeholderLineShort: {
-    height: 10,
-    borderRadius: 6,
-    backgroundColor: colors.border,
-    width: "60%",
-    marginBottom: 8,
-  },
-  placeholderLineTiny: {
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.border,
-    width: "40%",
-  },
-});
+// Cross-platform elevation. Mirrors HomeScreen/ProfileScreen: `boxShadow` for
+// web (where `shadow*` flattens), native props elsewhere, palette tone.
+const shadow = (elevation, shadowOpacity = 0.16, tone = "#000000") =>
+  Platform.select({
+    ios: {
+      shadowColor: tone,
+      shadowOffset: { width: 0, height: elevation },
+      shadowOpacity,
+      shadowRadius: elevation * 1.6,
+    },
+    android: { elevation },
+    default: {
+      boxShadow: `${tone}${Math.round(shadowOpacity * 255)
+        .toString(16)
+        .padStart(2, "0")} 0px ${elevation}px ${elevation * 1.8}px`,
+    },
+  });
+
+const useNotifStyles = (c, topInset) =>
+  useMemo(() => buildStyles(c, topInset), [c, topInset]);
+
+// `topInset` is the Android status-bar height - see HistoryScreen for why.
+const buildStyles = (c, topInset = 0) =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: c.canvas,
+    },
+    scrollContent: {
+      paddingHorizontal: 20,
+      paddingBottom: 36,
+    },
+
+    /* ---------- Header ---------- */
+    header: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 14,
+      paddingTop: 8 + topInset,
+      paddingBottom: 18,
+    },
+    backButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 13,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    headerTextWrap: {
+      flex: 1,
+    },
+    headerTitle: {
+      fontFamily: fonts.display,
+      fontSize: 21,
+      color: c.textPrimary,
+    },
+    headerSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.mintDim,
+      marginTop: 2,
+    },
+    markAllButton: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+    },
+    markAllText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.mint,
+    },
+
+    /* ---------- List ---------- */
+    list: {
+      gap: 10,
+    },
+    item: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 12,
+      backgroundColor: c.surface,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 14,
+      ...shadow(3, 0.14, c.shadow),
+    },
+    // Unread rows get a tinted wash plus a leading accent edge so they read as
+    // distinct at a glance without relying on the dot alone.
+    itemUnread: {
+      backgroundColor: `${c.mint}0D`,
+      borderColor: `${c.mint}44`,
+      borderLeftWidth: 3,
+    },
+    itemBody: {
+      flex: 1,
+    },
+    itemTitle: {
+      fontFamily: fonts.body,
+      fontSize: 14.5,
+      color: c.textSecondary,
+    },
+    itemTitleUnread: {
+      fontFamily: fonts.bodyBold,
+      color: c.textPrimary,
+    },
+    itemMessage: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      lineHeight: 18,
+      color: c.textMuted,
+      marginTop: 3,
+    },
+    itemTime: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 7,
+    },
+    unreadDot: {
+      width: 9,
+      height: 9,
+      borderRadius: 5,
+      backgroundColor: c.mint,
+      marginTop: 6,
+    },
+
+    /* ---------- Skeleton ---------- */
+    placeholderList: {
+      gap: 12,
+    },
+    notificationPlaceholder: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 12,
+      height: 74,
+      borderRadius: 20,
+      backgroundColor: c.skeleton,
+      padding: 14,
+    },
+    placeholderIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHover,
+    },
+    placeholderContent: {
+      flex: 1,
+      gap: 8,
+    },
+    placeholderLine: {
+      height: 12,
+      borderRadius: 6,
+      backgroundColor: c.surfaceHover,
+      width: "75%",
+    },
+    placeholderLineShort: {
+      height: 10,
+      borderRadius: 5,
+      backgroundColor: c.surfaceHover,
+      width: "55%",
+    },
+  });
