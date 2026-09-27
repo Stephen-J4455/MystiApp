@@ -53,7 +53,7 @@ import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
 import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
 import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
 import DockTabBar from "./src/components/DockTabBar";
-import { DOCK_BAR_HEIGHT } from "./src/lib/dockNav";
+import { DOCK_BAR_HEIGHT, isAuthRoute } from "./src/lib/dockNav";
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // The splash module is unavailable on web.
@@ -85,8 +85,25 @@ const normalizeUserRole = (user) => {
  * `NavigationContainer` renders its children into a plain flex column, so the
  * dock's `position: absolute; bottom: 0` resolves against the full screen -
  * which is what we want for a bottom bar.
+ *
+ * The dock is suppressed on auth routes. It is mounted here, ABOVE the
+ * navigator, so it would otherwise draw on every screen a signed-out visitor
+ * can reach - putting a four-tab bar and a "More" popup on top of the Login
+ * and Signup forms. Gating it here rather than in each auth screen means a
+ * future auth route is covered by adding its name to `AUTH_ROUTE_NAMES`, with
+ * no per-screen opt-out to forget.
+ *
+ * `isSignedIn` is a second, independent guard and is what makes sign-out
+ * correct. `currentRouteName` only updates when the navigation state CHANGES,
+ * so the instant `signOut()` clears the session the route name is still
+ * "Profile" - and the dock would hang over the login screen until the
+ * navigator settled. The navigator only ever registers auth screens while
+ * there is no user, so "no session" implies "auth screen" regardless of what
+ * the (possibly stale) route name says.
  */
-function DockHost({ navigationRef, currentRouteName }) {
+function DockHost({ navigationRef, currentRouteName, isSignedIn }) {
+  if (!isSignedIn || isAuthRoute(currentRouteName)) return null;
+
   return (
     <DockVisibilityProvider>
       <DockTabBar
@@ -364,6 +381,18 @@ export default function App() {
                 ref={navigationRef}
                 // The dock highlights whichever tab matches the focused screen,
                 // so the route has to be tracked from the container.
+                //
+                // `onReady` matters as much as `onStateChange`: on the very
+                // first render the state does not CHANGE, so without this the
+                // route name stays null and the dock renders for a frame over
+                // the Login screen before the first navigation corrects it.
+                // That flash is visible on cold start, which is exactly when a
+                // signed-out user is looking at it.
+                onReady={() =>
+                  setCurrentRouteName(
+                    navigationRef.current?.getCurrentRoute()?.name ?? null,
+                  )
+                }
                 onStateChange={() =>
                   setCurrentRouteName(
                     navigationRef.current?.getCurrentRoute()?.name ?? null,
@@ -456,6 +485,7 @@ export default function App() {
                   <DockHost
                     navigationRef={navigationRef}
                     currentRouteName={currentRouteName}
+                    isSignedIn={Boolean(user)}
                   />
                 ) : null}
               </NavigationContainer>

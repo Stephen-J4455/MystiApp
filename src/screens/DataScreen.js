@@ -43,6 +43,7 @@ import {
   fetchPaymentChargeSettings,
   getTransactionChargeAmount,
 } from "../lib/paymentSettings";
+import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
 
 // Tab order for the data-type switcher. The key must match the value returned
 // by getBundleFamily in the component.
@@ -84,6 +85,19 @@ export default function DataScreen({ navigation, route }) {
   const [userEmail, setUserEmail] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
   const [userPhone, setUserPhone] = useState("");
+
+  // Sanitises on every keystroke so the field can only ever hold digits, and
+  // folds an international number down to the 10-digit local form. Without
+  // this the user can paste or type letters, spaces and a 13th digit, and the
+  // value is only discovered to be wrong several taps later.
+  //
+  // Sanitising rather than rejecting is deliberate: a pasted
+  // "0532 973 455" or "+233532973455" still produces the number the user meant
+  // instead of being thrown away. `keyboardType="phone-pad"` is only a hint -
+  // it does not filter pasted text - so this is what actually enforces the rule.
+  const handleRecipientPhoneChange = (text) => {
+    setRecipientPhone(sanitizeGhanaPhone(text));
+  };
   const [purchaseType, setPurchaseType] = useState("self"); // 'self' or 'others'
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
@@ -1036,15 +1050,14 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
 
-      // Basic phone number validation (Ghana format - more flexible)
-      const phoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
-      const cleanPhone = recipientPhone.trim().replace(/\s+/g, ""); // Remove spaces
-
-      if (!phoneRegex.test(cleanPhone)) {
-        showError(
-          "Invalid Phone Number",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
-        );
+      // The field is already sanitised, so this only has to catch an
+      // incomplete or wrongly-prefixed number. `getGhanaPhoneError` names the
+      // actual problem instead of one generic "invalid format" string, which
+      // is what the previous single regex produced for every failure.
+      const cleanPhone = recipientPhone.trim();
+      const phoneError = getGhanaPhoneError(cleanPhone);
+      if (phoneError) {
+        showError("Invalid Phone Number", phoneError);
         return;
       }
 
@@ -1372,13 +1385,10 @@ export default function DataScreen({ navigation, route }) {
       return;
     }
 
-    const phoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
-    const cleanPhone = recipientPhone.trim().replace(/\s+/g, "");
-    if (!phoneRegex.test(cleanPhone)) {
-      showError(
-        "Invalid Phone Number",
-        "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
-      );
+    const cleanPhone = recipientPhone.trim();
+    const phoneError = getGhanaPhoneError(cleanPhone);
+    if (phoneError) {
+      showError("Invalid Phone Number", phoneError);
       return;
     }
 
@@ -2077,9 +2087,9 @@ export default function DataScreen({ navigation, route }) {
                           placeholder="Enter phone number (e.g., 0532973455)"
                           placeholderTextColor={c.textMuted}
                           value={recipientPhone}
-                          onChangeText={setRecipientPhone}
+                          onChangeText={handleRecipientPhoneChange}
                           keyboardType="phone-pad"
-                          maxLength={13}
+                          maxLength={10}
                         />
                       </View>
                     </>
@@ -2144,9 +2154,9 @@ export default function DataScreen({ navigation, route }) {
                       placeholder="Enter phone number (e.g., 0532973455)"
                       placeholderTextColor={c.textMuted}
                       value={recipientPhone}
-                      onChangeText={setRecipientPhone}
+                      onChangeText={handleRecipientPhoneChange}
                       keyboardType="phone-pad"
-                      maxLength={13}
+                      maxLength={10}
                       autoFocus
                     />
                   </View>

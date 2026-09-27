@@ -28,19 +28,22 @@ import {
 } from "../lib/heldOrderReorder";
 import { fonts, networks } from "../components/theme";
 
-const SUPPORT_WHATSAPP = "233532973455";
-const ADMIN_WHATSAPP = "45GU7PROOYDFE1";
+// Contact numbers and the WhatsApp opener both come from lib/whatsapp.js.
+// The admin number used to be defined HERE as "45GU7PROOYDFE1", which is a
+// Paystack SUBACCOUNT CODE rather than a phone number - `wa.me/45GU7PROOYDFE1`
+// opens a dead chat, so the drawer's "Chat with admin" did nothing at all.
+// Do not reintroduce local copies of these constants.
+import {
+  ADMIN_WHATSAPP,
+  SUPPORT_WHATSAPP,
+  openWhatsApp,
+} from "../lib/whatsapp";
 
 // Width of the super-agent drawer. Doubles as the closed slide distance so
 // the panel parks fully off-screen instead of peeking past the right edge.
 const DRAWER_WIDTH = 292;
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
-
-const openWhatsApp = (number, message) =>
-  Linking.openURL(
-    `https://wa.me/${number}?text=${encodeURIComponent(message)}`,
-  ).catch((error) => console.warn("Could not open WhatsApp:", error));
 
 // Order status -> label + pill colours. Delegates to the shared, per-scheme
 // tone table in theme.js so every screen agrees on wording and colour.
@@ -1037,11 +1040,16 @@ export default function HomeScreen({ navigation }) {
       label: "Support",
       icon: "chatbubbles-outline",
       tint: c.amber,
+      // `openWhatsApp` now reports a failure instead of swallowing it into a
+      // console.warn, so a device with no WhatsApp installed tells the user
+      // rather than appearing to do nothing when tapped.
       onPress: () =>
         openWhatsApp(
           SUPPORT_WHATSAPP,
           "Hi, I need help with the Mystiwan E-Business app",
-        ),
+        ).then((result) => {
+          if (!result.ok) showError("Cannot Open WhatsApp", result.message);
+        }),
     },
     {
       key: "settings",
@@ -1178,7 +1186,9 @@ export default function HomeScreen({ navigation }) {
         openWhatsApp(
           ADMIN_WHATSAPP,
           "Hi Admin, I need help with my Super Agent account on the Mystiwan E-Business app.",
-        ),
+        ).then((result) => {
+          if (!result.ok) showError("Cannot Open WhatsApp", result.message);
+        }),
     },
   ];
 
@@ -1844,7 +1854,11 @@ export default function HomeScreen({ navigation }) {
                   openWhatsApp(
                     SUPPORT_WHATSAPP,
                     "Hi, I want to advertise my business on your app",
-                  )
+                  ).then((result) => {
+                    if (!result.ok) {
+                      showError("Cannot Open WhatsApp", result.message);
+                    }
+                  })
                 }
               >
                 <LinearGradient

@@ -14,6 +14,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
+import { sanitizeGhanaPhone } from "../lib/ghanaPhone";
 import { useThemedStyles } from "../components/ui";
 import { fonts } from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
@@ -360,9 +361,13 @@ export default function SuperAgentAgentsScreen({ navigation }) {
               placeholder="Enter phone number"
               placeholderTextColor={c.textMuted}
               keyboardType="phone-pad"
+              maxLength={10}
               value={form.phone}
               onChangeText={(value) =>
-                setForm((prev) => ({ ...prev, phone: value }))
+                setForm((prev) => ({
+                  ...prev,
+                  phone: sanitizeGhanaPhone(value),
+                }))
               }
               style={styles.input}
             />

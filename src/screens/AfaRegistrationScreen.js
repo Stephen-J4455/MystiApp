@@ -20,6 +20,7 @@ import { supabase, getPaystackPublicKey } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { useNotification } from "../contexts/NotificationContext";
+import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
 
 const escapeJs = (value) =>
   String(value ?? "")
@@ -137,9 +138,13 @@ export default function AfaRegistrationScreen({ navigation }) {
       );
       return false;
     }
-    const phoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
-    if (!phoneRegex.test(form.phone.replace(/\s+/g, ""))) {
-      showError("Invalid Phone", "Enter a valid Ghana phone number.");
+    // The field is sanitised as the user types, so this only has to catch an
+    // incomplete or wrongly-prefixed number. `getGhanaPhoneError` names the
+    // actual problem rather than reporting one generic message for every
+    // failure, which is what the single regex it replaced did.
+    const phoneError = getGhanaPhoneError(form.phone);
+    if (phoneError) {
+      showError("Invalid Phone", phoneError);
       return false;
     }
     if (form.idNumber.trim().length < 5) {
@@ -565,9 +570,12 @@ export default function AfaRegistrationScreen({ navigation }) {
                 label="Phone number"
                 icon="call-outline"
                 value={form.phone}
-                onChangeText={(v) => updateField("phone", v)}
+                onChangeText={(v) =>
+                  updateField("phone", sanitizeGhanaPhone(v))
+                }
                 placeholder="e.g. 0244000000"
                 keyboardType="phone-pad"
+                maxLength={10}
               />
               <Text style={styles.label}>ID type</Text>
               <View style={styles.idTypeRow}>

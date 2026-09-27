@@ -124,3 +124,32 @@ export const MORE_ITEMS = [
 
 /** Route names the dock considers "the More section", for active-state tinting. */
 export const MORE_ROUTE_NAMES = MORE_ITEMS.map((item) => item.routeName);
+
+/**
+ * Routes that must never show the bottom dock.
+ *
+ * The dock is mounted once in `App.js`, above the navigator, so by default it
+ * draws on EVERY screen - including the ones a signed-out visitor can reach.
+ * Before this list existed, Login / Signup / ForgotPassword rendered with the
+ * full four-tab bar and a "More" popup over the form, on a screen whose entire
+ * purpose is to get the user past authentication.
+ *
+ * Kept here, beside the route names the dock already knows, rather than
+ * inlined at the call site: this file is the single place that enumerates
+ * dock-visible routes, so a new auth screen is added in one spot.
+ *
+ * MUST stay in step with the signed-out branch of the `Stack.Navigator` in
+ * `App.js` - a screen registered there but missing from this list renders with
+ * the dock over it. `ResetPassword` is in that branch and is easy to overlook
+ * because it is reachable from a deep link rather than from a button.
+ */
+export const AUTH_ROUTE_NAMES = [
+  "Login",
+  "Signup",
+  "ForgotPassword",
+  "ResetPassword",
+];
+
+/** True when `routeName` should render without the bottom dock. */
+export const isAuthRoute = (routeName) =>
+  AUTH_ROUTE_NAMES.includes(String(routeName || ""));

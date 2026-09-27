@@ -20,6 +20,7 @@ import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { useNotification } from "../contexts/NotificationContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { EmptyState } from "../components/ui";
+import ComplaintSheet from "../components/ComplaintSheet";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { fonts } from "../components/theme";
 import {
@@ -200,6 +201,11 @@ export default function HistoryScreen({ navigation }) {
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [reorderingId, setReorderingId] = useState(null);
+  // The order the super agent is currently disputing. Null when the sheet is
+  // closed. One object rather than a boolean so the sheet is always given the
+  // row it belongs to - reopening for a different order must not show the
+  // previous one's details.
+  const [complaintOrder, setComplaintOrder] = useState(null);
   const { showError, showSuccess } = useNotification();
   const skeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
@@ -790,12 +796,44 @@ export default function HistoryScreen({ navigation }) {
                       </Text>
                     </TouchableOpacity>
                   ) : null}
+
+                  {/* Report a problem. The card itself navigates to the
+                      receipt, so the press has to stop here or the sheet opens
+                      and the navigation fires too. */}
+                  {isSuperAgentUser ? (
+                    <TouchableOpacity
+                      style={s.complaintButton}
+                      onPress={(event) => {
+                        if (event?.stopPropagation) {
+                          event.stopPropagation();
+                        }
+                        setComplaintOrder(transaction);
+                      }}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Report a problem with order ${transaction.id}`}
+                    >
+                      <Ionicons
+                        name="logo-whatsapp"
+                        size={14}
+                        color={c.textSecondary}
+                      />
+                      <Text style={s.complaintText}>Report a problem</Text>
+                    </TouchableOpacity>
+                  ) : null}
                 </TouchableOpacity>
               );
             })}
           </View>
         )}
       </ScrollView>
+
+      <ComplaintSheet
+        visible={Boolean(complaintOrder)}
+        order={complaintOrder}
+        onClose={() => setComplaintOrder(null)}
+        onError={(message) => showError("Cannot Open WhatsApp", message)}
+      />
     </View>
   );
 }
@@ -1038,6 +1076,27 @@ const buildStyles = (c, topInset = 0) =>
       fontFamily: fonts.bodyBold,
       fontSize: 13,
       color: c.onAccent,
+    },
+
+    /* ---------- Report a problem ---------- */
+    // Quieter than the Reorder button beside it: Reorder is the action that
+    // FIXES the order, this one opens a support chat, so it reads as secondary.
+    // Outlined rather than filled for the same reason.
+    complaintButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      marginTop: 9,
+      paddingVertical: 9,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+    },
+    complaintText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12.5,
+      color: c.textSecondary,
     },
 
     /* ---------- Skeleton ---------- */

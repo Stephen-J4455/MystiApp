@@ -32,9 +32,9 @@ import {
 import ThemePicker from "../components/ThemePicker";
 import { useAppVersion } from "../hooks/useAppVersion";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
+import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
+import { ADMIN_WHATSAPP, openWhatsApp } from "../lib/whatsapp";
 import { fonts } from "../components/theme";
-
-const ADMIN_WHATSAPP = "233532973455";
 
 const initialsOf = (name) => {
   const parts = String(name || "")
@@ -270,13 +270,12 @@ export default function ProfileScreen({ navigation }) {
     // Ghana phone number validation (optional field)
     // Accepts formats: 0532973455, +233532973455, 233532973455
     if (phone.trim()) {
-      const cleanPhone = phone.replace(/[\s\-\(\)]/g, "");
-      const ghanaPhoneRegex = /^(\+?233|0)?[2356789]\d{8}$/;
-      if (!ghanaPhoneRegex.test(cleanPhone)) {
-        showError(
-          "Error",
-          "Please enter a valid Ghana phone number (e.g., 0532973455 or +233532973455)",
-        );
+      // The input is sanitised to the 10-digit local form on every keystroke,
+      // so anything reaching here is already in that shape - only
+      // completeness and the network prefix can still be wrong.
+      const phoneError = getGhanaPhoneError(sanitizeGhanaPhone(phone));
+      if (phoneError) {
+        showError("Invalid Phone Number", phoneError);
         return;
       }
     }
@@ -406,12 +405,13 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
-  const openWhatsApp = () => {
-    const message = "Hi Admin, I need help with the Mystiwan E-Business app.";
-    Linking.openURL(
-      `https://wa.me/${ADMIN_WHATSAPP}?text=${encodeURIComponent(message)}`,
-    ).catch((error) => console.warn("Could not open WhatsApp:", error));
-  };
+  const openAdminChat = () =>
+    openWhatsApp(
+      ADMIN_WHATSAPP,
+      "Hi Admin, I need help with the Mystiwan E-Business app.",
+    ).then((result) => {
+      if (!result.ok) showError("Cannot Open WhatsApp", result.message);
+    });
 
   if (!user) {
     return (
@@ -469,7 +469,7 @@ export default function ProfileScreen({ navigation }) {
       tint: "#25D366",
       title: "Contact Admin",
       subtitle: "Chat with us on WhatsApp",
-      onPress: openWhatsApp,
+      onPress: openAdminChat,
     },
   ];
 
@@ -605,9 +605,10 @@ export default function ProfileScreen({ navigation }) {
                 label="Phone number"
                 icon="call-outline"
                 value={phone}
-                onChangeText={setPhone}
+                onChangeText={(text) => setPhone(sanitizeGhanaPhone(text))}
                 placeholder="e.g. 0532973455"
                 keyboardType="phone-pad"
+                maxLength={10}
               />
               <View style={s.editActions}>
                 <SecondaryButton

@@ -1,28 +1,26 @@
 import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  Image,
-  StatusBar,
-} from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import { Text, TouchableOpacity } from "react-native";
 import { supabase } from "../lib/supabase";
-import colors from "../components/theme";
 import { useNotification } from "../contexts/NotificationContext";
-import { ThemedScreen } from "../components/ui";
+import { Field, PrimaryButton, useThemedStyles } from "../components/ui";
+import {
+  AuthShell,
+  authFooterLink,
+  authFooterText,
+} from "../components/AuthShell";
 
 export default function ForgotPasswordScreen({ navigation }) {
   const [email, setEmail] = useState("");
   const [loading, setLoading] = useState(false);
+  // Once the request is sent the screen stops being a form: the only useful
+  // next step is "check your inbox", and leaving a live field and button above
+  // that message invites the user to submit again for no reason.
+  const [sent, setSent] = useState(false);
   const { showError, showSuccess } = useNotification();
+  const { c } = useThemedStyles();
 
   const handleResetPassword = async () => {
-    if (!email) {
+    if (!email.trim()) {
       showError("Error", "Please enter your email address");
       return;
     }
@@ -36,18 +34,19 @@ export default function ForgotPasswordScreen({ navigation }) {
         ? `${process.env.EXPO_PUBLIC_WEB_URL.replace(/\/$/, "")}/reset-password.html`
         : "https://your-vercel-domain.example/reset-password.html";
 
-      const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: redirectUrl,
-      });
+      const { error } = await supabase.auth.resetPasswordForEmail(
+        email.trim(),
+        { redirectTo: redirectUrl },
+      );
 
       if (error) {
         showError("Error", error.message);
       } else {
+        setSent(true);
         showSuccess(
           "Reset Email Sent",
           "Check your email for password reset instructions",
         );
-        navigation.goBack(); // Go back to login
       }
     } catch (error) {
       showError("Error", "An unexpected error occurred");
@@ -56,147 +55,59 @@ export default function ForgotPasswordScreen({ navigation }) {
     }
   };
 
-  return (
-    <ThemedScreen style={styles.container}>
-      <StatusBar
-        translucent
-        backgroundColor="transparent"
-        barStyle="dark-content"
-      />
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
-        <View style={styles.content}>
-          <Image
-            source={require("../../assets/mystiwan.png")}
-            style={styles.logo}
-            resizeMode="contain"
-          />
-          <Text style={styles.title}>Forgot Password</Text>
-          <Text style={styles.subtitle}>
-            Enter your email address and we'll send you a link to reset your
-            password.
-          </Text>
-
-          <View style={styles.inputContainer}>
-            <Text style={styles.label}>Email</Text>
-            <View style={styles.inputWrapper}>
-              <Ionicons
-                name="mail-outline"
-                size={20}
-                color={colors.secondary}
-                style={styles.inputIcon}
-              />
-              <TextInput
-                style={styles.inputWithIcon}
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Enter your email"
-                placeholderTextColor={colors.secondary}
-                keyboardType="email-address"
-                autoCapitalize="none"
-              />
-            </View>
-          </View>
-
+  if (sent) {
+    return (
+      <AuthShell
+        title="Check your inbox"
+        subtitle={`We sent a reset link to ${email.trim()}. The link expires shortly, so use it soon.`}
+        footer={
           <TouchableOpacity
-            style={styles.button}
-            onPress={handleResetPassword}
-            disabled={loading}
+            onPress={() => navigation.goBack()}
+            activeOpacity={0.7}
+            accessibilityRole="button"
           >
-            <Text style={styles.buttonText}>
-              {loading ? "Sending..." : "Send Reset Link"}
+            <Text style={authFooterText(c)}>
+              Didn&apos;t get it?{" "}
+              <Text style={authFooterLink(c)}>Back to sign in</Text>
             </Text>
           </TouchableOpacity>
+        }
+      >
+        <PrimaryButton
+          title="Back to sign in"
+          onPress={() => navigation.goBack()}
+          icon="arrow-back"
+        />
+      </AuthShell>
+    );
+  }
 
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Text style={styles.link}>Back to Login</Text>
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </ThemedScreen>
+  return (
+    <AuthShell
+      title="Reset your password"
+      subtitle="Enter the email on your account and we will send you a link to choose a new password."
+      backLabel="Back to sign in"
+      onBack={() => navigation.goBack()}
+    >
+      <Field
+        label="Email"
+        icon="mail-outline"
+        value={email}
+        onChangeText={setEmail}
+        placeholder="you@example.com"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoComplete="email"
+        textContentType="emailAddress"
+        returnKeyType="go"
+        onSubmitEditing={handleResetPassword}
+      />
+
+      <PrimaryButton
+        title="Send reset link"
+        onPress={handleResetPassword}
+        loading={loading}
+      />
+    </AuthShell>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.light,
-  },
-  content: {
-    flex: 1,
-    padding: 20,
-    justifyContent: "center",
-  },
-  logo: {
-    width: 120,
-    height: 120,
-    alignSelf: "center",
-    marginBottom: 20,
-    borderRadius: 60,
-  },
-  title: {
-    fontSize: 32,
-    fontWeight: "bold",
-    color: colors.primary,
-    textAlign: "center",
-    marginBottom: 10,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: colors.secondary,
-    textAlign: "center",
-    marginBottom: 40,
-    lineHeight: 24,
-  },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: colors.primary,
-    marginBottom: 8,
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: colors.tint,
-    borderRadius: 25,
-    padding: 15,
-    fontSize: 16,
-    backgroundColor: "#fff",
-  },
-  inputWrapper: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.tint,
-    borderRadius: 25,
-    backgroundColor: "#fff",
-  },
-  inputIcon: {
-    paddingLeft: 15,
-  },
-  inputWithIcon: {
-    flex: 1,
-    padding: 15,
-    fontSize: 16,
-    color: colors.primary,
-  },
-  button: {
-    backgroundColor: colors.primary,
-    padding: 15,
-    borderRadius: 30,
-    alignItems: "center",
-    marginTop: 20,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 18,
-    fontWeight: "bold",
-  },
-  link: {
-    color: colors.secondary,
-    textAlign: "center",
-    marginTop: 20,
-    fontSize: 16,
-  },
-});

@@ -1,26 +1,21 @@
 import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Image,
-  StatusBar,
-  ScrollView,
-} from "react-native";
-import { KeyboardAvoidingView } from "react-native-keyboard-controller";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import { Text, TouchableOpacity } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import {
-  useThemedStyles,
   Field,
   PrimaryButton,
   SecondaryButton,
+  useThemedStyles,
 } from "../components/ui";
-import { fonts } from "../components/theme";
+import {
+  AuthDivider,
+  AuthShell,
+  authFooterLink,
+  authFooterText,
+} from "../components/AuthShell";
+
 WebBrowser.maybeCompleteAuthSession();
 
 export default function LoginScreen({ navigation }) {
@@ -30,7 +25,7 @@ export default function LoginScreen({ navigation }) {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const { showError } = useNotification();
-  const { c, isDark, styles } = useThemedStyles();
+  const { c, styles } = useThemedStyles();
 
   const handleLogin = async () => {
     if (!email || !password) {
@@ -48,16 +43,14 @@ export default function LoginScreen({ navigation }) {
       if (error) {
         console.error("Login error:", error);
         showError("Login Failed", error.message);
-      } else {
-
-        // On web, check if email confirmation is required
-        if (data.user && !data.user.email_confirmed_at) {
-          showError(
-            "Email Confirmation Required",
-            "Please check your email and confirm your account before signing in.",
-          );
-        } else {
-        }
+      } else if (data.user && !data.user.email_confirmed_at) {
+        // Signed in, but the address was never confirmed. Supabase still
+        // issues a session here, so this is a warning rather than a block -
+        // the previous code had an empty `else` branch with the same intent.
+        showError(
+          "Email Confirmation Required",
+          "Please check your email and confirm your account before signing in.",
+        );
       }
     } catch (error) {
       console.error("Login exception:", error);
@@ -120,157 +113,74 @@ export default function LoginScreen({ navigation }) {
   };
 
   return (
-    <View style={styles.screen}>
-      <StatusBar
-        translucent
-        backgroundColor="transparent"
-        barStyle={isDark ? "light-content" : "dark-content"}
+    <AuthShell
+      title="Welcome back"
+      subtitle="Sign in to manage bundles, orders and your wallet."
+      footer={
+        <TouchableOpacity
+          onPress={() => navigation.navigate("Signup")}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+        >
+          <Text style={authFooterText(c)}>
+            Don&apos;t have an account?{" "}
+            <Text style={authFooterLink(c)}>Sign up</Text>
+          </Text>
+        </TouchableOpacity>
+      }
+    >
+      <Field
+        label="Email"
+        icon="mail-outline"
+        value={email}
+        onChangeText={setEmail}
+        placeholder="you@example.com"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoComplete="email"
+        textContentType="emailAddress"
       />
-      <SafeAreaView style={{ flex: 1 }} edges={["top", "bottom"]}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
-          <ScrollView
-            contentContainerStyle={s.body}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={s.logoWrap}>
-              <Image
-                source={require("../../assets/mystiwan.png")}
-                style={s.logo}
-                resizeMode="contain"
-              />
-            </View>
+      <Field
+        label="Password"
+        icon="lock-closed-outline"
+        value={password}
+        onChangeText={setPassword}
+        placeholder="Enter your password"
+        secureTextEntry={!showPassword}
+        affix={showPassword ? "eye-off-outline" : "eye-outline"}
+        onAffixPress={() => setShowPassword((v) => !v)}
+        autoComplete="current-password"
+        textContentType="password"
+        returnKeyType="go"
+        onSubmitEditing={handleLogin}
+      />
 
-            <Text style={[s.title, { color: c.textPrimary }]}>
-              Welcome Back
-            </Text>
-            <Text style={[s.subtitle, { color: c.textMuted }]}>
-              Sign in to your account
-            </Text>
+      {/* Right-aligned so it sits under the field it belongs to instead of
+          floating in the middle of the form. */}
+      <TouchableOpacity
+        onPress={() => navigation.navigate("ForgotPassword")}
+        activeOpacity={0.7}
+        accessibilityRole="button"
+        style={{ alignSelf: "flex-end", marginTop: -4 }}
+      >
+        <Text style={styles.linkText}>Forgot password?</Text>
+      </TouchableOpacity>
 
-            <View style={s.form}>
-              <Field
-                label="Email"
-                icon="mail-outline"
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Enter your email"
-                keyboardType="email-address"
-                autoCapitalize="none"
-              />
-              <Field
-                label="Password"
-                icon="lock-closed-outline"
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Enter your password"
-                secureTextEntry={!showPassword}
-                affix={showPassword ? "eye-off-outline" : "eye-outline"}
-                onAffixPress={() => setShowPassword((v) => !v)}
-              />
+      <PrimaryButton
+        title="Sign in"
+        onPress={handleLogin}
+        loading={loading}
+        disabled={googleLoading}
+      />
 
-              <PrimaryButton
-                title={loading ? "Signing In..." : "Sign In"}
-                onPress={handleLogin}
-                loading={loading}
-                disabled={googleLoading}
-              />
+      <AuthDivider />
 
-              <TouchableOpacity
-                onPress={() => navigation.navigate("ForgotPassword")}
-                style={s.forgotWrap}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.linkText}>Forgot Password?</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={s.dividerRow}>
-              <View style={styles.divider} />
-              <Text style={[s.dividerText, { color: c.textMuted }]}>OR</Text>
-              <View style={styles.divider} />
-            </View>
-
-            <SecondaryButton
-              title={googleLoading ? "Signing in..." : "Continue with Google"}
-              icon="logo-google"
-              onPress={handleGoogleSignIn}
-              style={googleLoading ? s.dimmed : null}
-            />
-
-            <TouchableOpacity
-              onPress={() => navigation.navigate("Signup")}
-              style={s.signupWrap}
-              activeOpacity={0.7}
-            >
-              <Text style={[s.signupText, { color: c.textSecondary }]}>
-                Don't have an account?{" "}
-                <Text style={styles.linkText}>Sign Up</Text>
-              </Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </View>
+      <SecondaryButton
+        title={googleLoading ? "Signing in…" : "Continue with Google"}
+        icon="logo-google"
+        onPress={handleGoogleSignIn}
+        style={googleLoading ? { opacity: 0.6 } : null}
+      />
+    </AuthShell>
   );
 }
-
-// Layout only. Every colour comes from the themed stylesheet so this screen
-// follows the system scheme without a second code path.
-const s = StyleSheet.create({
-  body: {
-    flexGrow: 1,
-    paddingHorizontal: 24,
-    paddingTop: 10,
-    paddingBottom: 28,
-  },
-  logoWrap: {
-    alignItems: "center",
-    marginBottom: 24,
-    marginTop: 10,
-  },
-  logo: {
-    width: 92,
-    height: 92,
-    borderRadius: 28,
-  },
-  title: {
-    fontFamily: fonts.displayBold,
-    fontSize: 30,
-    marginBottom: 5,
-  },
-  subtitle: {
-    fontFamily: fonts.body,
-    fontSize: 14,
-    marginBottom: 26,
-  },
-  form: {
-    gap: 16,
-  },
-  forgotWrap: {
-    alignSelf: "center",
-    paddingVertical: 4,
-  },
-  dividerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    marginVertical: 22,
-  },
-  dividerText: {
-    fontFamily: fonts.bodySemi,
-    fontSize: 11.5,
-    letterSpacing: 1,
-  },
-  dimmed: {
-    opacity: 0.6,
-  },
-  signupWrap: {
-    alignItems: "center",
-    marginTop: 20,
-  },
-  signupText: {
-    fontFamily: fonts.body,
-    fontSize: 13.5,
-  },
-});
