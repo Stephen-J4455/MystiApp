@@ -1,6 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import Constants from "expo-constants";
 import { Platform } from "react-native";
 import { APP_ENV, getEdgeFunctionName } from "../lib/env.js";
 
@@ -9,8 +8,13 @@ import { APP_ENV, getEdgeFunctionName } from "../lib/env.js";
 export const SUPABASE_URL = "https://sffgznknlmqxtikkyhwu.supabase.co";
 export const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmZmd6bmtubG1xeHRpa2t5aHd1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY5NzE0NzEsImV4cCI6MjA2MjU0NzQ3MX0.vWmG3p7QcjQWsoS1v9mljyXahYKqFqH40Khyb7OT87U";
-export const PAYSTACK_PUBLIC_KEY =
-  "pk_live_aa97a7f0f4c0e512607d0c2e0f5a53a629614273";
+
+// Paystack keys live ONLY in edge function secrets. There is deliberately no
+// PAYSTACK_PUBLIC_KEY constant here: a hardcoded value short-circuits
+// getPaystackPublicKey() below, so the app could never receive the test key
+// when APP_ENV=development. Both key sets are resolved by the `health` edge
+// function, which knows from its own request URL whether it was deployed as
+// `health` or `health-test`.
 
 if (!SUPABASE_URL) {
   // eslint-disable-next-line no-console
@@ -78,12 +82,10 @@ supabase.functions.invoke = async (name, options = {}) => {
 console.log("[supabase.js] Patch applied successfully");
 
 export const getPaystackPublicKey = async () => {
-  const configuredKey =
-    PAYSTACK_PUBLIC_KEY ||
-    Constants.expoConfig?.extra?.paystackPublicKey ||
-    process.env.EXPO_PUBLIC_PAYSTACK_PUBLIC_KEY;
-  if (configuredKey) return configuredKey;
-
+  // No local key and no EXPO_PUBLIC_* fallback on purpose. Fetching from
+  // `health` is what makes APP_ENV=development resolve the test key and
+  // APP_ENV=production resolve the live key. The value is public either
+  // way, so the extra round trip is safe.
   try {
     const { data, error } = await supabase.functions.invoke(
       getEdgeFunctionName("health"),

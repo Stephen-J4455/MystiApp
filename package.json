@@ -4,6 +4,9 @@
   "main": "index.js",
   "scripts": {
     "start": "expo start",
+    "env:dev": "cross-env EXPO_PUBLIC_APP_ENV=development expo start",
+    "env:test": "cross-env EXPO_PUBLIC_APP_ENV=test expo start",
+    "env:prod": "cross-env EXPO_PUBLIC_APP_ENV=production expo start",
     "check:imports": "node check-imports.cjs",
     "android": "expo run:android",
     "ios": "expo run:ios",

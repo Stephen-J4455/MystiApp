@@ -46,7 +46,15 @@ if [[ -z "$URL" ]]; then
     echo "Could not resolve Supabase URL. Set one of: ${URL_CANDIDATES[*]}" >&2
     exit 1
   fi
-  URL="$URL_VALUE/functions/v1/health"
+  # The test environment deploys every function with a `-test` suffix, so the
+  # health check MUST target `health-test`. Calling the unsuffixed `health`
+  # here silently verified PRODUCTION instead - the script printed
+  # "Health OK" while reporting pk_live_ and checks.paystack.live=true.
+  HEALTH_FUNCTION="health"
+  if [[ "${ENV_NAME:-}" == "test" ]]; then
+    HEALTH_FUNCTION="health-test"
+  fi
+  URL="$URL_VALUE/functions/v1/$HEALTH_FUNCTION"
 fi
 
 echo "Calling health endpoint: $URL"

@@ -1,5 +1,38 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
+// ---- PAYSTACK KEY RESOLUTION - INLINED, DUPLICATED ON PURPOSE ----------
+// Supabase edge function secrets are PROJECT-WIDE, so `afa-registration` and
+// `afa-registration-test` would otherwise read the same PAYSTACK_SECRET_KEY.
+// The only per-function signal available at runtime is the request URL, which
+// is https://<ref>.supabase.co/functions/v1/<deployed-name>.
+//
+// Do not import this from a shared module: the dashboard's "Deploy with
+// upload file" bundles only the selected function folder and would fail to
+// resolve a relative import. See the IDENTITY HELPERS block below.
+// ---------------------------------------------------------------------------
+function resolvePaystackKeys(req: Request) {
+  let deployedName = "";
+  try {
+    const path = new URL(req.url).pathname;
+    deployedName = path.split("/").filter(Boolean).pop() || "";
+  } catch {
+    deployedName = "";
+  }
+  const isTest = deployedName.endsWith("-test");
+  return {
+    isTest,
+    keySet: (isTest ? "test" : "production") as "test" | "production",
+    secret:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_SECRET_KEY" : "PAYSTACK_SECRET_KEY",
+      ) || null,
+    publicKey:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_PUBLIC_KEY" : "PAYSTACK_PUBLIC_KEY",
+      ) || null,
+  };
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -116,15 +149,14 @@ const normalizeRole = (value: unknown): CanonicalRole | null => {
 };
 
 const identityIsAdmin = (identity: Identity) => identity.role === "admin";
-const identityIsSuperAgent = (identity: Identity) => identity.role === "super_agent";
+const identityIsSuperAgent = (identity: Identity) =>
+  identity.role === "super_agent";
 
 /**
  * Creates the anon/auth clients. Kept separate from `resolveIdentity` so a
  * function can fail fast on missing configuration with its own error shape.
  */
-const getSupabaseClients = (
-  authorizationHeader: string,
-): SupabaseClients => {
+const getSupabaseClients = (authorizationHeader: string): SupabaseClients => {
   const url = Deno.env.get("SUPABASE_URL") ?? "";
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? anonKey;
@@ -155,9 +187,7 @@ const getSupabaseClients = (
  * a 401. A missing profile row is NOT an error; it resolves to `sub_agent` and
  * sets `profileMissing` so the caller can log the drift.
  */
-const resolveIdentity = async (
-  clients: SupabaseClients,
-): Promise<Identity> => {
+const resolveIdentity = async (clients: SupabaseClients): Promise<Identity> => {
   const {
     data: { user },
     error,
@@ -220,8 +250,8 @@ const resolveIdentity = async (
 const ownsResource = (
   identity: Identity,
   ownerId: string | null | undefined,
-): boolean => identityIsAdmin(identity) || (ownerId != null && ownerId === identity.id);
-
+): boolean =>
+  identityIsAdmin(identity) || (ownerId != null && ownerId === identity.id);
 
 // Display-casing only. The comparisons below match on these exact strings, so
 // keep them in sync with `resolveIdentity`'s canonical role.
@@ -543,7 +573,7 @@ Deno.serve(async (req) => {
       if (lookupError) throw lookupError;
       if (!registration) return json({ error: "Registration not found" }, 404);
 
-      const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
+      const paystackSecret = resolvePaystackKeys(req).secret;
       if (!paystackSecret)
         return json({ error: "Paystack is not configured" }, 500);
 

@@ -1,5 +1,41 @@
 ﻿import { createClient } from "npm:@supabase/supabase-js@2";
 
+// ---- PAYSTACK KEY RESOLUTION - INLINED, DUPLICATED ON PURPOSE ----------
+// Supabase edge function secrets are PROJECT-WIDE, so `health` and
+// `health-test` would otherwise read the same PAYSTACK_SECRET_KEY. The only
+// per-function signal available at runtime is the request URL, which is
+// https://<ref>.supabase.co/functions/v1/<deployed-name>.
+//
+// This function is the single source of the Paystack PUBLIC key for both apps,
+// so getting the variant right here is what makes APP_ENV=development receive
+// the test key and APP_ENV=production receive the live key.
+//
+// Do not import this from a shared module: the dashboard's "Deploy with
+// upload file" bundles only the selected function folder.
+// ---------------------------------------------------------------------------
+function resolvePaystackKeys(req: Request) {
+  let deployedName = "";
+  try {
+    const path = new URL(req.url).pathname;
+    deployedName = path.split("/").filter(Boolean).pop() || "";
+  } catch {
+    deployedName = "";
+  }
+  const isTest = deployedName.endsWith("-test");
+  return {
+    isTest,
+    keySet: (isTest ? "test" : "production") as "test" | "production",
+    secret:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_SECRET_KEY" : "PAYSTACK_SECRET_KEY",
+      ) || null,
+    publicKey:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_PUBLIC_KEY" : "PAYSTACK_PUBLIC_KEY",
+      ) || null,
+  };
+}
+
 // ---- Shared helpers inlined (was ../_shared/env.ts) ----
 
 type AppEnv = "development" | "test" | "production" | "unknown";
@@ -61,15 +97,21 @@ Deno.serve(async (req) => {
   }
 
   const appEnv = getAppEnv();
-  const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
+  const paystack = resolvePaystackKeys(req);
+  const paystackSecret = paystack.secret;
   const paystackConfigured = Boolean(paystackSecret);
   const fcmConfigured = Boolean(Deno.env.get("FCM_SERVICE_ACCOUNT_JSON"));
-  const paystackPublicKey = Deno.env.get("PAYSTACK_PUBLIC_KEY") || null;
+  const paystackPublicKey = paystack.publicKey;
 
   const payload = {
     ok: dbOk && paystackConfigured,
     appEnv,
     function: "health",
+    // Which Paystack key set this deployment resolved from its own name.
+    // Without this you cannot tell a test deployment from a production one
+    // by reading the output: `live` is true for any sk_live_ key, and a test
+    // function would report the same appEnv (APP_ENV is project-wide).
+    keySet: paystack.keySet,
     version: Deno.env.get("FUNCTION_VERSION") || null,
     deployedAt: info.nowIso,
     responseTimeMs: Date.now() - startedAt,
@@ -81,6 +123,8 @@ Deno.serve(async (req) => {
       },
       paystack: {
         configured: paystackConfigured,
+        // True only for a LIVE key. A test deployment resolving
+        // TEST_PAYSTACK_SECRET_KEY correctly reports false here.
         live: paystackConfigured
           ? (paystackSecret || "").startsWith("sk_live_")
           : false,

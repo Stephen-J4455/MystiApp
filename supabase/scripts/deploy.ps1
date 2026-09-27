@@ -121,7 +121,7 @@ try {
                 (Test-Path (Join-Path $_.FullName "index.ts")) -or
                 (Test-Path (Join-Path $_.FullName "index.js"))
             } |
-            ForEach-Object { "$($_.Name)$suffix" } |
+            ForEach-Object { $_.Name } |
             Sort-Object
 
         if (-not $functions) {
@@ -130,10 +130,59 @@ try {
 
         Write-Host ""
         Write-Host "Deploying $($functions.Count) edge function(s):" -ForegroundColor Cyan
-        $functions | ForEach-Object { Write-Host "  - $_" -ForegroundColor DarkGray }
+        $functions | ForEach-Object { Write-Host "  - $_$suffix" -ForegroundColor DarkGray }
 
-        foreach ($fn in $functions) {
-            Invoke-Step "Deploying edge function: $fn" "supabase functions deploy $fn --project-ref $projectId"
+        # `supabase functions deploy <name>` uploads
+        # supabase/functions/<name>/index.ts - the deployed name IS the folder
+        # name. So `deploy health-test` looks for a `health-test` folder that
+        # does not exist and fails with:
+        #   Entrypoint path does not exist - .../supabase/functions/health-test/index.ts
+        # For production (empty suffix) the folder already matches and we
+        # deploy in place. For test we stage each function into a temp
+        # functions root under its suffixed name, deploy from there, then
+        # delete it. Staging is per-function and cleaned up in `finally` so a
+        # mid-run failure cannot leave a half-populated tree behind.
+        $stagingDir = $null
+        if ($suffix) {
+            # --workdir is the directory that CONTAINS the supabase/ folder, so
+            # the staged layout must be <root>/supabase/functions/<name>/.
+            $stagingDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mysti-fn-" + [Guid]::NewGuid().ToString("N"))
+            $stagingFunctions = Join-Path (Join-Path $stagingDir "supabase") "functions"
+            New-Item -ItemType Directory -Path $stagingFunctions -Force | Out-Null
+            Write-Host "Staging suffixed functions under $stagingDir" -ForegroundColor DarkGray
+        }
+
+        try {
+            foreach ($fn in $functions) {
+                $deployName = "$fn$suffix"
+
+                if ($suffix) {
+                    $source = Join-Path $functionsDir $fn
+                    $target = Join-Path $stagingFunctions $deployName
+                    Copy-Item -Path $source -Destination $target -Recurse -Force
+
+                    # import_map.json / deno.json live beside the function
+                    # folders and the CLI reads them from the same root.
+                    foreach ($shared in @("import_map.json", "deno.json")) {
+                        $sharedPath = Join-Path $functionsDir $shared
+                        if (Test-Path $sharedPath) {
+                            Copy-Item -Path $sharedPath -Destination (Join-Path $stagingFunctions $shared) -Force
+                        }
+                    }
+                }
+
+                if ($stagingDir) {
+                    Invoke-Step "Deploying edge function: $deployName" "supabase functions deploy $deployName --project-ref $projectId --workdir `"$stagingDir`" --use-api"
+                }
+                else {
+                    Invoke-Step "Deploying edge function: $deployName" "supabase functions deploy $deployName --project-ref $projectId --use-api"
+                }
+            }
+        }
+        finally {
+            if ($stagingDir -and (Test-Path $stagingDir)) {
+                Remove-Item -Path $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }

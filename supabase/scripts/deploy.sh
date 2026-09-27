@@ -91,9 +91,71 @@ if [[ "$ENV_UPPER" == "TEST" ]]; then
 fi
 
 if [[ "${SKIP_FUNCTIONS:-0}" != "1" ]]; then
-  for fn in health paystack-subaccount send-notification super-agent-offers super-agent-tier-management super-agent-user-management verify-payment reorder-held-agent-order cancel-admin-order verify-wallet-topup afa-registration get-packages make-orders get-orders check-balance get-order-status; do
-    run_step "Deploying edge function: ${fn}${SUFFIX}" \
-      supabase functions deploy "${fn}${SUFFIX}" --project-ref "$PROJECT_ID"
+  # Discovered from the filesystem, matching deploy.ps1. The previous
+  # hardcoded list had drifted: it named "get-order-status" (not a real
+  # folder - it is "check-order-status") and omitted admin-users,
+  # bulk-update-orders and dispatch-order, so those never deployed from
+  # bash.
+  FUNCTIONS_DIR="$REPO_ROOT/supabase/functions"
+  FUNCTIONS=()
+  while IFS= read -r dir; do
+    name="$(basename "$dir")"
+    # Skip helper directories such as _shared.
+    [[ "$name" == _* ]] && continue
+    if [[ -f "$dir/index.ts" || -f "$dir/index.js" ]]; then
+      FUNCTIONS+=("$name")
+    fi
+  done < <(find "$FUNCTIONS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+
+  if [[ ${#FUNCTIONS[@]} -eq 0 ]]; then
+    echo "No edge functions found in $FUNCTIONS_DIR" >&2
+    exit 1
+  fi
+
+  echo ""
+  echo "Deploying ${#FUNCTIONS[@]} edge function(s) with suffix '${SUFFIX}':"
+  for fn in "${FUNCTIONS[@]}"; do
+    echo "  - ${fn}${SUFFIX}"
+  done
+
+  # `supabase functions deploy <name>` uploads supabase/functions/<name>/, so
+  # the deployed name IS the folder name. `deploy health-test` looks for a
+  # health-test folder that does not exist and fails with:
+  #   Entrypoint path does not exist - .../supabase/functions/health-test/index.ts
+  # For production (empty suffix) the folder already matches. For test we
+  # stage each function into <root>/supabase/functions/<name>-test and deploy
+  # with --workdir, then clean up. --workdir is the directory that CONTAINS
+  # the supabase/ folder. --use-api bundles server-side because Docker is
+  # often not available.
+  STAGING_ROOT=""
+  if [[ -n "$SUFFIX" ]]; then
+    STAGING_ROOT="$(mktemp -d)"
+    mkdir -p "$STAGING_ROOT/supabase/functions"
+    echo "Staging suffixed functions under $STAGING_ROOT"
+  fi
+
+  cleanup() {
+    if [[ -n "$STAGING_ROOT" && -d "$STAGING_ROOT" ]]; then
+      rm -rf "$STAGING_ROOT"
+    fi
+  }
+  trap cleanup EXIT
+
+  for fn in "${FUNCTIONS[@]}"; do
+    deploy_name="${fn}${SUFFIX}"
+    if [[ -n "$STAGING_ROOT" ]]; then
+      cp -R "$FUNCTIONS_DIR/$fn" "$STAGING_ROOT/supabase/functions/$deploy_name"
+      for shared in import_map.json deno.json; do
+        [[ -f "$FUNCTIONS_DIR/$shared" ]] && \
+          cp "$FUNCTIONS_DIR/$shared" "$STAGING_ROOT/supabase/functions/$shared"
+      done
+      run_step "Deploying edge function: $deploy_name" \
+        supabase functions deploy "$deploy_name" --project-ref "$PROJECT_ID" \
+        --workdir "$STAGING_ROOT" --use-api
+    else
+      run_step "Deploying edge function: $deploy_name" \
+        supabase functions deploy "$deploy_name" --project-ref "$PROJECT_ID" --use-api
+    fi
   done
 fi
 

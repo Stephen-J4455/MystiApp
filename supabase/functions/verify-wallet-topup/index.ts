@@ -1,4 +1,39 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+
+// ---- PAYSTACK KEY RESOLUTION - INLINED, DUPLICATED ON PURPOSE ----------
+// Supabase edge function secrets are PROJECT-WIDE, so `verify-wallet-topup` and
+// `verify-wallet-topup-test` would otherwise read the same
+// PAYSTACK_SECRET_KEY. The only per-function signal available at runtime is
+// the request URL, which is
+// https://<ref>.supabase.co/functions/v1/<deployed-name>.
+//
+// Do not import this from a shared module: the dashboard's "Deploy with
+// upload file" bundles only the selected function folder and would fail to
+// resolve a relative import. See the IDENTITY HELPERS block below.
+// ---------------------------------------------------------------------------
+function resolvePaystackKeys(req: Request) {
+  let deployedName = "";
+  try {
+    const path = new URL(req.url).pathname;
+    deployedName = path.split("/").filter(Boolean).pop() || "";
+  } catch {
+    deployedName = "";
+  }
+  const isTest = deployedName.endsWith("-test");
+  return {
+    isTest,
+    keySet: (isTest ? "test" : "production") as "test" | "production",
+    secret:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_SECRET_KEY" : "PAYSTACK_SECRET_KEY",
+      ) || null,
+    publicKey:
+      Deno.env.get(
+        isTest ? "TEST_PAYSTACK_PUBLIC_KEY" : "PAYSTACK_PUBLIC_KEY",
+      ) || null,
+  };
+}
+
 // ===========================================================================
 // IDENTITY HELPERS - INLINED, DUPLICATED ON PURPOSE
 // ===========================================================================
@@ -326,10 +361,19 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Verify payment with Paystack
-    const paystackSecret = Deno.env.get("PAYSTACK_SECRET_KEY");
+    // Verify payment with Paystack. The key set is chosen from this
+    // function's own deployed name, so `verify-wallet-topup-test` uses
+    // TEST_PAYSTACK_SECRET_KEY and the unsuffixed function uses the live one.
+    const paystackKeys = resolvePaystackKeys(req);
+    const paystackSecret = paystackKeys.secret;
     if (!paystackSecret) {
-      console.error("PAYSTACK_SECRET_KEY not configured");
+      console.error(
+        `Paystack secret not configured (keySet=${paystackKeys.keySet}). Set ${
+          paystackKeys.isTest
+            ? "TEST_PAYSTACK_SECRET_KEY"
+            : "PAYSTACK_SECRET_KEY"
+        } in edge function secrets.`,
+      );
       return new Response(
         JSON.stringify({ error: "Payment service not configured" }),
         {

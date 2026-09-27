@@ -57,7 +57,12 @@ if (-not $Url) {
     if (-not $urlFromEnv) {
         throw "Could not resolve Supabase URL for $Env. Set one of: $($urlVarCandidates -join ', ')"
     }
-    $Url = "$urlFromEnv/functions/v1/health"
+    # The test environment deploys every function with a `-test` suffix, so the
+    # health check MUST target `health-test`. Calling the unsuffixed `health`
+    # here silently verified PRODUCTION instead - the script printed
+    # "Health OK" while reporting pk_live_ and checks.paystack.live=true.
+    $functionName = if ($Env -eq "test") { "health-test" } else { "health" }
+    $Url = "$urlFromEnv/functions/v1/$functionName"
 }
 
 Write-Host "Calling health endpoint: $Url" -ForegroundColor Cyan

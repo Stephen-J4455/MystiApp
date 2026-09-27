@@ -7,6 +7,18 @@ android/app/build/
 android/build/
 ios/build/
 node_modules/
+
+# Environment files.
+#
+# `.env.*` matches .env.production.template and .env.test.template as well as
+# the real .env.production / .env.test. There is deliberately NO
+# `!.env.*.template` negation here: these templates currently contain a live
+# service_role key (bypasses RLS) and a live sk_live_ Paystack secret key
+# (can move real money), and a template is by definition committed.
+#
+# To share the structure, commit a SANITIZED copy under a name that is not
+# matched by this block, e.g. supabase/env.production.example, with every
+# value blank. Keep secrets only in the ignored .env.production / .env.test.
 .env
 .env.*
 *.log
