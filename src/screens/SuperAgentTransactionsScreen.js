@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   ScrollView,
@@ -12,91 +12,149 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
+import {
+  isHeldWindowElapsed,
+  isReorderableHeldOrder,
+  reorderHeldOrder,
+} from "../lib/heldOrderReorder";
 import colors from "../components/theme";
 import { ThemedScreen } from "../components/ui";
 
 export default function SuperAgentTransactionsScreen({ navigation }) {
-  const { showError } = useNotification();
+  const { showError, showSuccess } = useNotification();
   const [loading, setLoading] = useState(true);
   const [transactions, setTransactions] = useState([]);
+  // Id of the held order being retried, or null. One id rather than a boolean so
+  // a second row cannot be tapped mid-flight.
+  const [reorderingId, setReorderingId] = useState(null);
+
+  const loadTransactions = useCallback(async () => {
+    try {
+      const {
+        data: { user },
+        error: e,
+      } = await supabase.auth.getUser();
+      if (e || !user) {
+        navigation.replace("Login");
+        return;
+      }
+      if (!isSuperAgent(user)) {
+        navigation.replace("Home");
+        return;
+      }
+      const { data: s } = await supabase
+        .from("super_agent_paystack")
+        .select("subaccount_code")
+        .eq("super_agent_id", user.id)
+        .maybeSingle();
+      {
+        const c = s?.subaccount_code;
+        const { data: tu, error: e1 } = await supabase
+          .from("wallet_topups")
+          .select("*")
+          .eq("agent_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+        const { data: od, error: e2 } = await supabase
+          .from("payment_transactions")
+          .select("*")
+          .eq("super_agent_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        // Held orders live on `agent_orders`, not on either of the two
+        // settlement tables above - which is precisely why this screen could
+        // never show one. A super agent whose wallet had run dry saw their
+        // sub-agents' orders vanish from every surface at once, with nothing to
+        // retry them from. Fetched separately rather than through a union so a
+        // failure here cannot take the ledger rows down with it.
+        const heldResult = await supabase
+          .from("agent_orders")
+          .select("*")
+          .eq("super_agent_id", user.id)
+          .eq("status", "held")
+          .order("created_at", { ascending: false })
+          .limit(100);
+        if (heldResult.error) {
+          console.error("Failed to load held orders:", heldResult.error);
+        }
+
+        if (e1 || e2) throw e1 || e2;
+        const a = [];
+        (tu || []).forEach((t) =>
+          a.push({
+            ...t,
+            source: "wallet_topup",
+            amountDisplay: "Ghc " + Number(t.amount || 0).toFixed(2),
+            statusColor:
+              t.status === "success"
+                ? colors.success
+                : t.status === "pending"
+                  ? colors.warning
+                  : colors.danger,
+          }),
+        );
+        (od || []).forEach((o) =>
+          a.push({
+            ...o,
+            source: "data_purchase",
+            amountDisplay: "Ghc " + Number(o.gross_amount || 0).toFixed(2),
+            statusColor:
+              o.status === "completed"
+                ? colors.success
+                : o.status === "pending"
+                  ? colors.warning
+                  : colors.danger,
+          }),
+        );
+        // Marked so the shared `isReorderableHeldOrder` test accepts the row:
+        // it rejects `orderType: "regular"`, and absence means agent_orders.
+        (heldResult.data || []).forEach((h) =>
+          a.push({
+            ...h,
+            orderType: "agent",
+            source: "held_order",
+            amountDisplay:
+              "Ghc " + Number(h.base_amount || h.amount || 0).toFixed(2),
+            statusColor: colors.warning,
+          }),
+        );
+        a.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+        setTransactions(a);
+      }
+    } catch (err) {
+      console.error(err);
+      showError("Error", "Failed to load transactions.");
+    } finally {
+      setLoading(false);
+    }
+  }, [navigation, showError]);
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const {
-          data: { user },
-          error: e,
-        } = await supabase.auth.getUser();
-        if (e || !user) {
-          navigation.replace("Login");
-          return;
-        }
-        if (!isSuperAgent(user)) {
-          navigation.replace("Home");
-          return;
-        }
-        const { data: s } = await supabase
-          .from("super_agent_paystack")
-          .select("subaccount_code")
-          .eq("super_agent_id", user.id)
-          .maybeSingle();
-        {
-          const c = s?.subaccount_code;
-          const { data: tu, error: e1 } = await supabase
-            .from("wallet_topups")
-            .select("*")
-            .eq("agent_id", user.id)
-            .order("created_at", { ascending: false })
-            .limit(100);
-          const { data: od, error: e2 } = await supabase
-            .from("payment_transactions")
-            .select("*")
-            .eq("super_agent_id", user.id)
-            .order("created_at", { ascending: false })
-            .limit(100);
-          if (e1 || e2) throw e1 || e2;
-          const a = [];
-          (tu || []).forEach((t) =>
-            a.push({
-              ...t,
-              source: "wallet_topup",
-              amountDisplay: "Ghc " + Number(t.amount || 0).toFixed(2),
-              statusColor:
-                t.status === "success"
-                  ? colors.success
-                  : t.status === "pending"
-                    ? colors.warning
-                    : colors.danger,
-            }),
-          );
-          (od || []).forEach((o) =>
-            a.push({
-              ...o,
-              source: "data_purchase",
-              amountDisplay: "Ghc " + Number(o.gross_amount || 0).toFixed(2),
-              statusColor:
-                o.status === "completed"
-                  ? colors.success
-                  : o.status === "pending"
-                    ? colors.warning
-                    : colors.danger,
-            }),
-          );
-          a.sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
-          setTransactions(a);
-        }
-      } catch (err) {
-        console.error(err);
-        showError("Error", "Failed to load transactions.");
-      } finally {
-        if (mounted) setLoading(false);
+    loadTransactions();
+  }, [loadTransactions]);
+
+  // Retries a held order. The window check, the invoke and the error unwrapping
+  // live in lib/heldOrderReorder.js so this screen, Home, the Receipt and
+  // History cannot drift. Re-reads the list on success so the row's status
+  // updates.
+  const handleReorder = async (row) => {
+    setReorderingId(row.id);
+    try {
+      const result = await reorderHeldOrder(row);
+      if (!result.ok) {
+        showError("Reorder Failed", result.message);
+        return;
       }
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, [navigation, showError]);
+      showSuccess(
+        "Order Reordered",
+        "The held order was sent to the provider.",
+      );
+      loadTransactions();
+    } finally {
+      setReorderingId(null);
+    }
+  };
 
   const fmt = (d) => {
     try {
@@ -151,107 +209,198 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.content}>
-            {transactions.map((tx, i) => (
-              <View key={i} style={styles.txCard}>
-                <View style={styles.txHeader}>
-                  <View style={styles.txIconWrap}>
-                    <Ionicons
-                      name={
-                        tx.source === "wallet_topup"
-                          ? "wallet"
-                          : "phone-portrait"
-                      }
-                      size={22}
-                      color={colors.primary}
-                    />
-                  </View>
-                  <View style={styles.txMeta}>
-                    <Text style={styles.txType}>
-                      {tx.source === "wallet_topup"
-                        ? "Wallet Top-up"
-                        : "Data Purchase"}
-                    </Text>
-                    <Text style={styles.txDate}>{fmt(tx.created_at)}</Text>
-                  </View>
-                  <View
-                    style={[
-                      styles.txStatus,
-                      { backgroundColor: tx.statusColor },
-                    ]}
-                  >
-                    <Text style={styles.txStatusText}>
-                      {String(
-                        tx.jehuca_order_status || tx.status || "unknown",
-                      ).toUpperCase()}
-                    </Text>
-                  </View>
-                </View>
-                <View style={styles.txBody}>
-                  <View style={styles.txInfoRow}>
-                    <Text style={styles.txInfoLabel}>Reference</Text>
-                    <Text style={styles.txInfoValue} numberOfLines={1}>
-                      {tx.reference || tx.id?.toString().slice(0, 12)}
-                    </Text>
-                  </View>
-                  <View style={styles.txInfoRow}>
-                    <Text style={styles.txInfoLabel}>Amount</Text>
-                    <Text style={styles.txInfoValueBold}>
-                      {tx.amountDisplay}
-                    </Text>
-                  </View>
-                  {tx.paystack_transaction_id && (
-                    <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Paystack TX ID</Text>
-                      <Text style={styles.txInfoValue} numberOfLines={1}>
-                        {tx.paystack_transaction_id}
+            {transactions.map((tx, i) => {
+              // Held orders are the only rows here that can be retried, and the
+              // retry is only valid inside the 24h window.
+              const showReorder = isReorderableHeldOrder(tx);
+              const reorderElapsed = showReorder
+                ? isHeldWindowElapsed(tx, Date.now())
+                : false;
+              const reorderBusy = reorderingId === tx.id;
+              const typeLabel =
+                tx.source === "wallet_topup"
+                  ? "Wallet Top-up"
+                  : tx.source === "held_order"
+                    ? "Held Order"
+                    : "Data Purchase";
+              const icon =
+                tx.source === "wallet_topup"
+                  ? "wallet"
+                  : tx.source === "held_order"
+                    ? "alert-circle"
+                    : "phone-portrait";
+
+              return (
+                <View key={i} style={styles.txCard}>
+                  <View style={styles.txHeader}>
+                    <View style={styles.txIconWrap}>
+                      <Ionicons name={icon} size={22} color={colors.primary} />
+                    </View>
+                    <View style={styles.txMeta}>
+                      <Text style={styles.txType}>{typeLabel}</Text>
+                      <Text style={styles.txDate}>{fmt(tx.created_at)}</Text>
+                    </View>
+                    <View
+                      style={[
+                        styles.txStatus,
+                        { backgroundColor: tx.statusColor },
+                      ]}
+                    >
+                      <Text style={styles.txStatusText}>
+                        {String(
+                          tx.jehuca_order_status || tx.status || "unknown",
+                        ).toUpperCase()}
                       </Text>
                     </View>
-                  )}
-                  {tx.channel && (
+                  </View>
+                  <View style={styles.txBody}>
                     <View style={styles.txInfoRow}>
-                      <Text style={styles.txInfoLabel}>Channel</Text>
-                      <Text style={styles.txInfoValue}>{tx.channel}</Text>
+                      <Text style={styles.txInfoLabel}>Reference</Text>
+                      <Text style={styles.txInfoValue} numberOfLines={1}>
+                        {tx.reference || tx.id?.toString().slice(0, 12)}
+                      </Text>
                     </View>
-                  )}
-                  {tx.source === "data_purchase" && (
-                    <>
+                    <View style={styles.txInfoRow}>
+                      <Text style={styles.txInfoLabel}>Amount</Text>
+                      <Text style={styles.txInfoValueBold}>
+                        {tx.amountDisplay}
+                      </Text>
+                    </View>
+                    {tx.paystack_transaction_id && (
                       <View style={styles.txInfoRow}>
-                        <Text style={styles.txInfoLabel}>Sub-agent</Text>
-                        <Text style={styles.txInfoValue}>
-                          {tx.agent_id || "N/A"}
+                        <Text style={styles.txInfoLabel}>Paystack TX ID</Text>
+                        <Text style={styles.txInfoValue} numberOfLines={1}>
+                          {tx.paystack_transaction_id}
                         </Text>
                       </View>
+                    )}
+                    {tx.channel && (
                       <View style={styles.txInfoRow}>
-                        <Text style={styles.txInfoLabel}>Base share</Text>
-                        <Text style={styles.txInfoValue}>
-                          Ghc {Number(tx.base_amount || 0).toFixed(2)}
-                        </Text>
+                        <Text style={styles.txInfoLabel}>Channel</Text>
+                        <Text style={styles.txInfoValue}>{tx.channel}</Text>
                       </View>
-                      <View style={styles.txInfoRow}>
-                        <Text style={styles.txInfoLabel}>Transaction fee</Text>
-                        <Text style={styles.txInfoValue}>
-                          Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
-                        </Text>
-                      </View>
-                      <View style={styles.txInfoRow}>
-                        <Text style={styles.txInfoLabel}>Your share</Text>
-                        <Text style={styles.txInfoValue}>
-                          Ghc {Number(tx.super_agent_amount || 0).toFixed(2)}
-                        </Text>
-                      </View>
-                      {tx.jehuca_order_id && (
+                    )}
+                    {tx.source === "data_purchase" && (
+                      <>
                         <View style={styles.txInfoRow}>
-                          <Text style={styles.txInfoLabel}>Jehuca order</Text>
+                          <Text style={styles.txInfoLabel}>Sub-agent</Text>
                           <Text style={styles.txInfoValue}>
-                            {tx.jehuca_order_id}
+                            {tx.agent_id || "N/A"}
                           </Text>
                         </View>
-                      )}
-                    </>
-                  )}
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Base share</Text>
+                          <Text style={styles.txInfoValue}>
+                            Ghc {Number(tx.base_amount || 0).toFixed(2)}
+                          </Text>
+                        </View>
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>
+                            Transaction fee
+                          </Text>
+                          <Text style={styles.txInfoValue}>
+                            Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
+                          </Text>
+                        </View>
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Your share</Text>
+                          <Text style={styles.txInfoValue}>
+                            Ghc {Number(tx.super_agent_amount || 0).toFixed(2)}
+                          </Text>
+                        </View>
+                        {tx.jehuca_order_id && (
+                          <View style={styles.txInfoRow}>
+                            <Text style={styles.txInfoLabel}>Jehuca order</Text>
+                            <Text style={styles.txInfoValue}>
+                              {tx.jehuca_order_id}
+                            </Text>
+                          </View>
+                        )}
+                      </>
+                    )}
+                    {tx.source === "held_order" && (
+                      <>
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Recipient</Text>
+                          <Text style={styles.txInfoValue}>
+                            {tx.recipient_phone || "N/A"}
+                          </Text>
+                        </View>
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Network</Text>
+                          <Text style={styles.txInfoValue}>
+                            {String(tx.network || "N/A").toUpperCase()}
+                          </Text>
+                        </View>
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Package</Text>
+                          <Text style={styles.txInfoValue} numberOfLines={1}>
+                            {tx.offer_title || "N/A"}
+                          </Text>
+                        </View>
+                        {tx.payment_reference && (
+                          <View style={styles.txInfoRow}>
+                            <Text style={styles.txInfoLabel}>Reference</Text>
+                            <Text style={styles.txInfoValue} numberOfLines={1}>
+                              {tx.payment_reference}
+                            </Text>
+                          </View>
+                        )}
+                      </>
+                    )}
+
+                    {/* Retry. A held order means the customer PAID and our
+                      internal wallet debit failed, so this is the only thing
+                      that moves the order forward - and it is only valid
+                      inside the 24h window. */}
+                    {showReorder ? (
+                      <TouchableOpacity
+                        style={[
+                          styles.reorderButton,
+                          reorderElapsed && styles.reorderButtonClosed,
+                        ]}
+                        onPress={() => handleReorder(tx)}
+                        disabled={reorderBusy || reorderElapsed}
+                        activeOpacity={0.85}
+                        accessibilityRole="button"
+                        accessibilityLabel={
+                          reorderElapsed
+                            ? "Reorder window closed"
+                            : "Reorder this held order"
+                        }
+                      >
+                        {reorderBusy ? (
+                          <ActivityIndicator
+                            size="small"
+                            color={colors.white}
+                          />
+                        ) : (
+                          <Ionicons
+                            name="refresh"
+                            size={17}
+                            color={
+                              reorderElapsed ? colors.border : colors.white
+                            }
+                          />
+                        )}
+                        <Text
+                          style={[
+                            styles.reorderText,
+                            reorderElapsed && styles.reorderTextClosed,
+                          ]}
+                        >
+                          {reorderElapsed
+                            ? "Reorder window closed"
+                            : reorderBusy
+                              ? "Reordering…"
+                              : "Reorder this order"}
+                        </Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
           </ScrollView>
         )}
       </SafeAreaView>
@@ -366,4 +515,19 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: "right",
   },
+
+  // ---------- Reorder (held orders) ----------
+  reorderButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 12,
+    borderRadius: 999,
+    backgroundColor: colors.primary,
+  },
+  reorderButtonClosed: { backgroundColor: colors.light },
+  reorderText: { fontSize: 14, fontWeight: "700", color: colors.white },
+  reorderTextClosed: { color: colors.border },
 });

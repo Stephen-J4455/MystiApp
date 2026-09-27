@@ -23,7 +23,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { useTheme } from "../contexts/ThemeContext";
-import { EmptyState } from "../components/ui";
+import { ConfirmDialog, EmptyState } from "../components/ui";
 import { fonts, networks } from "../components/theme";
 import { WebView } from "react-native-webview";
 import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
@@ -75,6 +75,12 @@ export default function DataScreen({ navigation, route }) {
   const [paystackModalVisible, setPaystackModalVisible] = useState(false);
   const [directPaystackRequested, setDirectPaystackRequested] = useState(false);
   const [recipientModalVisible, setRecipientModalVisible] = useState(false);
+  // Super agents buy straight from their own wallet: no Paystack, no
+  // recoverable step. The tap on a bundle therefore debits real balance
+  // immediately, so the order is held in `walletConfirm` and only released
+  // once the agent explicitly confirms the cost breakdown.
+  const [walletConfirm, setWalletConfirm] = useState(null);
+  const [walletPurchasing, setWalletPurchasing] = useState(false);
   const [userEmail, setUserEmail] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
   const [userPhone, setUserPhone] = useState("");
@@ -146,17 +152,8 @@ export default function DataScreen({ navigation, route }) {
 
   const dispatchProviderOrder = useCallback(async (orderId, orderType) => {
     const functionName = getEdgeFunctionName("dispatch-order");
-    console.log("[Purchase] Calling edge function:", functionName);
     const { data, error } = await supabase.functions.invoke(functionName, {
       body: { order_id: orderId, order_type: orderType },
-    });
-
-    console.log("[Jehuca debug] dispatch-order:", {
-      function: functionName,
-      order_id: orderId,
-      order_type: orderType,
-      response: data || null,
-      error: error?.message || null,
     });
 
     // A 2xx that reports `deferred: true` is a QUEUED order: the provider
@@ -192,7 +189,6 @@ export default function DataScreen({ navigation, route }) {
   // Paystack payment handlers
   const handlePaymentSuccess = useCallback(
     async (response) => {
-      console.log("Payment successful:", response);
       setPaystackModalVisible(false);
 
       try {
@@ -205,7 +201,6 @@ export default function DataScreen({ navigation, route }) {
         }
 
         const functionName = getEdgeFunctionName("verify-payment");
-        console.log("[Purchase] Calling edge function:", functionName);
         const { data, error } = await supabase.functions.invoke(functionName, {
           body: {
             reference: response.reference,
@@ -244,9 +239,43 @@ export default function DataScreen({ navigation, route }) {
             status: error.status,
             details: error.context || error.error || null,
           });
+
+          // The wallet path returns 402 when the super agent cannot afford the
+          // purchase. That is a specific, actionable condition - "top up your
+          // wallet" - and lumping it in with "contact support if payment was
+          // deducted" told the user to chase support for something only they
+          // can fix. Read the real reason off `err.context` (a Response), which
+          // is where supabase-js puts a non-2xx body; `err.error` / `err.data`
+          // are empty here, so reading those loses the message.
+          let serverPayload = null;
+          const context = error.context;
+          if (context && typeof context.clone === "function") {
+            try {
+              serverPayload = await context.clone().json();
+            } catch {
+              serverPayload = null;
+            }
+          }
+
+          if (serverPayload?.insufficient_balance) {
+            const shortfall = Number(serverPayload.shortfall || 0);
+            // `formatCedi` is this screen's money formatter (see its definition
+            // below); there is no `formatGhc` in this file.
+            showError(
+              "Insufficient Wallet Balance",
+              `This purchase costs ${formatCedi(
+                serverPayload.required || 0,
+              )} but your wallet holds ${formatCedi(
+                serverPayload.balance || 0,
+              )}. Top up your wallet by ${formatCedi(shortfall)} to continue.`,
+            );
+            return;
+          }
+
           showError(
             "Payment Verification Failed",
-            "Please contact support if payment was deducted",
+            serverPayload?.error ||
+              "Please contact support if payment was deducted",
           );
           return;
         }
@@ -386,7 +415,6 @@ export default function DataScreen({ navigation, route }) {
   );
 
   const handlePaymentClose = useCallback(() => {
-    console.log("Payment cancelled");
     setPaystackModalVisible(false);
     showError("Payment Cancelled", "Payment was cancelled by user");
   }, [showError]);
@@ -399,10 +427,6 @@ export default function DataScreen({ navigation, route }) {
 
     const loadPaystackPublicKey = async () => {
       try {
-        console.log(
-          "[Purchase] Calling edge function:",
-          getEdgeFunctionName("health"),
-        );
         const key = await getPaystackPublicKey();
         if (!active) return;
         if (key) {
@@ -1136,16 +1160,28 @@ export default function DataScreen({ navigation, route }) {
 
   const handleSuperAgentWalletPurchase = async (bundle, phone) => {
     const baseAmount = Number(bundle.base_price || 0);
-    const transactionFee = getTransactionChargeAmount(
-      baseAmount,
-      paymentChargeSettings.superAgentPercent,
-    );
-    const grossAmount = Number((baseAmount + transactionFee).toFixed(2));
+    // WHY THERE IS NO TRANSACTION FEE HERE
+    // -----------------------------------
+    // The 1.95% Paystack charge is applied at TOP-UP time, not per order, and
+    // the wallet is credited the NET figure: top up Ghc 100 and the user pays
+    // 101.95 to Paystack but the wallet receives 100 (see
+    // `verify-wallet-topup`, which credits `wallet_topups.amount` - the net).
+    //
+    // Charging it again per order was a genuine double-charge. A super agent
+    // who topped up 100 and bought two Ghc 50 packages was debited
+    // 50.98 + 50.98 = 101.96 for 100 of data, on top of the 1.95 they had
+    // already paid at the till. Over a lot of orders that silently ate the
+    // entire margin the tier pricing was built to give them.
+    //
+    // The wallet therefore debits the PACKAGE PRICE and nothing else.
+    // `transaction_fee` is sent as 0, not omitted: the server treats a missing
+    // fee as "not configured" and falls back to its own split calculation.
+    const transactionFee = 0;
+    const grossAmount = Number(baseAmount.toFixed(2));
     const reference = `wallet_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const functionName = getEdgeFunctionName("verify-payment");
 
     try {
-      console.log("[Purchase] Calling wallet edge function:", functionName);
       const { data, error } = await supabase.functions.invoke(functionName, {
         body: {
           wallet_order: true,
@@ -1250,6 +1286,83 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
+  // Mirrors the amounts `handleSuperAgentWalletPurchase` sends to the edge
+  // function, so the confirmation shows exactly what will be debited.
+  //
+  // No transaction fee: the 1.95% is charged at top-up time and the wallet is
+  // credited net, so re-charging it here would take it twice from the same
+  // money. See `handleSuperAgentWalletPurchase`.
+  const getWalletPurchaseBreakdown = useCallback(
+    (bundle) => {
+      const baseAmount = Number(bundle?.base_price || 0);
+      const transactionFee = 0;
+      return {
+        baseAmount,
+        transactionFee,
+        grossAmount: Number((baseAmount + transactionFee).toFixed(2)),
+      };
+    },
+    [paymentChargeSettings],
+  );
+
+  const formatCedi = (amount) => `GHS ${Number(amount || 0).toFixed(2)}`;
+
+  const openWalletConfirmation = (bundle, phone) => {
+    const breakdown = getWalletPurchaseBreakdown(bundle);
+    if (breakdown.grossAmount <= 0) {
+      showError("Purchase Unavailable", "This package has no valid price.");
+      return;
+    }
+
+    setWalletConfirm({
+      bundle,
+      phone,
+      breakdown,
+      // Read live rather than trusting a cached value: the dialog quotes the
+      // post-debit balance, and the server is the authority on whether the
+      // order clears. `null` means "not loaded yet".
+      agentBalance: null,
+    });
+
+    // The balance is a nice-to-have in the dialog, not a gate - the edge
+    // function re-checks it authoritatively, so a failure here must not block
+    // the agent from confirming.
+    (async () => {
+      try {
+        const { data: auth } = await supabase.auth.getUser();
+        const userId = auth?.user?.id;
+        if (!userId) return;
+        const { data, error } = await supabase
+          .from("super_agent_wallets")
+          .select("balance")
+          .eq("super_agent_id", userId)
+          .maybeSingle();
+        if (error) return;
+        setAgentBalance(Number(data?.balance || 0));
+        setWalletConfirm((prev) =>
+          prev ? { ...prev, agentBalance: Number(data?.balance || 0) } : prev,
+        );
+      } catch (balanceError) {
+        console.warn(
+          "Could not read wallet balance for confirmation:",
+          balanceError,
+        );
+      }
+    })();
+  };
+
+  const confirmWalletPurchase = async () => {
+    if (!walletConfirm) return;
+    setWalletPurchasing(true);
+    const { bundle, phone } = walletConfirm;
+    try {
+      await handleSuperAgentWalletPurchase(bundle, phone);
+    } finally {
+      setWalletPurchasing(false);
+      setWalletConfirm(null);
+    }
+  };
+
   const continueAgentPurchase = async () => {
     if (!recipientPhone.trim()) {
       showError(
@@ -1271,7 +1384,9 @@ export default function DataScreen({ navigation, route }) {
 
     setRecipientModalVisible(false);
     if (isSuperAgentUser) {
-      await handleSuperAgentWalletPurchase(selectedBundle, cleanPhone);
+      // Money leaves the wallet the moment the edge function runs, so confirm
+      // the amount, recipient and resulting balance with the agent first.
+      openWalletConfirmation(selectedBundle, cleanPhone);
       return;
     }
 
@@ -2041,7 +2156,9 @@ export default function DataScreen({ navigation, route }) {
                     onPress={continueAgentPurchase}
                   >
                     <Text style={s.recipientContinueText}>
-                      Continue to Payment
+                      {isSuperAgentUser
+                        ? "Review Order"
+                        : "Continue to Payment"}
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -2050,6 +2167,56 @@ export default function DataScreen({ navigation, route }) {
           </View>
         </Modal>
       )}
+
+      {walletConfirm ? (
+        <ConfirmDialog
+          visible={Boolean(walletConfirm)}
+          icon="wallet"
+          title="Confirm Wallet Purchase"
+          message={`Buy ${walletConfirm.bundle?.name} from your Super Agent wallet for ${walletConfirm.phone}? This is debited from your wallet balance immediately and cannot be undone.`}
+          warning={
+            walletConfirm.agentBalance != null &&
+            walletConfirm.breakdown.grossAmount > walletConfirm.agentBalance
+              ? `Your wallet balance of ${formatCedi(walletConfirm.agentBalance)} is less than this order. The order will be rejected until the wallet is funded.`
+              : undefined
+          }
+          rows={[
+            { label: "Package", value: walletConfirm.bundle?.name || "-" },
+            { label: "Recipient", value: walletConfirm.phone },
+            {
+              label: "Package price",
+              value: formatCedi(walletConfirm.breakdown.baseAmount),
+            },
+            // The 1.95% Paystack charge is paid at top-up, not here, so no fee
+            // row: showing a 0.00 "Transaction fee" would imply a charge that
+            // does not exist and hide where the money actually went.
+            {
+              label: "Total from wallet",
+              value: formatCedi(walletConfirm.breakdown.grossAmount),
+              emphasis: true,
+            },
+            ...(walletConfirm.agentBalance != null
+              ? [
+                  {
+                    label: "Balance after",
+                    value: formatCedi(
+                      walletConfirm.agentBalance -
+                        walletConfirm.breakdown.grossAmount,
+                    ),
+                  },
+                ]
+              : []),
+          ]}
+          confirmText="Pay Now"
+          cancelText="Cancel"
+          confirming={walletPurchasing}
+          onCancel={() => {
+            if (walletPurchasing) return;
+            setWalletConfirm(null);
+          }}
+          onConfirm={confirmWalletPurchase}
+        />
+      ) : null}
 
       {selectedBundle && paystackModalVisible && (
         <Modal visible={paystackModalVisible} animationType="slide">
@@ -2257,7 +2424,6 @@ export default function DataScreen({ navigation, route }) {
                     if (paystackLoading || isLoading) return;
 
                     setPaystackLoading(true);
-                    console.log("Initializing Paystack payment...");
 
                     try {
                       if (
@@ -2363,10 +2529,6 @@ export default function DataScreen({ navigation, route }) {
 
                     // Call Supabase edge function to verify payment and create order
                     const functionName = getEdgeFunctionName("verify-payment");
-                    console.log(
-                      "[Purchase] Calling edge function:",
-                      functionName,
-                    );
                     const { data, error } = await supabase.functions.invoke(
                       functionName,
                       {

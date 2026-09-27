@@ -51,6 +51,15 @@ export const getEdgeFunctionName = (name) => {
   return [`${functionName}-test`, ...pathSegments].join("/");
 };
 
-if (__DEV__) {
-  console.log(`[env] APP_ENV=${APP_ENV} (test=${IS_TEST_ENV})`);
-}
+// Always log which environment this build resolved to.
+//
+// Previously this was gated behind `if (__DEV__)`, so a release/dev-client
+// bundle running with the wrong mode showed NOTHING - and the only symptom
+// was an opaque edge function error. The value is inlined at BUILD time, so
+// seeing it once at startup is the only way to know what a shipped bundle is
+// actually wired to. It contains no secrets.
+console.log(
+  `[env] APP_ENV=${APP_ENV} (test=${IS_TEST_ENV}) → edge functions resolve to ${
+    IS_TEST_ENV ? "*-test" : "production (unsuffixed)"
+  }`,
+);

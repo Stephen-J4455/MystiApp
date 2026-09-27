@@ -464,6 +464,29 @@ Deno.serve(async (req) => {
       const currentMetadata = { ...(target.user.user_metadata || {}) };
       const nextMetadata: Record<string, unknown> = { ...currentMetadata };
 
+      // The badge is mirrored into BOTH stores, and they are NOT equivalent:
+      //
+      //   app_metadata  - service-role only, NOT writable by the user. This is
+      //                   what the five enterprise gates read
+      //                   (paystack-subaccount, super-agent-offers,
+      //                   super-agent-tier-management,
+      //                   super-agent-user-management, admin-users).
+      //   user_metadata - writable by the user via auth.updateUser(). Kept in
+      //                   sync ONLY so the app's existing display readers keep
+      //                   working; never trusted for authorization.
+      //
+      // Previously the badge was written ONLY to user_metadata while the gates
+      // read app_metadata. Nothing ever populated the latter, so `badge` was
+      // always "" and every Enterprise super agent was denied with 403 - the
+      // app showed the badge as granted because it reads user_metadata first,
+      // so the UI and the function disagreed.
+      const currentAppMetadata: Record<string, unknown> = {
+        ...(target.user.app_metadata || {}),
+      };
+      const nextAppMetadata: Record<string, unknown> = {
+        ...currentAppMetadata,
+      };
+
       if (requestedRole === "normal_user") {
         // Clearing every role alias leaves a normal user, which the app reads
         // as "no role". Stale badge / assignment keys would keep granting
@@ -472,23 +495,27 @@ Deno.serve(async (req) => {
         delete nextMetadata.super_agent_badge;
         delete nextMetadata.super_agent_id;
         delete nextMetadata.superAgentId;
+        delete nextAppMetadata.super_agent_badge;
       } else if (requestedRole === "sub_agent") {
         nextMetadata.role = "sub_agent";
         nextMetadata.super_agent_id = resolvedSuperAgentId;
         delete nextMetadata.superAgentId;
         // An Agent is not a Super Agent, so drop any badge.
         delete nextMetadata.super_agent_badge;
+        delete nextAppMetadata.super_agent_badge;
       } else {
         nextMetadata.role = "super_agent";
         nextMetadata.super_agent_badge = badge;
         // A Super Agent answers to the platform, not to another one.
         delete nextMetadata.super_agent_id;
         delete nextMetadata.superAgentId;
+        nextAppMetadata.super_agent_badge = badge;
       }
 
       const { data: updated, error: updateError } =
         await admin.auth.admin.updateUserById(targetUserId, {
           user_metadata: nextMetadata,
+          app_metadata: nextAppMetadata,
         });
       if (updateError) throw updateError;
 
@@ -698,11 +725,19 @@ Deno.serve(async (req) => {
         return json({ error: "Selected account is not a Super Agent" }, 400);
       }
 
+      // Mirrored into both stores - see the long note in `setUserRole`. The
+      // gates read `app_metadata` (service-role only), so writing only
+      // `user_metadata` left `app_metadata.super_agent_badge` empty and every
+      // Enterprise super agent was denied by the gates with a 403.
       const { data, error } = await admin.auth.admin.updateUserById(
         superAgentId,
         {
           user_metadata: {
             ...(target.user.user_metadata || {}),
+            super_agent_badge: badge,
+          },
+          app_metadata: {
+            ...(target.user.app_metadata || {}),
             super_agent_badge: badge,
           },
         },

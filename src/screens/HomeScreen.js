@@ -19,6 +19,13 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
+import { splitReceiptNumber } from "../lib/receiptNumber";
+import {
+  canReorderHeldOrders,
+  isHeldWindowElapsed,
+  isReorderableHeldOrder,
+  reorderHeldOrder,
+} from "../lib/heldOrderReorder";
 import { fonts, networks } from "../components/theme";
 
 const SUPPORT_WHATSAPP = "233532973455";
@@ -56,6 +63,13 @@ const statusTone = (status, tones) => {
       return tones.cancelled;
     case "refunded":
       return tones.refunded;
+    // Lifecycle states the app owns itself. Both are in the shared map now, so
+    // this is a lookup rather than a special case - but the case is spelled out
+    // because the previous default-to-null behaviour silently dropped the pill.
+    case "held":
+      return tones.held;
+    case "expired":
+      return tones.expired;
     default:
       return null;
   }
@@ -163,7 +177,11 @@ export default function HomeScreen({ navigation }) {
   const adsScrollViewRef = useRef(null);
   const autoScrollIntervalRef = useRef(null);
   const adRefs = useRef({}); // Refs for each ad component
-  const { showSuccess } = useNotification();
+  const { showSuccess, showError } = useNotification();
+  // Id of the held order currently being retried, or null. One id rather than a
+  // boolean so a second row cannot be tapped mid-flight and the tapped row shows
+  // its own spinner.
+  const [reorderingId, setReorderingId] = useState(null);
   const transactionsSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
   const drawerAnim = useRef(new Animated.Value(0)).current;
 
@@ -315,7 +333,6 @@ export default function HomeScreen({ navigation }) {
                 filter: `user_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("New notification inserted:", payload);
                 // Increment count if the new notification is unread
                 if (!payload.new.read) {
                   setUnreadCount((prev) => prev + 1);
@@ -331,22 +348,13 @@ export default function HomeScreen({ navigation }) {
                 filter: `user_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("Notification updated:", payload);
                 // Handle read status changes
                 if (payload.old.read !== payload.new.read) {
-                  console.log(
-                    "Read status changed from",
-                    payload.old.read,
-                    "to",
-                    payload.new.read,
-                  );
                   if (payload.new.read) {
                     // Marked as read - decrement count
-                    console.log("Decrementing unread count");
                     setUnreadCount((prev) => Math.max(0, prev - 1));
                   } else {
                     // Marked as unread - increment count
-                    console.log("Incrementing unread count");
                     setUnreadCount((prev) => prev + 1);
                   }
                 }
@@ -361,7 +369,6 @@ export default function HomeScreen({ navigation }) {
                 filter: `user_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("Notification deleted:", payload);
                 // Decrement count if the deleted notification was unread
                 if (!payload.old.read) {
                   setUnreadCount((prev) => Math.max(0, prev - 1));
@@ -409,7 +416,6 @@ export default function HomeScreen({ navigation }) {
                 filter: `user_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("New order added:", payload);
                 if (payload.eventType === "DELETE") {
                   removeRecentTransaction(payload.old?.id);
                   return;
@@ -439,7 +445,6 @@ export default function HomeScreen({ navigation }) {
                   filter: `agent_id=eq.${user.id}`,
                 },
                 (payload) => {
-                  console.log("Agent order changed:", payload);
                   if (payload.eventType === "DELETE") {
                     removeRecentTransaction(payload.old?.id);
                     return;
@@ -756,6 +761,26 @@ export default function HomeScreen({ navigation }) {
     setTransactions((prev) => prev.filter((item) => item.id !== transactionId));
   };
 
+  // Retries a held sub-agent order from the activity list. The window check, the
+  // invoke and the error unwrapping all live in lib/heldOrderReorder.js so this
+  // screen, the Receipt, History and the Held Orders screen cannot drift.
+  // Re-reads the list on success so the row's status and the wallet balance both
+  // reflect the new order.
+  const handleReorderHeldOrder = async (transaction) => {
+    setReorderingId(transaction.id);
+    try {
+      const result = await reorderHeldOrder(transaction);
+      if (!result.ok) {
+        showError("Reorder Failed", result.message);
+        return;
+      }
+      showSuccess("Order Reordered", "The package was sent to Jehucal.");
+      checkAgentStatus({ refreshTransactions: true, refreshAds: false });
+    } finally {
+      setReorderingId(null);
+    }
+  };
+
   const fetchRecentTransactions = async (agentStatus = isAgent) => {
     try {
       setLoadingTransactions(true);
@@ -791,7 +816,7 @@ export default function HomeScreen({ navigation }) {
           console.error("Error fetching transactions:", error);
         } else {
           // Normalize transactions to include orderType and display fields
-          const normalizedTransactions = (data || []).map((transaction) => ({
+          let normalizedTransactions = (data || []).map((transaction) => ({
             ...transaction,
             orderType: agentStatus ? "agent" : "regular",
             ...(agentStatus && {
@@ -799,6 +824,64 @@ export default function HomeScreen({ navigation }) {
               displayPhone: transaction.recipient_phone,
             }),
           }));
+
+          // A super agent's OWN recent activity never contained their sub-agents'
+          // held orders, because both branches above select by `agent_id` or
+          // `user_id` - i.e. orders the super agent placed themselves. Held rows
+          // live on `agent_orders` under `super_agent_id`, so a super agent
+          // whose wallet had run dry saw no sign of the order that needed
+          // reordering anywhere on Home. Pull those in so the reorder affordance
+          // has something to act on.
+          //
+          // Only `held` rows, and only for a super agent: a non-super-agent must
+          // never see rows they cannot reorder (the server 403s them), and this
+          // keeps the Home list to the same five recent entries rather than
+          // growing it with someone else's backlog.
+          if (isSuperAgent) {
+            const heldResult = await supabase
+              .from("agent_orders")
+              .select("*")
+              .eq("super_agent_id", user.id)
+              .eq("status", "held")
+              .order("created_at", { ascending: false })
+              .limit(5);
+
+            if (heldResult.error) {
+              // Non-fatal: the primary list is already loaded, and losing the
+              // held rows must not blank the whole activity section.
+              console.error(
+                "Error fetching held agent orders:",
+                heldResult.error,
+              );
+            } else {
+              const heldRows = (heldResult.data || []).map((transaction) => ({
+                ...transaction,
+                orderType: "agent",
+                isSubAgentTransaction: true,
+                displayName: transaction.recipient_name,
+                displayPhone: transaction.recipient_phone,
+              }));
+
+              // A row can satisfy both filters only in theory, but the
+              // `orderType`-`id` key used in the list would collide if it did,
+              // so de-duplicate before merging rather than trusting that.
+              const seen = new Set(
+                normalizedTransactions.map((item) => `agent-${item.id}`),
+              );
+              const heldOnly = heldRows.filter(
+                (item) => !seen.has(`agent-${item.id}`),
+              );
+
+              normalizedTransactions = [...heldOnly, ...normalizedTransactions]
+                .sort(
+                  (a, b) =>
+                    new Date(b.created_at || 0).getTime() -
+                    new Date(a.created_at || 0).getTime(),
+                )
+                .slice(0, 5);
+            }
+          }
+
           setTransactions(normalizedTransactions);
         }
       }
@@ -836,7 +919,6 @@ export default function HomeScreen({ navigation }) {
   };
 
   const updateAdClick = async (adId) => {
-    console.log("Updating click for ad", adId);
     try {
       const { data, error: selectError } = await supabase
         .from("ads")
@@ -847,7 +929,6 @@ export default function HomeScreen({ navigation }) {
         console.error("Error selecting click count:", selectError);
         return;
       }
-      console.log("Current click count:", data.click_count);
       const { error: updateError } = await supabase
         .from("ads")
         .update({ click_count: (data.click_count || 0) + 1 })
@@ -855,7 +936,6 @@ export default function HomeScreen({ navigation }) {
       if (updateError) {
         console.error("Error updating click count:", updateError);
       } else {
-        console.log("Click count updated successfully");
       }
     } catch (error) {
       console.error("Error:", error);
@@ -903,7 +983,6 @@ export default function HomeScreen({ navigation }) {
       });
     } catch (error) {
       // Silently handle measurement errors to avoid console spam
-      console.log(`Ad visibility check failed for ad ${adId}:`, error.message);
     }
   };
 
@@ -1564,6 +1643,21 @@ export default function HomeScreen({ navigation }) {
               ) : (
                 transactions.map((transaction, index) => {
                   const tone = statusTone(transaction.status, tones);
+                  // Derived from the row id; see src/lib/receiptNumber.js for
+                  // why it is not a stored column.
+                  const receipt = splitReceiptNumber(transaction);
+                  // Only offered to a super agent (the server 403s everyone
+                  // else) and only inside the 24h window. The row still renders
+                  // as a tap target when the window has closed - hiding the row
+                  // would hide the fact that an order died holding real customer
+                  // money, which is the opposite of what this list is for.
+                  const canReorder = canReorderHeldOrders(isSuperAgent);
+                  const showReorder =
+                    canReorder && isReorderableHeldOrder(transaction);
+                  const reorderElapsed = showReorder
+                    ? isHeldWindowElapsed(transaction, Date.now())
+                    : false;
+                  const reorderBusy = reorderingId === transaction.id;
                   return (
                     <TouchableOpacity
                       key={transaction.id}
@@ -1590,6 +1684,19 @@ export default function HomeScreen({ navigation }) {
                             : ""}
                           {transaction.data_amount || "Bundle"}
                         </Text>
+                        {receipt ? (
+                          <View style={styles.receiptTag}>
+                            <Ionicons
+                              name="pricetag-outline"
+                              size={10}
+                              color={c.textSecondary}
+                            />
+                            <Text style={styles.receiptTagText}>
+                              {receipt.prefix}
+                              {receipt.number}
+                            </Text>
+                          </View>
+                        ) : null}
                       </View>
 
                       <View style={styles.activityTail}>
@@ -1619,6 +1726,53 @@ export default function HomeScreen({ navigation }) {
                             {relativeTime(transaction.created_at) || "—"}
                           </Text>
                         )}
+
+                        {showReorder ? (
+                          <TouchableOpacity
+                            style={[
+                              styles.reorderButton,
+                              reorderElapsed && styles.reorderButtonClosed,
+                            ]}
+                            // Stop propagation so the retry does not also
+                            // navigate to the Receipt - the row is a
+                            // TouchableOpacity, so without this one tap fires
+                            // both handlers and the user lands on a page they
+                            // did not ask for while the retry runs.
+                            onPress={(event) => {
+                              if (event?.stopPropagation) {
+                                event.stopPropagation();
+                              }
+                              handleReorderHeldOrder(transaction);
+                            }}
+                            disabled={reorderBusy || reorderElapsed}
+                            activeOpacity={0.85}
+                            accessibilityRole="button"
+                            accessibilityLabel={
+                              reorderElapsed
+                                ? "Reorder window closed"
+                                : "Reorder this held order"
+                            }
+                          >
+                            <Ionicons
+                              name="refresh"
+                              size={11}
+                              color={reorderElapsed ? c.textMuted : c.onAccent}
+                            />
+                            <Text
+                              style={[
+                                styles.reorderButtonText,
+                                reorderElapsed &&
+                                  styles.reorderButtonTextClosed,
+                              ]}
+                            >
+                              {reorderElapsed
+                                ? "Closed"
+                                : reorderBusy
+                                  ? "Retrying…"
+                                  : "Reorder"}
+                            </Text>
+                          </TouchableOpacity>
+                        ) : null}
                       </View>
                     </TouchableOpacity>
                   );
@@ -2499,9 +2653,56 @@ const buildStyles = (c) =>
       color: c.textMuted,
       marginTop: 3,
     },
+    // Receipt number line. Kept as a pill so it reads as a reference to quote
+    // rather than as part of the order's identity (title above).
+    //
+    // textSecondary, not textMuted: the app-wide `textMuted` measures 3.85:1
+    // on this surface in dark mode, under the 4.5:1 needed for 10px text. That
+    // deficit is pre-existing and app-wide (see theming-system.md), so rather
+    // than quietly widen the global token from one screen, this new element
+    // uses the next token up and passes at 7.07:1 dark / 5.62:1 light.
+    receiptTag: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      alignSelf: "flex-start",
+      marginTop: 5,
+      paddingHorizontal: 7,
+      paddingVertical: 3,
+      borderRadius: 8,
+      backgroundColor: c.surfaceHover,
+    },
+    receiptTagText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 10,
+      color: c.textSecondary,
+      letterSpacing: 0.3,
+    },
     activityTail: {
       alignItems: "flex-end",
     },
+    // Retry affordance for a held sub-agent order. Sits under the amount +
+    // status pill in the tail so the row's right-hand column stays the
+    // money/status summary and the action is clearly secondary to it.
+    reorderButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 4,
+      marginTop: 6,
+      paddingHorizontal: 9,
+      paddingVertical: 5,
+      borderRadius: 999,
+      backgroundColor: c.mint,
+    },
+    // The disabled state is a grey surface, not a dimmed mint: at reduced
+    // opacity the mint fill still reads as the enabled colour on a dark canvas.
+    reorderButtonClosed: { backgroundColor: c.surfaceHover },
+    reorderButtonText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 10.5,
+      color: c.onAccent,
+    },
+    reorderButtonTextClosed: { color: c.textMuted },
     activityAmount: {
       fontFamily: fonts.bodyBold,
       fontSize: 14,

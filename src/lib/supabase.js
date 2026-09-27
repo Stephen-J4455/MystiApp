@@ -47,15 +47,23 @@ const _originalFunctionsInvoke = supabase.functions.invoke.bind(
 supabase.functions.invoke = async (name, options = {}) => {
   const resolvedName = getEdgeFunctionName(name);
   const method = options.body ? "POST" : "GET";
-  console.log(`[Edge] → ${resolvedName} (${method})`);
+  const startedAt = Date.now();
+  // Log the FULL url, not just the function name. The name alone does not
+  // tell you whether you are hitting production or the -test variants, and
+  // the resolved name is easy to misread.
+  const endpoint = `${SUPABASE_URL}/functions/v1/${resolvedName}`;
+  console.log(`[Edge] → ${method} ${endpoint}`);
   try {
     const result = await _originalFunctionsInvoke(resolvedName, options);
+    const ms = Date.now() - startedAt;
     if (result.error) {
       console.error(
-        `[Edge] ✗ ${resolvedName} → error: ${result.error.message}`,
+        `[Edge] ✗ ${resolvedName} (${ms}ms): ${result.error.message}`,
       );
     } else {
-      console.log(`[Edge] ✓ ${resolvedName} → ${result.data ? "ok" : "empty"}`);
+      console.log(
+        `[Edge] ✓ ${resolvedName} (${ms}ms) → ${result.data ? "ok" : "empty"}`,
+      );
     }
     return result;
   } catch (err) {
@@ -63,14 +71,43 @@ supabase.functions.invoke = async (name, options = {}) => {
       err?.constructor?.name === "FunctionsHttpError" ||
       err?.message?.includes("Edge Function returned a non-2xx status code");
     if (isFunctionsHttpError) {
-      const errBody = err?.error || err?.data || null;
-      const errDetail = errBody
-        ? ` Response: ${JSON.stringify(errBody).slice(0, 500)}`
-        : "";
+      // supabase-js exposes the function's JSON body on `err.context`
+      // (a Response), NOT on err.error / err.data. Reading only those two
+      // meant the real reason - "Missing authorization token", "Wallet is
+      // below minimum", "Payment already processed" - was thrown away and
+      // replaced with a generic non-2xx message, so the app could never tell
+      // the caller what actually went wrong.
+      const response = err?.context;
+      let body = null;
+      if (response && typeof response.clone === "function") {
+        try {
+          const text = await response.clone().text();
+          if (text) {
+            try {
+              body = JSON.parse(text);
+            } catch {
+              body = text.slice(0, 500);
+            }
+          }
+        } catch {
+          body = null;
+        }
+      }
+      // A Body already consumed by supabase-js is the other common location.
+      if (!body && err?.error) body = err.error;
+      if (!body && err?.data) body = err.data;
+
+      // Surface the function's own message/error field first - that is the
+      // actionable part. The HTTP status alone is not diagnostic.
+      const serverMessage =
+        (body && typeof body === "object"
+          ? body.error || body.message || body.details
+          : body) || null;
+
       console.error(
-        `[Edge] ✗ ${resolvedName} → FunctionsHttpError (HTTP ${err.status || "unknown"}): Edge Function returned a non-2xx status code. ` +
-          `Endpoint: ${resolvedName}. Check that the edge function is deployed and healthy. ` +
-          `Possible causes: missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY in function secrets, invalid Paystack key, or function runtime error.${errDetail}`,
+        `[Edge] ✗ ${resolvedName} (HTTP ${err?.status ?? response?.status ?? "unknown"}): ${
+          serverMessage || "no response body"
+        }` + (body ? ` Body: ${JSON.stringify(body).slice(0, 500)}` : ""),
       );
     } else {
       console.error(`[Edge] ✗ ${name} → throw: ${err.message}`);
@@ -78,8 +115,6 @@ supabase.functions.invoke = async (name, options = {}) => {
     throw err;
   }
 };
-
-console.log("[supabase.js] Patch applied successfully");
 
 export const getPaystackPublicKey = async () => {
   // No local key and no EXPO_PUBLIC_* fallback on purpose. Fetching from

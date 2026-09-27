@@ -341,7 +341,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    if (!isSuperAgent(identity)) {
+    if (!identityIsSuperAgent(identity)) {
       return new Response(
         JSON.stringify({ error: "Only super agents can manage subaccounts" }),
         {

@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Modal,
   Platform,
   StatusBar,
 } from "react-native";
@@ -291,6 +292,131 @@ export const themedStyles = (c, shadow) =>
       color: c.mint,
     },
 
+    /* ---------- Confirm dialog ---------- */
+    confirmOverlay: {
+      flex: 1,
+      backgroundColor: c.scrim,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 24,
+    },
+    confirmCard: {
+      width: "100%",
+      maxWidth: 400,
+      backgroundColor: c.surface,
+      borderRadius: 24,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      padding: 20,
+    },
+    confirmGlyph: {
+      width: 46,
+      height: 46,
+      borderRadius: 15,
+      alignItems: "center",
+      justifyContent: "center",
+      alignSelf: "flex-start",
+      backgroundColor: c.surfaceHover,
+    },
+    confirmTitle: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      color: c.textPrimary,
+      marginTop: 14,
+    },
+    confirmMessage: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      lineHeight: 19,
+      color: c.textSecondary,
+      marginTop: 6,
+    },
+    confirmSummary: {
+      marginTop: 16,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      backgroundColor: c.surfaceHover,
+      paddingVertical: 4,
+      paddingHorizontal: 14,
+    },
+    confirmSummaryRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingVertical: 9,
+      gap: 12,
+    },
+    confirmSummaryRowBorder: {
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: c.hairline,
+    },
+    confirmSummaryLabel: {
+      fontFamily: fonts.body,
+      fontSize: 12.5,
+      color: c.textMuted,
+      flexShrink: 1,
+    },
+    confirmSummaryValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+      textAlign: "right",
+    },
+    confirmSummaryTotal: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 15,
+      color: c.textPrimary,
+    },
+    confirmWarning: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 8,
+      marginTop: 14,
+    },
+    confirmWarningText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 11.5,
+      lineHeight: 16,
+      color: c.textMuted,
+    },
+    confirmActions: {
+      flexDirection: "row",
+      gap: 10,
+      marginTop: 20,
+    },
+    confirmAction: {
+      flex: 1,
+      height: 48,
+      borderRadius: 999,
+      alignItems: "center",
+      justifyContent: "center",
+      flexDirection: "row",
+      gap: 8,
+    },
+    confirmActionGhost: {
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      backgroundColor: "transparent",
+    },
+    confirmActionGhostText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textPrimary,
+    },
+    confirmActionSolid: {
+      backgroundColor: c.mint,
+    },
+    confirmActionDanger: {
+      backgroundColor: c.rose,
+    },
+    confirmActionSolidText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.onAccent,
+    },
+
     // Consistent block-level spacing helper.
     gap: {
       gap: 12,
@@ -488,6 +614,134 @@ export function RowIcon({ icon, tint, size = 18 }) {
     >
       <Ionicons name={icon} size={size} color={tint} />
     </View>
+  );
+}
+
+/**
+ * Themed destructive/irreversible action confirmation.
+ *
+ * `Alert.alert` renders a system dialog that cannot show a formatted cost
+ * breakdown, and it is a no-op on web. This is the app-native replacement used
+ * for flows that debit money without further recoverable steps (e.g. a super
+ * agent's wallet purchase straight from a bundle tap).
+ *
+ * `rows` is an optional [{ label, value, emphasis }] breakdown rendered between
+ * the message and the actions.
+ */
+export function ConfirmDialog({
+  visible,
+  icon = "help-circle",
+  tint,
+  title,
+  message,
+  rows,
+  warning,
+  confirmText = "Confirm",
+  cancelText = "Cancel",
+  onConfirm,
+  onCancel,
+  confirming = false,
+  tone = "default",
+}) {
+  const { c, styles } = useThemedStyles();
+  if (!visible) return null;
+
+  const isDanger = tone === "danger";
+  const solidStyle = isDanger
+    ? styles.confirmActionDanger
+    : styles.confirmActionSolid;
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={onCancel}
+    >
+      <TouchableOpacity
+        style={styles.confirmOverlay}
+        activeOpacity={1}
+        onPress={confirming ? undefined : onCancel}
+      >
+        <TouchableOpacity
+          style={styles.confirmCard}
+          activeOpacity={1}
+          onPress={() => {}}
+        >
+          <View style={styles.confirmGlyph}>
+            <Ionicons
+              name={icon}
+              size={22}
+              color={tint || (isDanger ? c.rose : c.mint)}
+            />
+          </View>
+
+          <Text style={styles.confirmTitle}>{title}</Text>
+          {message ? (
+            <Text style={styles.confirmMessage}>{message}</Text>
+          ) : null}
+
+          {rows && rows.length ? (
+            <View style={styles.confirmSummary}>
+              {rows.map((row, index) => (
+                <View
+                  key={row.label}
+                  style={[
+                    styles.confirmSummaryRow,
+                    index < rows.length - 1 && styles.confirmSummaryRowBorder,
+                  ]}
+                >
+                  <Text style={styles.confirmSummaryLabel}>{row.label}</Text>
+                  <Text
+                    style={[
+                      styles.confirmSummaryValue,
+                      row.emphasis && styles.confirmSummaryTotal,
+                    ]}
+                  >
+                    {row.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          {warning ? (
+            <View style={styles.confirmWarning}>
+              <Ionicons
+                name="alert-circle"
+                size={14}
+                color={c.textMuted}
+                style={{ marginTop: 1 }}
+              />
+              <Text style={styles.confirmWarningText}>{warning}</Text>
+            </View>
+          ) : null}
+
+          <View style={styles.confirmActions}>
+            <TouchableOpacity
+              style={[styles.confirmAction, styles.confirmActionGhost]}
+              onPress={onCancel}
+              disabled={confirming}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.confirmActionGhostText}>{cancelText}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.confirmAction, solidStyle]}
+              onPress={onConfirm}
+              disabled={confirming}
+              activeOpacity={0.85}
+            >
+              {confirming ? (
+                <ActivityIndicator size="small" color={c.onAccent} />
+              ) : (
+                <Text style={styles.confirmActionSolidText}>{confirmText}</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </Modal>
   );
 }
 

@@ -2,13 +2,17 @@
 #
 # Usage:
 #   pwsh supabase/scripts/deploy.ps1 -Env test
-#   pwsh supabase/scripts/deploy.ps1 -Env production
+#   pwsh supabase/scripts/deploy.ps1 -Env production -IUnderstandThisDeploysToProduction
 #
 # Optional flags:
 #   -SkipLink      do not run `supabase link`
 #   -SkipMigrations skip the `supabase db push` step
 #   -SkipFunctions skip the `supabase functions deploy` step
 #   -DryRun        print what would happen without running any commands
+#   -IUnderstandThisDeploysToProduction
+#                  required acknowledgement for -Env production. Without it
+#                  the script refuses to run, because the unsuffixed function
+#                  names are the ones real customers call.
 
 [CmdletBinding()]
 param(
@@ -16,10 +20,39 @@ param(
     [switch]$SkipLink,
     [switch]$SkipMigrations,
     [switch]$SkipFunctions,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$IUnderstandThisDeploysToProduction,
+    # Deploy only these functions, by their on-disk folder name (WITHOUT the
+    # -test suffix - the suffix is added by this script). Omit to deploy all.
+    #
+    # Named $OnlyFunctions, NOT $Functions: PowerShell variable names are
+    # case-insensitive, so a $Functions param collides with the $functions
+    # discovery list below. The assignment overwrote the param, the filter
+    # silently saw the full list, and every function deployed regardless of
+    # what was requested.
+    [string[]]$OnlyFunctions
 )
 
 $ErrorActionPreference = "Stop"
+
+# Fail closed on production. The unsuffixed edge function names serve live
+# customers, so a bad deploy is a payments outage. Agents and CI should use
+# -Env test only; a human doing a deliberate release passes the
+# acknowledgement switch.
+if ($Env -eq "production" -and -not $IUnderstandThisDeploysToProduction) {
+    throw @"
+REFUSING TO DEPLOY TO PRODUCTION.
+
+  -Env production deploys the UNSUFFIXED edge function names, which are the
+  ones real customers call, and can also apply database migrations.
+
+Use the test variants instead:
+  pwsh supabase/scripts/deploy.ps1 -Env test
+
+If you genuinely mean to release to production, re-run with:
+  pwsh supabase/scripts/deploy.ps1 -Env production -IUnderstandThisDeploysToProduction
+"@
+}
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $envFile = Join-Path $repoRoot "supabase/.env.$Env"
@@ -123,6 +156,19 @@ try {
             } |
             ForEach-Object { $_.Name } |
             Sort-Object
+
+        # Optional narrowing to specific functions, named WITHOUT the -test
+        # suffix (the suffix is appended below). Validated against the
+        # discovered list so a typo fails loudly instead of silently
+        # deploying nothing.
+        if ($OnlyFunctions) {
+            $requested = @($OnlyFunctions | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $unknown = @($requested | Where-Object { $_ -notin $functions })
+            if ($unknown.Count -gt 0) {
+                throw "Unknown function(s): $($unknown -join ', '). Available: $($functions -join ', ')"
+            }
+            $functions = @($functions | Where-Object { $_ -in $requested })
+        }
 
         if (-not $functions) {
             throw "No edge functions found in $functionsDir"

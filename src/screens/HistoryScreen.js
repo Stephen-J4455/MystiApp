@@ -22,10 +22,53 @@ import { useTheme } from "../contexts/ThemeContext";
 import { EmptyState } from "../components/ui";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { fonts } from "../components/theme";
+import {
+  formatOrderStatusLabel,
+  isRealStatus,
+  resolveOrderStatus,
+} from "../lib/orderStatus";
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 
-const refreshProviderStatuses = async (orders) => {
+// Status selection is delegated to `lib/orderStatus.js`, which explains why a
+// plain `jehuca_order_status || status` chain is wrong: the corrupt boolean
+// string "true" is truthy, so it wins the `||` and then fails the real-status
+// test, rendering "Unknown" for an order whose real internal status was sitting
+// unread in the very next field.
+
+// Provider order ids that came back 404 have aged out of the provider's
+// ~10-order retention window and will 404 forever, so warning on every refresh
+// for every such order is pure noise (the log filled with identical lines).
+// Log each id once, then stay quiet. Capped so a long-lived session with many
+// dead orders cannot grow this without bound.
+const warnedMissingProviderOrders = new Set();
+const WARNED_ORDER_CAP = 200;
+
+const warnProviderOrderMissingOnce = (orderId) => {
+  if (warnedMissingProviderOrders.has(orderId)) return false;
+  if (warnedMissingProviderOrders.size >= WARNED_ORDER_CAP) {
+    warnedMissingProviderOrders.clear();
+  }
+  warnedMissingProviderOrders.add(orderId);
+  console.warn(
+    "Jehucal status request failed: Not Found 404 for provider order",
+    orderId,
+    "- the provider only retains its 10 most recent orders, so this status is unrecoverable.",
+  );
+  return true;
+};
+
+/**
+ * Refreshes the provider status for a set of order rows and mirrors it back
+ * into the database.
+ *
+ * `table` is the table the rows came from ("orders" or "agent_orders"). The
+ * client write-back is a FALLBACK for the production `check-order-status`
+ * build, which still runs the old code until it is deployed; the deployed
+ * build syncs all three tables server-side and reports `synced`. See the note
+ * on the write-back below.
+ */
+const refreshProviderStatuses = async (orders, table) => {
   const results = await Promise.all(
     (orders || []).map(async (order) => {
       if (!order.jehuca_order_id) return order;
@@ -44,36 +87,90 @@ const refreshProviderStatuses = async (orders) => {
               { body: { orderId: order.jehuca_order_id } },
             );
             if (!fallback.error) {
+              // Same rule as the primary path: read the normalised
+              // orderStatus, never the provider's boolean `status`.
+              const fallbackStatus =
+                fallback.data?.orderStatus ||
+                fallback.data?.providerOrderStatus ||
+                (typeof fallback.data?.status === "string"
+                  ? fallback.data.status
+                  : null);
+              if (!isRealStatus(fallbackStatus)) return order;
               return {
                 ...order,
-                jehuca_order_status:
-                  fallback.data?.data?.status || order.jehuca_order_status,
+                jehuca_order_status: fallbackStatus,
               };
             }
           }
           return order;
         }
         if (data?.success === false) {
-          console.warn(
-            "Jehucal status request failed:",
-            data.error,
-            data.providerStatusCode,
-          );
+          // A 404 is TERMINAL, not transient: the order has fallen out of the
+          // provider's retention window and no retry can recover it. Warn once
+          // per order id instead of once per order per refresh. Everything else
+          // (balance errors, network blips) stays a per-refresh warning because
+          // those genuinely are worth retrying.
+          if (data?.notFound || data?.providerStatusCode === 404) {
+            warnProviderOrderMissingOnce(order.jehuca_order_id);
+          } else {
+            console.warn(
+              "Jehucal status request failed:",
+              data.error,
+              data.providerStatusCode,
+            );
+          }
+          // The stored status is deliberately left alone. A previously-synced
+          // COMPLETED must not be erased by a later 404.
           return order;
         }
 
+        // The edge function normalises the real provider status onto
+        // `orderStatus` / `providerOrderStatus`. Those are the ONLY fields
+        // that hold an order status.
+        //
+        // The bare `data.status` is the provider's success BOOLEAN (`true`),
+        // not a status string, and this chain used to fall all the way through
+        // to it - so the card rendered "true" as the order status. A boolean
+        // can never be a valid status, so reject it explicitly rather than
+        // relying on it not being reached.
         const providerStatus =
-          data?.data?.status ||
+          data?.orderStatus ||
+          data?.providerOrderStatus ||
+          data?.payload?.packages?.[0]?.status ||
           data?.payload?.status ||
-          data?.order?.status ||
-          data?.status;
-        if (!providerStatus) return order;
+          (typeof data?.status === "string" ? data.status : null);
+
+        if (!isRealStatus(providerStatus)) return order;
+
+        // `synced === true` means the deployed function already wrote the
+        // status server-side, to every table carrying this provider id
+        // (agent_orders, orders AND payment_transactions). Writing again from
+        // here is redundant - and keeping two writers is how the field drifted
+        // from the provider in the first place. `undefined` means the response
+        // came from the OLD production build, which has no server-side sync,
+        // so the write-back below is the only persistence path there.
+        if (data?.synced === true) {
+          return { ...order, jehuca_order_status: providerStatus };
+        }
 
         if (providerStatus !== order.jehuca_order_status) {
-          await supabase
-            .from("agent_orders")
+          const { error: writeError } = await supabase
+            .from(table)
             .update({ jehuca_order_status: providerStatus })
             .eq("id", order.id);
+          if (writeError) {
+            // This fallback write needs the caller to pass RLS on the row. It
+            // can silently no-op (anon key + RLS) for some table/account
+            // combinations, and a silent write failure is how the stored
+            // status drifted from the provider in the first place. Log it
+            // rather than pretending the write landed.
+            console.warn(
+              "Could not persist the provider status locally:",
+              table,
+              order.id,
+              writeError.message,
+            );
+          }
         }
 
         return { ...order, jehuca_order_status: providerStatus };
@@ -150,7 +247,9 @@ export default function HistoryScreen({ navigation }) {
         if (!user || cancelled) return;
 
         const isAssignedSuperAgent = isSuperAgent(user);
-        const channel = supabase.channel(uniqueTopic("history_orders_realtime"));
+        const channel = supabase.channel(
+          uniqueTopic("history_orders_realtime"),
+        );
 
         // Register every callback before subscribing. Supabase Realtime does
         // not allow adding postgres_changes callbacks after subscribe().
@@ -264,7 +363,15 @@ export default function HistoryScreen({ navigation }) {
         if (regularError) {
           console.error("Error fetching regular orders:", regularError);
         } else {
-          const normalizedRegularOrders = (regularOrders || []).map(
+          // Regular orders carry their own `jehuca_order_id`. They were
+          // previously NEVER refreshed, so a normal user or a super agent's own
+          // wallet purchase kept whatever status was written at dispatch time
+          // even after the provider had moved it to COMPLETED.
+          const refreshedRegularOrders = await refreshProviderStatuses(
+            regularOrders,
+            "orders",
+          );
+          const normalizedRegularOrders = refreshedRegularOrders.map(
             (order) => ({
               ...order,
               orderType: "regular",
@@ -286,8 +393,10 @@ export default function HistoryScreen({ navigation }) {
           if (agentError) {
             console.error("Error fetching agent orders:", agentError);
           } else {
-            const refreshedAgentOrders =
-              await refreshProviderStatuses(agentOrders);
+            const refreshedAgentOrders = await refreshProviderStatuses(
+              agentOrders,
+              "agent_orders",
+            );
             const normalizedAgentOrders = refreshedAgentOrders.map((order) => ({
               ...order,
               orderType: "agent",
@@ -308,8 +417,10 @@ export default function HistoryScreen({ navigation }) {
           if (assignedError) {
             console.error("Error fetching sub-agent orders:", assignedError);
           } else {
-            const refreshedAssignedOrders =
-              await refreshProviderStatuses(assignedOrders);
+            const refreshedAssignedOrders = await refreshProviderStatuses(
+              assignedOrders,
+              "agent_orders",
+            );
             const subAgentFunctionName = getEdgeFunctionName(
               "super-agent-user-management",
             );
@@ -400,25 +511,25 @@ export default function HistoryScreen({ navigation }) {
 
   // Status presentation now comes from the shared tone map, which is
   // scheme-aware - the old hardcoded hexes were tuned for white cards only.
-  // "held" (super agent orders awaiting reorder) has no entry in the shared
-  // map, so it borrows the pending treatment and keeps its own label.
+  // "held" (super agent orders awaiting reorder) and "expired" (flipped by the
+  // 24h sweep) have no entry in the shared map, so they borrow the pending and
+  // cancelled families respectively and keep their own label.
   const statusToneOf = (status) => {
+    if (!isRealStatus(status)) {
+      return { label: undefined, color: c.textMuted, bg: c.surfaceHover };
+    }
     const key = String(status || "").toLowerCase();
     if (key === "held") return { ...tones.pending, label: "Held" };
     if (key === "delivered") return { ...tones.completed, label: "Delivered" };
+    if (key === "expired") return { ...tones.cancelled, label: "Expired" };
     return (
       tones[key] || { label: undefined, color: c.textMuted, bg: c.surfaceHover }
     );
   };
 
-  const getStatusText = (status) => {
-    if (!status) return "Unknown";
-    const normalizedStatus = String(status);
-    return (
-      normalizedStatus.charAt(0).toUpperCase() +
-      normalizedStatus.slice(1).toLowerCase()
-    );
-  };
+  // See `lib/orderStatus.js` - booleans are rejected there, and an unrecoverable
+  // status honestly renders as "Unknown".
+  const getStatusText = (status) => formatOrderStatusLabel(status);
 
   const formatDate = (dateString) => {
     if (!dateString) return "N/A";
@@ -435,9 +546,9 @@ export default function HistoryScreen({ navigation }) {
   const counts = useMemo(() => {
     const acc = { total: transactions.length, completed: 0, pending: 0 };
     transactions.forEach((transaction) => {
-      const key = String(
-        transaction.jehuca_order_status || transaction.status || "",
-      ).toLowerCase();
+      // Same resolver the card and receipt use, so the summary tiles can never
+      // disagree with the rows they summarise.
+      const key = String(resolveOrderStatus(transaction) || "").toLowerCase();
       if (key === "completed" || key === "delivered") acc.completed += 1;
       else if (key === "pending" || key === "processing" || key === "held")
         acc.pending += 1;
@@ -454,7 +565,10 @@ export default function HistoryScreen({ navigation }) {
       />
 
       <ScrollView
-        contentContainerStyle={[s.scrollContent, { paddingBottom: dockPadding }]}
+        contentContainerStyle={[
+          s.scrollContent,
+          { paddingBottom: dockPadding },
+        ]}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
@@ -542,14 +656,11 @@ export default function HistoryScreen({ navigation }) {
             {transactions.map((transaction) => {
               const isSubAgent =
                 isSuperAgentUser && transaction.isSubAgentTransaction;
-              const tone = statusToneOf(
-                transaction.jehuca_order_status || transaction.status,
-              );
-              const statusLabel =
-                tone.label ||
-                getStatusText(
-                  transaction.jehuca_order_status || transaction.status,
-                );
+              // Resolved once and reused for the pill's colour AND its label,
+              // so the two can never come from different fields.
+              const displayStatus = resolveOrderStatus(transaction);
+              const tone = statusToneOf(displayStatus);
+              const statusLabel = tone.label || getStatusText(displayStatus);
               const held = String(transaction.status).toLowerCase() === "held";
 
               return (

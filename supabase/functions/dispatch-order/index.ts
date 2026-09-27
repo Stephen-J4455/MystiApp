@@ -828,15 +828,54 @@ Deno.serve((req) =>
         );
       }
 
+      // Provider response shape (verified live 2026-09-27):
+      //   { status: true, payload: { id: "<uuid>", orderId: "434529",
+      //      totalPrice, packages: [ { status, phone, ... } ] } }
+      //
+      // BOTH ids are valid for `GET /api/orders/{X}` (each returned HTTP 200),
+      // so either is safe to persist - but they must be READ FROM THE REAL
+      // SHAPE. `orderId` is the short human-facing number and is the one the
+      // provider's own docs and logs use, so prefer it.
+      //
+      // The old chain was `payload.orderId || orderId || payload.orders[0].id`.
+      // `payload.orders` does not exist (it is `packages`), and the top-level
+      // `status` is the success BOOLEAN - so on a response shaped like the one
+      // above this resolved to `null` and wrote a NULL `jehuca_order_id`.
+      // Every later status check then skipped the row entirely, and any order
+      // that did get an id was checked against a 404-prone value.
+      const providerPayload = providerData?.payload;
       const jehucaOrderId =
-        providerData?.payload?.orderId ||
-        providerData?.orderId ||
-        providerData?.payload?.orders?.[0]?.id ||
+        providerPayload?.orderId ??
+        providerData?.orderId ??
+        providerPayload?.id ??
+        (Array.isArray(providerPayload) ? providerPayload[0]?.orderId : null) ??
+        (Array.isArray(providerPayload) ? providerPayload[0]?.id : null) ??
         null;
+
+      // The status is at `payload.packages[0].status`, NOT at the top level -
+      // the top-level `status` is the boolean. Writing the boolean here is
+      // exactly how six rows came to hold the literal string "true" and
+      // rendered as "True" in the transaction history.
       const jehucaOrderStatus =
-        providerData?.payload?.orders?.[0]?.status ||
-        providerData?.status ||
+        (Array.isArray(providerPayload)
+          ? providerPayload[0]?.packages?.[0]?.status
+          : providerPayload?.packages?.[0]?.status) ??
+        (Array.isArray(providerPayload)
+          ? providerPayload[0]?.status
+          : providerPayload?.status) ??
         "accepted";
+
+      if (!jehucaOrderId) {
+        // The provider accepted the order (this branch is only reached when
+        // `accepted` is true) but no id could be read. Persisting the status
+        // without an id leaves the order permanently untrackable, and the
+        // customer is already billed. Record it loudly rather than writing a
+        // null id that silently disables all future status checks.
+        console.error(
+          "[Dispatch] Provider accepted the order but no provider order id could be read:",
+          { order_id: order.id, provider_data: providerData },
+        );
+      }
 
       const { error: updateError } = await admin
         .from(table)

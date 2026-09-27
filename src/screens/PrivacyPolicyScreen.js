@@ -4,38 +4,35 @@ import {
   Text,
   ScrollView,
   StyleSheet,
-  StatusBar,
   TouchableOpacity,
   Platform,
 } from "react-native";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import colors from "../components/theme";
-import { ThemedScreen } from "../components/ui";
+import { fonts } from "../components/theme";
+import { ThemedScreen, themedStyles } from "../components/ui";
+import { useTheme } from "../contexts/ThemeContext";
 
 export default function PrivacyPolicyScreen({ navigation }) {
+  const theme = useTheme();
+  const c = theme.c;
   // The floating back button is absolutely positioned, so it must clear the
   // Android status bar itself. iOS already spaces this, so Android-only.
   const insets = useSafeAreaInsets();
   const backTop = Platform.OS === "android" ? insets.top + 10 : 50;
+  const styles = usePrivacyStyles(c);
+  // ThemedScreen already renders a scheme-aware StatusBar; this screen must
+  // not re-declare one or it overrides the correct barStyle with a hardcoded
+  // value that is unreadable in dark mode.
   return (
     <ThemedScreen style={styles.container}>
-      <StatusBar
-        translucent
-        backgroundColor="transparent"
-        barStyle="dark-content"
-      />
-
       {/* Floating Back Button */}
       <TouchableOpacity
         style={[styles.floatingBackButton, { top: backTop }]}
         onPress={() => navigation.goBack()}
       >
         <View style={styles.backButtonCircle}>
-          <Ionicons name="arrow-back" size={24} color={colors.primary} />
+          <Ionicons name="arrow-back" size={24} color={c.mint} />
         </View>
       </TouchableOpacity>
 
@@ -102,78 +99,71 @@ export default function PrivacyPolicyScreen({ navigation }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.white,
-  },
-  floatingBackButton: {
-    position: "absolute",
-    top: 50,
-    left: 20,
-    zIndex: 10,
-  },
-  backButtonCircle: {
-    width: 45,
-    height: 45,
-    borderRadius: 23,
-    backgroundColor: "rgba(255, 255, 255, 0.9)",
-    justifyContent: "center",
-    alignItems: "center",
-    elevation: 4,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  contentHeader: {
-    marginTop: 90, // Accounts for floating back button
-    marginBottom: 10,
-  },
-  screenTitle: {
-    fontSize: 28,
-    fontWeight: "bold",
-    color: colors.dark,
-  },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: 5,
-    backgroundColor: colors.light,
-  },
-  backButton: {
-    padding: 5,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: colors.primary,
-  },
-  content: {
-    flex: 1,
-    padding: 20,
-  },
-  scrollContent: {
-    paddingBottom: 40,
-  },
-  lastUpdated: {
-    fontSize: 14,
-    color: colors.secondary,
-    marginBottom: 20,
-    textAlign: "center",
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: colors.primary,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  paragraph: {
-    fontSize: 16,
-    color: colors.primary,
-    lineHeight: 24,
-    marginBottom: 15,
-  },
-});
+// Layered on the shared kit: `themedStyles(c)` owns the surface ramp, so this
+// file only adds the long-form-document pieces.
+const usePrivacyStyles = (c) => {
+  const base = themedStyles(c);
+  return StyleSheet.create({
+    ...base,
+    container: { ...base.screen },
+
+    floatingBackButton: {
+      position: "absolute",
+      left: 20,
+      zIndex: 10,
+    },
+    // Opaque surface rather than a white 90% wash: a translucent circle over
+    // the scrolling text would let body copy show through the glyph.
+    backButtonCircle: {
+      width: 45,
+      height: 45,
+      borderRadius: 23,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      justifyContent: "center",
+      alignItems: "center",
+      elevation: 4,
+    },
+    contentHeader: {
+      marginTop: 90, // Accounts for floating back button
+      marginBottom: 10,
+    },
+    screenTitle: {
+      fontFamily: fonts.display,
+      fontSize: 28,
+      color: c.textPrimary,
+    },
+    content: {
+      flex: 1,
+      paddingHorizontal: 20,
+    },
+    scrollContent: {
+      paddingBottom: 40,
+    },
+    lastUpdated: {
+      fontFamily: fonts.body,
+      fontSize: 13.5,
+      color: c.textMuted,
+      marginBottom: 20,
+      textAlign: "center",
+    },
+    sectionTitle: {
+      fontFamily: fonts.display,
+      fontSize: 18,
+      color: c.mint,
+      marginTop: 20,
+      marginBottom: 10,
+    },
+    // Body copy is the longest text surface in the app, so it uses the
+    // secondary ramp rather than the primary one - the muted step is what
+    // keeps a 16px paragraph readable across a full screen of text.
+    paragraph: {
+      fontFamily: fonts.body,
+      fontSize: 15.5,
+      color: c.textSecondary,
+      lineHeight: 24,
+      marginBottom: 15,
+    },
+  });
+};

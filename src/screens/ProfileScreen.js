@@ -133,7 +133,6 @@ export default function ProfileScreen({ navigation }) {
                 filter: `agent_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("Agent order updated in profile:", payload);
                 fetchAgentStats();
               },
             )

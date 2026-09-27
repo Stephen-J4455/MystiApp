@@ -16,6 +16,7 @@ import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { isSuperAgent } from "../lib/superAgent";
 import { getEdgeFunctionName } from "../lib/env";
+import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -183,16 +184,28 @@ export default function SuperAgentOffersScreen({ navigation }) {
           ]);
 
         if (offersResult.error) {
-          console.error("Error loading offers:", offersResult.error);
+          console.error(
+            "Error loading offers:",
+            await getEdgeFunctionErrorMessage(offersResult.error),
+          );
         }
         if (tiersResult.error) {
-          console.error("Error loading tiers:", tiersResult.error);
+          console.error(
+            "Error loading tiers:",
+            await getEdgeFunctionErrorMessage(tiersResult.error),
+          );
         }
         if (packagesResult.error) {
-          console.error("Error loading packages:", packagesResult.error);
+          console.error(
+            "Error loading packages:",
+            await getEdgeFunctionErrorMessage(packagesResult.error),
+          );
         }
         if (pricingResult.error) {
-          console.error("Error loading base prices:", pricingResult.error);
+          console.error(
+            "Error loading base prices:",
+            await getEdgeFunctionErrorMessage(pricingResult.error),
+          );
         }
 
         const offerRows = offersResult.data?.offers || [];

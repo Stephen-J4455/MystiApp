@@ -48,7 +48,6 @@ export default function SignupScreen({ navigation }) {
 
     setLoading(true);
     try {
-      console.log("Attempting signup for:", email);
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
@@ -58,7 +57,6 @@ export default function SignupScreen({ navigation }) {
         console.error("Signup error:", error);
         showError("Signup Failed", error.message);
       } else {
-        console.log("Signup successful:", data);
         showSuccess(
           "Success",
           "Account created successfully! Please check your email for verification link.",
@@ -86,7 +84,6 @@ export default function SignupScreen({ navigation }) {
       if (error) throw error;
 
       if (data?.url) {
-        console.log("Opening Google OAuth URL...");
         const result = await WebBrowser.openAuthSessionAsync(
           data.url,
           "mystiwanebusiness://",
@@ -113,7 +110,6 @@ export default function SignupScreen({ navigation }) {
               });
 
               if (sessionError) throw sessionError;
-              console.log("OAuth session set successfully");
               return;
             }
           }

@@ -179,6 +179,15 @@ const getStatusTone = (scheme) => {
     cancelled: { label: "Cancelled", color: t.rose, bg: mix(t.rose, 0.12) },
     failed: { label: "Failed", color: t.rose, bg: mix(t.rose, 0.12) },
     refunded: { label: "Refunded", color: t.sky, bg: mix(t.sky, 0.12) },
+    // "held" and "expired" are the two lifecycle states the app owns itself
+    // (see lib/orderStatus.js). Neither is a provider or payment state, and
+    // neither is in the shared map, so both borrow a neighbouring family and
+    // keep their own label. Without these entries a caller's default branch
+    // returned null and the row rendered with no status pill at all - a held
+    // order, which is one of the few rows the super agent must act on, looked
+    // identical to a normal one.
+    held: { label: "Held", color: t.amber, bg: mix(t.amber, 0.12) },
+    expired: { label: "Expired", color: t.rose, bg: mix(t.rose, 0.12) },
   };
 };
 

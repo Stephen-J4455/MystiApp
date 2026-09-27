@@ -349,7 +349,7 @@ Deno.serve(async (req) => {
     // self-assignable, so any authenticated user could claim Super Agent and
     // top up a wallet; and `user_metadata?.super_agent_id` could be re-pointed
     // at somebody else, mis-routing the settlement lookup below.
-    if (!isSuperAgent(identity)) {
+    if (!identityIsSuperAgent(identity)) {
       return new Response(
         JSON.stringify({
           error: "Only Super Agents can fund an operational wallet",
@@ -476,6 +476,101 @@ Deno.serve(async (req) => {
       );
     }
 
+    // =========================================================================
+    // AMOUNT VERIFICATION - WHY THIS EXISTS
+    // =========================================================================
+    // `wallet_topups.amount` is the NET figure the wallet should be credited,
+    // written by the client BEFORE the Paystack redirect. The GROSS actually
+    // charged (net + 1.95% Paystack charge) only ever existed in client state.
+    //
+    // Nothing here checked that Paystack's `data.amount` matched what was owed,
+    // so the amount paid was never verified against the amount credited. A
+    // caller could initialize a transaction for a token amount, redirect
+    // Paystack to whatever they liked, and have `credit_super_agent_wallet`
+    // credit the full recorded top-up anyway - the Paystack check that
+    // `status === "success"` provides is about the payment SUCCEEDING, not
+    // about it being the right size.
+    //
+    // The expected gross is therefore RECOMPUTED HERE from the authoritative
+    // server-side rate, never taken from the request. Reading a client-supplied
+    // expected amount would let the caller set the bar to whatever they had
+    // actually paid.
+    const { data: chargeSettings, error: chargeSettingsError } =
+      await supabaseAdmin
+        .from("payment_charge_settings")
+        .select("wallet_topup_percent")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+    if (chargeSettingsError) {
+      // Fail closed. Guessing a rate here is what would let a mismatched
+      // amount through, and the fallback below is the only reason this can
+      // continue at all.
+      console.error(
+        "[verify-wallet-topup] Could not read charge settings:",
+        chargeSettingsError,
+      );
+    }
+
+    // Mirrors DEFAULT_PAYMENT_SETTINGS.walletTopUpPercent in
+    // src/lib/paymentSettings.js. The client applies the same fallback.
+    const topUpChargePercent = Number(
+      chargeSettings?.wallet_topup_percent ?? 1.95,
+    );
+
+    const expectedNet = Number(existingTopup.amount || 0);
+    if (!Number.isFinite(expectedNet) || expectedNet <= 0) {
+      console.error(
+        "[verify-wallet-topup] Recorded top-up amount is not a positive number:",
+        existingTopup.amount,
+      );
+      return new Response(JSON.stringify({ error: "Invalid top-up amount" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Paystack reports in pesewas. Same order of operations as
+    // getTransactionChargeAmount in src/lib/paymentSettings.js: fee on the
+    // NET, then add it back, then round once at the end.
+    const expectedFee = Number(
+      ((expectedNet * topUpChargePercent) / 100).toFixed(2),
+    );
+    const expectedGross = Number((expectedNet + expectedFee).toFixed(2));
+    const chargedGross = Number(verifyData.data.amount || 0) / 100;
+
+    // 0.01 tolerance for float/rounding drift only - the fee itself is already
+    // rounded to 2dp on both sides, so a real mismatch is far larger than this.
+    if (Math.abs(chargedGross - expectedGross) > 0.01) {
+      console.error("[verify-wallet-topup] Charged amount does not match:", {
+        reference,
+        recorded_net: expectedNet,
+        expected_gross: expectedGross,
+        charged_gross: chargedGross,
+        charge_percent: topUpChargePercent,
+      });
+      return new Response(
+        JSON.stringify({
+          error: "Top-up amount does not match the payment received",
+          expected: expectedGross,
+          received: chargedGross,
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    console.log("[verify-wallet-topup] Amount verified:", {
+      reference,
+      net: expectedNet,
+      fee: expectedFee,
+      gross: expectedGross,
+      charged: chargedGross,
+    });
+
     // Update wallet_topups
     const updateData: Record<string, unknown> = {
       status: "success",
@@ -484,6 +579,14 @@ Deno.serve(async (req) => {
       paid_at: new Date(verifyData.data.paid_at).toISOString(),
       channel: verifyData.data.channel || null,
       bank: verifyData.data.authorization?.bank || null,
+      // Charge snapshot. Recorded so the platform can reconcile what Paystack
+      // actually collected, and so the rate that applied is pinned at
+      // settlement time - editing `payment_charge_settings` later must not
+      // retroactively change the fee attributed to this top-up. Requires
+      // migration 20260927_003; tolerated as absent below.
+      gross_amount: expectedGross,
+      charge_amount: expectedFee,
+      charge_percent: topUpChargePercent,
     };
 
     // The payer IS the super agent funding their own wallet, so their own id is
@@ -524,32 +627,75 @@ Deno.serve(async (req) => {
       .eq("reference", reference);
 
     if (updateError) {
-      // Tolerate databases that haven't run migration 004 (no
-      // paystack_subaccount_code column) by retrying without that field.
-      if (
-        updateError.code === "42703" &&
-        /paystack_subaccount_code/.test(updateError.message || "")
-      ) {
-        delete updateData.paystack_subaccount_code;
-        const { error: retryError } = await supabaseAdmin
-          .from("wallet_topups")
-          .update(updateData)
-          .eq("reference", reference);
-        if (retryError) {
-          console.error(
-            "Failed to update wallet_topups (without subaccount column):",
-            retryError,
+      // Tolerate a database that hasn't run a migration yet by retrying
+      // without the columns it is missing.
+      //
+      // `paystack_subaccount_code` (migration 004) and the three charge
+      // snapshot columns (migration 20260927_003) are both optional here. The
+      // previous check only recognised the subaccount column, so on a database
+      // missing the newer ones the retry still carried them and failed the same
+      // way - the top-up then 500'd even though the payment had succeeded. The
+      // offending columns are now stripped from the error text generically, so
+      // this keeps working as columns are added.
+      if (updateError.code === "42703") {
+        const missingColumn =
+          /column\s+"?(\w+)"?\s+of relation\s+"?wallet_topups"?\s+does not exist/i.exec(
+            updateError.message || "",
+          )?.[1] ||
+          /paystack_subaccount_code|charge_percent|charge_amount|gross_amount/.exec(
+            updateError.message || "",
+          )?.[0];
+
+        if (missingColumn) {
+          // Not a wallet_topups column: some other constraint, so retrying
+          // without a field cannot help.
+          if (
+            missingColumn !== "paystack_subaccount_code" &&
+            !["charge_percent", "charge_amount", "gross_amount"].includes(
+              missingColumn,
+            )
+          ) {
+            console.error("Failed to update wallet_topups:", updateError);
+            return new Response(
+              JSON.stringify({
+                error: "Failed to update wallet topup",
+                details: updateError,
+              }),
+              {
+                status: 500,
+                headers: {
+                  ...corsHeaders,
+                  "Content-Type": "application/json",
+                },
+              },
+            );
+          }
+
+          delete updateData[missingColumn];
+          console.warn(
+            `[verify-wallet-topup] Column "${missingColumn}" is absent; retrying without it. Apply the pending migration.`,
           );
-          return new Response(
-            JSON.stringify({
-              error: "Failed to update wallet topup",
-              details: retryError,
-            }),
-            {
-              status: 500,
-              headers: { ...corsHeaders, "Content-Type": "application/json" },
-            },
-          );
+
+          const { error: retryError } = await supabaseAdmin
+            .from("wallet_topups")
+            .update(updateData)
+            .eq("reference", reference);
+          if (retryError) {
+            console.error(
+              `Failed to update wallet_topups (without ${missingColumn}):`,
+              retryError,
+            );
+            return new Response(
+              JSON.stringify({
+                error: "Failed to update wallet topup",
+                details: retryError,
+              }),
+              {
+                status: 500,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              },
+            );
+          }
         }
       } else {
         console.error("Failed to update wallet_topups:", updateError);
@@ -598,6 +744,13 @@ Deno.serve(async (req) => {
           success: true,
           new_balance: creditResult.balance,
           already_processed: creditResult.already_processed || false,
+          // The verified split, so the client can confirm exactly what was
+          // charged and credited rather than restating figures it computed
+          // locally before the payment.
+          credited_amount: Number(creditResult.credited_amount ?? expectedNet),
+          charge_amount: expectedFee,
+          charge_percent: topUpChargePercent,
+          gross_amount: expectedGross,
         }),
         {
           status: 200,

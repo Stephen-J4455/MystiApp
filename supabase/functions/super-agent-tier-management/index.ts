@@ -273,7 +273,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    if (!isSuperAgent(identity)) {
+    if (!identityIsSuperAgent(identity)) {
       return new Response(JSON.stringify({ error: "User not allowed" }), {
         status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },

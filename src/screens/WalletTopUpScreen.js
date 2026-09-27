@@ -224,7 +224,6 @@ export default function WalletTopUpScreen({ navigation }) {
 
   const handlePaymentSuccess = useCallback(
     async (response) => {
-      console.log("Wallet topup payment successful:", response);
       paymentCompletedRef.current = true;
       setPaystackModalVisible(false);
       setPaymentCompleted(true);
@@ -246,9 +245,22 @@ export default function WalletTopUpScreen({ navigation }) {
           return;
         }
         if (result && result.success && !result.already_processed) {
+          // The server recomputed and verified the split, so quote ITS figures
+          // rather than the locally-computed `amount`. They agree today, but the
+          // local value is a pre-payment estimate made with a possibly stale
+          // rate - and this is the one place the user is told what they were
+          // actually charged.
+          const credited = Number(
+            result.credited_amount ?? parseFloat(amount) ?? 0,
+          );
+          const charge = Number(result.charge_amount || 0);
+          const gross = Number(result.gross_amount || 0);
+          const percent = Number(result.charge_percent || 0);
           showSuccess(
             "Top-up Successful!",
-            `Your wallet has been credited with Ghc ${parseFloat(amount)}`,
+            charge > 0
+              ? `Your wallet has been credited with Ghc ${credited.toFixed(2)} after a ${percent}% Paystack charge of Ghc ${charge.toFixed(2)} (Ghc ${gross.toFixed(2)} paid).`
+              : `Your wallet has been credited with Ghc ${credited.toFixed(2)}`,
           );
           if (result.new_balance !== undefined)
             setCurrentBalance(result.new_balance);
@@ -277,7 +289,6 @@ export default function WalletTopUpScreen({ navigation }) {
   );
 
   const handlePaymentClose = useCallback(() => {
-    console.log("Wallet topup payment cancelled");
     setPaystackModalVisible(false);
     // Only notify if the user actually cancelled (not after a successful payment).
     if (!paymentCompletedRef.current) {

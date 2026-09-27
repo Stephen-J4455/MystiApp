@@ -40,7 +40,6 @@ export default function LoginScreen({ navigation }) {
 
     setLoading(true);
     try {
-      console.log("Attempting login for:", email);
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -50,19 +49,14 @@ export default function LoginScreen({ navigation }) {
         console.error("Login error:", error);
         showError("Login Failed", error.message);
       } else {
-        console.log("Login successful:", data);
-        console.log("User:", data.user);
-        console.log("Session:", data.session);
 
         // On web, check if email confirmation is required
         if (data.user && !data.user.email_confirmed_at) {
-          console.log("Email not confirmed, user needs to confirm email");
           showError(
             "Email Confirmation Required",
             "Please check your email and confirm your account before signing in.",
           );
         } else {
-          console.log("Login complete, auth state should change");
         }
       }
     } catch (error) {
@@ -87,14 +81,12 @@ export default function LoginScreen({ navigation }) {
       if (error) throw error;
       if (!data?.url) throw new Error("No OAuth URL returned from Supabase");
 
-      console.log("Opening Google OAuth URL...");
       // Second arg MUST be the app scheme, not the Supabase callback - this is
       // what lets the deep link return to the app after the browser auth.
       const result = await WebBrowser.openAuthSessionAsync(
         data.url,
         "mystiwanebusiness://",
       );
-      console.log("WebBrowser result:", result.type);
 
       if (result.type === "success" && result.url) {
         // Supabase returns tokens in the fragment on native and the query
@@ -109,13 +101,11 @@ export default function LoginScreen({ navigation }) {
           const accessToken = params.get("access_token");
           const refreshToken = params.get("refresh_token");
           if (accessToken && refreshToken) {
-            console.log("Setting OAuth session...");
             const { error: sessionError } = await supabase.auth.setSession({
               access_token: accessToken,
               refresh_token: refreshToken,
             });
             if (sessionError) throw sessionError;
-            console.log("OAuth session set successfully");
             return;
           }
         }

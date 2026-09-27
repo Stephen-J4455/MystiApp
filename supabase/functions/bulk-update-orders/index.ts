@@ -279,7 +279,7 @@ Deno.serve(async (req) => {
         identity.id,
       );
     }
-    if (!isAdmin(identity))
+    if (!identityIsAdmin(identity))
       return respond({ error: "Admin role required" }, 403);
 
     const body = await req.json().catch(() => ({}));

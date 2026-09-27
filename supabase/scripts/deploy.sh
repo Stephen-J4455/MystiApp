@@ -15,8 +15,30 @@ set -euo pipefail
 
 ENV_NAME="${1:-}"
 if [[ -z "$ENV_NAME" || ( "$ENV_NAME" != "test" && "$ENV_NAME" != "production" ) ]]; then
-  echo "Usage: $0 <test|production>" >&2
+  echo "Usage: $0 <test|production> [-IUnderstandThisDeploysToProduction]" >&2
   exit 1
+fi
+
+# Fail closed on production. The unsuffixed edge function names serve live
+# customers, so a bad deploy is a payments outage. Agents and CI must use
+# "test" only; a human doing a deliberate release passes the acknowledgement
+# flag.
+if [[ "$ENV_NAME" == "production" ]]; then
+  if ! echo "$@" | grep -q -- "-IUnderstandThisDeploysToProduction"; then
+    cat >&2 <<'EOF'
+REFUSING TO DEPLOY TO PRODUCTION.
+
+  "production" deploys the UNSUFFIXED edge function names, which are the ones
+  real customers call, and can also apply database migrations.
+
+Use the test variants instead:
+  ./supabase/scripts/deploy.sh test
+
+If you genuinely mean to release to production, re-run with:
+  ./supabase/scripts/deploy.sh production -IUnderstandThisDeploysToProduction
+EOF
+    exit 1
+  fi
 fi
 
 ENV_UPPER=$(echo "$ENV_NAME" | tr '[:lower:]' '[:upper:]')
@@ -106,6 +128,34 @@ if [[ "${SKIP_FUNCTIONS:-0}" != "1" ]]; then
       FUNCTIONS+=("$name")
     fi
   done < <(find "$FUNCTIONS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
+
+  # Optional narrowing to specific functions, named WITHOUT the -test suffix
+  # (the suffix is appended below). Mirrors deploy.ps1's -OnlyFunctions.
+  # ONLY_FUNCTIONS is a space-separated list of function names.
+  if [[ -n "${ONLY_FUNCTIONS:-}" ]]; then
+    read -r -a _requested <<< "$ONLY_FUNCTIONS"
+    _filtered=()
+    for fn in "${FUNCTIONS[@]}"; do
+      for want in "${_requested[@]}"; do
+        if [[ "$fn" == "$want" ]]; then
+          _filtered+=("$fn")
+          break
+        fi
+      done
+    done
+    for want in "${_requested[@]}"; do
+      _known=0
+      for fn in "${FUNCTIONS[@]}"; do
+        [[ "$fn" == "$want" ]] && _known=1 && break
+      done
+      if [[ "$_known" -eq 0 ]]; then
+        echo "Unknown function: $want" >&2
+        echo "Available: ${FUNCTIONS[*]}" >&2
+        exit 1
+      fi
+    done
+    FUNCTIONS=("${_filtered[@]}")
+  fi
 
   if [[ ${#FUNCTIONS[@]} -eq 0 ]]; then
     echo "No edge functions found in $FUNCTIONS_DIR" >&2

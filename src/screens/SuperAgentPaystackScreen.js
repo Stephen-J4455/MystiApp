@@ -26,7 +26,10 @@ import { isSuperAgent } from "../lib/superAgent";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
-import { invokeEdgeFunction } from "../lib/edgeFunctions";
+import {
+  invokeEdgeFunction,
+  getEdgeFunctionErrorMessage,
+} from "../lib/edgeFunctions";
 import { getEdgeFunctionName } from "../lib/env";
 
 export default function SuperAgentPaystackScreen({ navigation }) {
@@ -142,11 +145,20 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         });
       }
     } catch (err) {
+      // supabase-js puts the real reason on err.context (a Response), NOT on
+      // err.message. Logging the error object alone prints
+      // "[FunctionsHttpError: Edge Function returned a non-2xx status code]"
+      // for every distinct failure, which hid a 403 badge rejection behind
+      // what looked like a generic outage.
+      const detail = await getEdgeFunctionErrorMessage(
+        err,
+        "Unknown edge function error",
+      );
       console.error(
         "Failed to verify subaccount (" +
           getEdgeFunctionName("paystack-subaccount") +
-          "):",
-        err,
+          "): " +
+          detail,
       );
       setVerificationStatus({
         verified: false,
@@ -212,11 +224,15 @@ export default function SuperAgentPaystackScreen({ navigation }) {
       setBanks(banksOnly);
       setMobileMoneyProviders(mobileOnly);
     } catch (err) {
+      const detail = await getEdgeFunctionErrorMessage(
+        err,
+        "Unknown edge function error",
+      );
       console.error(
         "Failed to fetch banks (" +
           getEdgeFunctionName("paystack-subaccount") +
-          "):",
-        err,
+          "): " +
+          detail,
       );
     } finally {
       setBanksLoading(false);
@@ -269,11 +285,15 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         setShowForm(true);
       }
     } catch (err) {
+      const detail = await getEdgeFunctionErrorMessage(
+        err,
+        "Unknown edge function error",
+      );
       console.error(
         "Failed to fetch subaccount (" +
           getEdgeFunctionName("paystack-subaccount") +
-          "):",
-        err,
+          "): " +
+          detail,
       );
       if (err.message?.includes("migration_required")) {
         showError(

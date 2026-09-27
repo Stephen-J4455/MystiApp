@@ -93,7 +93,6 @@ export default function NotificationsScreen({ navigation }) {
               filter: `user_id=eq.${user.id}`,
             },
             (payload) => {
-              console.log("New notification received:", payload);
               // Add new notification to the list
               setNotifications((prev) => [payload.new, ...prev]);
 
@@ -115,7 +114,6 @@ export default function NotificationsScreen({ navigation }) {
               filter: `user_id=eq.${user.id}`,
             },
             (payload) => {
-              console.log("Notification updated:", payload);
               // Update the notification in the list
               setNotifications((prev) =>
                 prev.map((notif) =>
@@ -135,7 +133,6 @@ export default function NotificationsScreen({ navigation }) {
               filter: `user_id=eq.${user.id}`,
             },
             (payload) => {
-              console.log("Notification deleted:", payload);
               // Remove the notification from the list
               setNotifications((prev) =>
                 prev.filter((notif) => notif.id !== payload.old.id),
@@ -180,7 +177,6 @@ export default function NotificationsScreen({ navigation }) {
 
   const markAsRead = async (id) => {
     try {
-      console.log("Marking notification as read:", id);
       const { error } = await supabase
         .from("notifications")
         .update({ read: true })
@@ -189,7 +185,6 @@ export default function NotificationsScreen({ navigation }) {
       if (error) {
         console.error("Error marking notification as read:", error);
       } else {
-        console.log("Notification marked as read successfully:", id);
         setNotifications(
           notifications.map((notif) =>
             notif.id === id ? { ...notif, read: true } : notif,

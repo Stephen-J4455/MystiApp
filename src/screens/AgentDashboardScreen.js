@@ -81,7 +81,6 @@ export default function AgentDashboardScreen({ navigation }) {
                 filter: `agent_id=eq.${user.id}`,
               },
               (payload) => {
-                console.log("Agent wallet updated:", payload);
                 // Update agent data when wallet balance changes
                 setAgent((prevAgent) => ({
                   ...prevAgent,

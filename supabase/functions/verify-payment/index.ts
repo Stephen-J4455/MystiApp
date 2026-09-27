@@ -537,6 +537,72 @@ Deno.serve(async (req) => {
         );
       }
 
+      // Pre-flight balance check - WHY THIS IS HERE
+      // ------------------------------------------
+      // Previously the wallet was debited AFTER the `orders` row was inserted,
+      // and a failed debit simply flipped the row to `status='held'`. That
+      // produced a held order on EVERY wallet purchase the super agent could
+      // not immediately afford - which is a self-inflicted wound: the money
+      // never left their balance, yet the order became an abandoned, expiring
+      // record that only a "Reorder" tap could rescue.
+      //
+      // Rejecting up front is strictly better: nothing is created, nothing is
+      // held, and the super agent gets an honest "fund your wallet" message
+      // instead of an order that looks like it is in flight for 24 hours.
+      //
+      // This is a CHECK, not the debit. The authoritative `debit_super_agent_wallet`
+      // still runs later and still holds the row lock, so a concurrent purchase
+      // cannot slip past this read. The only cost of the race is that the
+      // authoritative debit can still fail after this passes - which is exactly
+      // the case the held path exists for.
+      const { data: walletRow, error: walletReadError } = await supabaseAdmin
+        .from("super_agent_wallets")
+        .select("balance")
+        .eq("super_agent_id", identity.id)
+        .maybeSingle();
+
+      if (walletReadError) {
+        // Fail CLOSED. Proceeding on a read error would create the held order
+        // this check exists to prevent.
+        console.error(
+          "[verify-payment] Could not read wallet for pre-flight check:",
+          walletReadError,
+        );
+        return new Response(
+          JSON.stringify({
+            error: "Could not verify your wallet balance. Please try again.",
+          }),
+          {
+            status: 503,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      const availableBalance = Number(walletRow?.balance || 0);
+      if (availableBalance < walletAmount) {
+        console.warn("[verify-payment] Wallet pre-flight rejected order:", {
+          user_id: identity.id,
+          balance: availableBalance,
+          required: walletAmount,
+        });
+        return new Response(
+          JSON.stringify({
+            error: "Insufficient wallet balance",
+            insufficient_balance: true,
+            balance: availableBalance,
+            required: walletAmount,
+            shortfall: Number((walletAmount - availableBalance).toFixed(2)),
+          }),
+          {
+            // 402 Payment Required. Distinct from 400 so the client can tell
+            // "you cannot afford this" from "your request was malformed".
+            status: 402,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
       const normalizedSize = String(package_size || "").trim();
       const orderNetwork = String(network || "Unknown").toUpperCase();
       const orderTitle = normalizedSize

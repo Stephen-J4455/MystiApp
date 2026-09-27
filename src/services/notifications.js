@@ -23,7 +23,6 @@ try {
     }),
   });
 } catch (error) {
-  console.log("expo-notifications not available (expected in Expo Go SDK 53+)");
 }
 
 /**
@@ -34,7 +33,6 @@ function isNotificationsAvailable() {
   // Check if we're in Expo Go
   const isExpoGo = Constants.appOwnership === "expo";
   if (isExpoGo) {
-    console.log("Running in Expo Go - notifications disabled");
     return false;
   }
   return Notifications !== null;
@@ -47,7 +45,6 @@ function isNotificationsAvailable() {
  */
 export async function registerForPushNotifications() {
   if (!isNotificationsAvailable()) {
-    console.log("Notifications not available - skipping registration");
     return null;
   }
 
@@ -87,22 +84,18 @@ export async function registerForPushNotifications() {
     }
 
     if (finalStatus !== "granted") {
-      console.log("Failed to get push notification permission");
       return null;
     }
 
     try {
       // Get FCM device push token (works in standalone builds)
-      console.log("Getting FCM device push token...");
       const deviceToken = await Notifications.getDevicePushTokenAsync();
       token = deviceToken.data;
-      console.log("FCM Push Token obtained:", token);
     } catch (error) {
       console.error("Error getting FCM push token:", error);
       return null;
     }
   } else {
-    console.log("Must use physical device for Push Notifications");
   }
 
   return token;
@@ -122,10 +115,8 @@ export async function savePushToken(token, userId) {
 
     // Determine token type (FCM or Expo)
     const tokenType = token.startsWith("ExponentPushToken") ? "expo" : "fcm";
-    console.log(`Token type detected: ${tokenType}`);
 
     // Save to user_push_tokens table
-    console.log("Saving push token to user_push_tokens...");
 
     // Build upsert data - try with token_type first
     const upsertData = {
@@ -146,9 +137,6 @@ export async function savePushToken(token, userId) {
 
     // If constraint doesn't exist, try without it
     if (error1?.message?.includes("constraint") || error1?.code === "42P10") {
-      console.log(
-        "Unique constraint not found, trying insert/update approach...",
-      );
 
       // Check if token exists
       const { data: existing } = await supabase
@@ -180,7 +168,6 @@ export async function savePushToken(token, userId) {
       tokenError?.message?.includes("token_type") ||
       tokenError?.code === "42703"
     ) {
-      console.log("token_type column not found, saving without it...");
       delete upsertData.token_type;
 
       const { error: error2 } = await supabase
@@ -219,7 +206,6 @@ export async function savePushToken(token, userId) {
       );
     }
 
-    console.log("Push token saved to user_push_tokens successfully");
     return true;
   } catch (error) {
     console.error("Error saving push token:", error);
@@ -238,14 +224,12 @@ export function setupNotificationListeners(
   onNotificationTapped,
 ) {
   if (!isNotificationsAvailable()) {
-    console.log("Notifications not available - listeners disabled");
     return { remove: () => {} };
   }
 
   // Listener for notifications received while app is in foreground
   const notificationListener = Notifications.addNotificationReceivedListener(
     (notification) => {
-      console.log("Notification received:", notification);
       if (onNotificationReceived) {
         onNotificationReceived(notification);
       }
@@ -255,7 +239,6 @@ export function setupNotificationListeners(
   // Listener for when user taps on notification
   const responseListener =
     Notifications.addNotificationResponseReceivedListener((response) => {
-      console.log("Notification tapped:", response);
       if (onNotificationTapped) {
         onNotificationTapped(response);
       }
@@ -278,7 +261,6 @@ export function setupNotificationListeners(
  */
 export async function sendLocalNotification(title, body, data = {}) {
   if (!isNotificationsAvailable()) {
-    console.log("Notifications not available - cannot send local notification");
     return;
   }
 

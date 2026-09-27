@@ -268,7 +268,7 @@ Deno.serve(async (req) => {
         identity.id,
       );
     }
-    if (!isSuperAgent(identity)) {
+    if (!identityIsSuperAgent(identity)) {
       return respond({ error: "Super Agent role required" }, 403);
     }
 

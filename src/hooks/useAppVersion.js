@@ -50,7 +50,6 @@ export const useAppVersion = () => {
       const versionData = Array.isArray(versionRows) ? versionRows[0] : null;
 
       if (!versionData) {
-        console.log("No app version record found for platform", platform);
         setCanEnterApp(true);
         setVersionChecked(true);
         return;
@@ -68,17 +67,8 @@ export const useAppVersion = () => {
         minimumVersion,
       );
 
-      console.log("App version check:", {
-        appVersion: APP_VERSION,
-        currentVersion,
-        minimumVersion,
-        platform,
-        needsUpdate,
-        isBelowMinimum,
-      });
 
       if (platform === "web") {
-        console.log("Web version check complete, allowing access");
         setCanEnterApp(true);
       } else if (platform === "android") {
         if (
@@ -86,7 +76,6 @@ export const useAppVersion = () => {
           (isUpdateRequired && needsUpdate) ||
           needsUpdate
         ) {
-          console.log("Android update needed, showing modal");
           setUpdateModal({
             visible: true,
             title: "Update Required",
@@ -97,7 +86,6 @@ export const useAppVersion = () => {
           });
           setCanEnterApp(false);
         } else {
-          console.log("No android update needed");
           setCanEnterApp(true);
         }
       } else {
