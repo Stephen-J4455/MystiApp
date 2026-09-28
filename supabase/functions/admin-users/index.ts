@@ -496,6 +496,9 @@ Deno.serve(async (req) => {
         delete nextMetadata.super_agent_id;
         delete nextMetadata.superAgentId;
         delete nextAppMetadata.super_agent_badge;
+        // A normal user has no role, and "no role" is how the app represents
+        // that - do not leave a stale one behind in app_metadata either.
+        delete nextAppMetadata.role;
       } else if (requestedRole === "sub_agent") {
         nextMetadata.role = "sub_agent";
         nextMetadata.super_agent_id = resolvedSuperAgentId;
@@ -511,6 +514,25 @@ Deno.serve(async (req) => {
         delete nextMetadata.superAgentId;
         nextAppMetadata.super_agent_badge = badge;
       }
+
+      // Mirror the role into `app_metadata` as well as `user_metadata`.
+      //
+      // The RLS read policies - `edge_function_logs_admin_read` (migration
+      // 20260926_007), and the admin legs in 20260926_006 / _008 / _009 -
+      // key on `(auth.jwt() -> 'app_metadata' ->> 'role')` ONLY. They cannot
+      // read `user_metadata` because that store is writable by the user
+      // itself via `supabase.auth.updateUser()`, so a policy built on it would
+      // be self-service privilege escalation. See migration 20260926_010
+      // `strip_user_metadata_rls.sql` for the full argument.
+      //
+      // Previously ONLY `user_metadata.role` was written, so no account ever
+      // carried a role in `app_metadata` and every one of those policies
+      // evaluated to false. The admin app reads `edge_function_logs` with the
+      // ANON key under the `authenticated` role, so it was silently denied:
+      // PostgREST answered 200 with `[]`, which the screen renders as "no
+      // activity". Role writes are a service-role operation with no
+      // cross-device push, so nothing else would ever fix it.
+      nextAppMetadata.role = requestedRole;
 
       const { data: updated, error: updateError } =
         await admin.auth.admin.updateUserById(targetUserId, {
