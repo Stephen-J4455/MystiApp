@@ -253,9 +253,13 @@ Deno.serve(async (req) => {
     if (!authorization)
       return respond({ error: "Missing authorization token" }, 401);
 
-    const authClient = createClient(url, anonKey, {
-      global: { headers: { Authorization: authorization } },
-    });
+    // No `authClient` here on purpose. There used to be a local
+    // `createClient(url, anonKey, { headers: { Authorization } })` used for a
+    // now-removed `auth.getUser()`; `resolveIdentity(getSupabaseClients(...))`
+    // builds its own clients, so the local was dead. It was also the fossil
+    // that made this handler read as though a `user` binding should still
+    // exist, which is how `user.id` survived the refactor and reached the
+    // wallet debit as a ReferenceError.
     const admin = createClient(url, serviceKey);
 
     // Role from `public.user_profiles`, not `user_metadata.role`. The old
@@ -277,6 +281,28 @@ Deno.serve(async (req) => {
     if (!identityIsSuperAgent(identity)) {
       return respond({ error: "Super Agent role required" }, 403);
     }
+
+    // Compatibility alias for the wallet calls further down.
+    //
+    // These originally read `user.id` from a local
+    // `const { data: { user } } = await authClient.auth.getUser()` that was
+    // removed when `resolveIdentity` was introduced - `resolveIdentity` calls
+    // `auth.getUser()` itself, so the extra call was redundant. The removal was
+    // correct; the two `p_super_agent_id: user.id` sites 250 lines below were
+    // left behind, and the retry threw
+    // `ReferenceError: user is not defined` at the DEBIT.
+    //
+    // Both fields are TOKEN-DERIVED by `resolveIdentity`, not from writable
+    // metadata, so the alias is not spoofable. It is provably the same value
+    // the old `user.id` held: the handler has already required
+    // `identityIsSuperAgent(identity)` and scoped the order with
+    // `.eq("super_agent_id", identity.id)`.
+    //
+    // Deleting the alias and inlining `identity.id` at both sites would also be
+    // correct and is arguably clearer; the alias is kept because it is the
+    // pattern already prescribed for this refactor across the other functions,
+    // and it makes a future third reference impossible to get wrong.
+    const user = { id: identity.id, email: identity.email };
 
     const { order_id: orderId } = await req.json();
     if (!orderId) return respond({ error: "order_id is required" }, 400);
