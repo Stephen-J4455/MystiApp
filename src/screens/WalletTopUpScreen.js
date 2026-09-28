@@ -21,6 +21,7 @@ import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { useNotification } from "../contexts/NotificationContext";
 import { fonts } from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
+import { retainsWallet } from "../lib/superAgent";
 import { WebView } from "react-native-webview";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { ThemedScreen, themedStyles } from "../components/ui";
@@ -157,6 +158,10 @@ export default function WalletTopUpScreen({ navigation }) {
   const [businessName, setBusinessName] = useState("");
   const [superAgentName, setSuperAgentName] = useState("");
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
+  // A demoted Super Agent who still owns a wallet row. They get a read-only
+  // view of their balance; funding stays blocked, because
+  // `verify-payment` will not let a non-super-agent spend it.
+  const [isFormerSuperAgent, setIsFormerSuperAgent] = useState(false);
   const [subaccountCode, setSubaccountCode] = useState(null);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
   const paymentCompletedRef = useRef(false);
@@ -365,7 +370,41 @@ export default function WalletTopUpScreen({ navigation }) {
       ).toLowerCase();
       const isSuperAgentRole =
         normalizedRole === "superagent" || normalizedRole === "super_agent";
+
+      // A demoted Super Agent keeps their wallet. `super_agent_wallets` is
+      // keyed on `super_agent_id` and its RLS is `super_agent_id =
+      // auth.uid()` with NO role term, so the balance is still theirs to read
+      // and re-reading it here shows it rather than hiding money they earned.
+      //
+      // The wallet row is fetched BEFORE the role gate below, because it is
+      // what decides whether there is anything to show.
+      const { data: wallet, error: walletError } = await supabase
+        .from("super_agent_wallets")
+        .select("super_agent_id, balance")
+        .eq("super_agent_id", user.id)
+        .maybeSingle();
+      if (walletError) {
+        console.error("Super Agent wallet fetch error:", walletError);
+      } else if (wallet) {
+        setCurrentBalance(wallet.balance || 0);
+      }
+
       if (!isSuperAgentRole) {
+        // Read-only fallback, NOT an early return. Bouncing straight to
+        // `goBack()` is what made the balance look like it had vanished: the
+        // row survived, the screen just refused to show it.
+        //
+        // Funding stays blocked, and deliberately so - a top-up credits a
+        // wallet whose only spender is the super agent role, and
+        // `verify-payment` will not let a sub-agent spend it. Letting a
+        // demoted account PAY money into a wallet they cannot use is worse
+        // than showing them the balance and saying why they cannot top up.
+        if (retainsWallet(user, wallet)) {
+          setIsSuperAgentUser(false);
+          setIsFormerSuperAgent(true);
+          return;
+        }
+
         showError(
           "Access denied",
           "Only Super Agents can fund an operational wallet.",
@@ -403,17 +442,6 @@ export default function WalletTopUpScreen({ navigation }) {
             subaccountError,
           );
         }
-      }
-
-      const { data: wallet, error: walletError } = await supabase
-        .from("super_agent_wallets")
-        .select("balance")
-        .eq("super_agent_id", user.id)
-        .maybeSingle();
-      if (walletError) {
-        console.error("Super Agent wallet fetch error:", walletError);
-      } else if (wallet) {
-        setCurrentBalance(wallet.balance || 0);
       }
     } catch (error) {
       console.error("Fetch user data err:", error);
@@ -548,7 +576,11 @@ export default function WalletTopUpScreen({ navigation }) {
         >
           <View style={styles.header}>
             <Text style={styles.title}>
-              {isSuperAgentUser ? "Super Agent Wallet" : "Wallet Top-up"}
+              {isFormerSuperAgent
+                ? "Wallet Balance"
+                : isSuperAgentUser
+                  ? "Super Agent Wallet"
+                  : "Wallet Top-up"}
             </Text>
             <Text style={styles.subtitle}>
               Add funds to your wallet to start serving customers
@@ -618,9 +650,16 @@ export default function WalletTopUpScreen({ navigation }) {
               </View>
             </View>
             <TouchableOpacity
-              style={[styles.payButton, !amount && styles.payButtonDisabled]}
+              style={[
+                styles.payButton,
+                (isFormerSuperAgent || !amount) && styles.payButtonDisabled,
+              ]}
               onPress={handleTopUp}
-              disabled={!amount || loading}
+              // A former super agent is READ ONLY. Disabling the button is the
+              // honest affordance: `verify-payment` would refuse the resulting
+              // order anyway, because the wallet-spend path is gated on
+              // `identity.role === "super_agent"`.
+              disabled={isFormerSuperAgent || !amount || loading}
               activeOpacity={0.8}
             >
               {loading ? (
@@ -629,10 +668,11 @@ export default function WalletTopUpScreen({ navigation }) {
                 <Text
                   style={[
                     styles.payButtonText,
-                    !amount && styles.payButtonTextDisabled,
+                    (isFormerSuperAgent || !amount) &&
+                      styles.payButtonTextDisabled,
                   ]}
                 >
-                  Proceed to Pay
+                  {isFormerSuperAgent ? "Top-up unavailable" : "Proceed to Pay"}
                 </Text>
               )}
             </TouchableOpacity>

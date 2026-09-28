@@ -46,6 +46,11 @@ export default function SuperAgentPaystackScreen({ navigation }) {
   const [subaccount, setSubaccount] = useState(null);
   const [verificationStatus, setVerificationStatus] = useState(null);
   const [verifying, setVerifying] = useState(false);
+  // A demoted Super Agent viewing their existing settlement account. Mutating
+  // controls are hidden; the server rejects them regardless, since
+  // `paystack-subaccount` requires the super agent role AND the Enterprise
+  // badge.
+  const [readOnly, setReadOnly] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -63,13 +68,37 @@ export default function SuperAgentPaystackScreen({ navigation }) {
         }
 
         if (!isSuperAgent(user)) {
-          navigation.replace("Home");
+          // A demoted Super Agent keeps their existing Paystack sub-account
+          // row; nothing deletes it on a role change. Rather than bouncing
+          // them Home - which makes the settlement account look like it was
+          // destroyed - show it READ ONLY.
+          //
+          // Every mutating action on this screen goes through
+          // `paystack-subaccount`, which requires BOTH the super agent role
+          // and the Enterprise badge server-side, so a read-only view here
+          // grants nothing. It only tells the owner where their money settles
+          // and who to contact to have it changed.
+          const { data: existing } = await supabase
+            .from("super_agent_paystack")
+            .select(
+              "subaccount_code, is_active, business_name, settlement_bank, account_number",
+            )
+            .eq("super_agent_id", user.id)
+            .maybeSingle();
+
+          if (!existing) {
+            navigation.replace("Home");
+            return;
+          }
+
+          setSubaccount(existing);
+          setReadOnly(true);
           return;
         }
         const badge = String(
-          user.user_metadata?.super_agent_badge ||
-            user.app_metadata?.super_agent_badge ||
-            "enterprise",
+          user.app_metadata?.super_agent_badge ||
+            user.user_metadata?.super_agent_badge ||
+            "",
         ).toLowerCase();
         if (badge !== "enterprise") {
           showError(
@@ -606,6 +635,24 @@ export default function SuperAgentPaystackScreen({ navigation }) {
               <Ionicons name="card-outline" size={24} color={c.mintDim} />
               <Text style={styles.summaryTitle}>Settlement Account</Text>
             </View>
+            {readOnly ? (
+              // Stated plainly, because a demoted Super Agent landing here
+              // would otherwise assume the account had been destroyed. It has
+              // not - the row is intact and still receiving settlements, it is
+              // simply no longer editable by this account.
+              <View style={styles.readOnlyBanner}>
+                <Ionicons
+                  name="lock-closed"
+                  size={16}
+                  color={c.textSecondary}
+                />
+                <Text style={styles.readOnlyText}>
+                  Read-only. This settlement account is still active, but
+                  changing it requires Super Agent access. Contact an
+                  administrator to have it updated.
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.verifySection}>
               <View style={styles.verifyInfo}>
                 {verificationStatus?.paystack_status === null ? (
@@ -1413,6 +1460,22 @@ const usePaystackStyles = (c, topInset = 0) => {
       borderRadius: 999,
     },
     saveButtonDisabled: { opacity: 0.55 },
+    readOnlyBanner: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 8,
+      padding: 12,
+      marginBottom: 12,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHover,
+    },
+    readOnlyText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 13,
+      lineHeight: 18,
+      color: c.textSecondary,
+    },
     saveButtonText: {
       fontFamily: fonts.bodyBold,
       fontSize: 15,
