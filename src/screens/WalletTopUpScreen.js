@@ -497,25 +497,41 @@ export default function WalletTopUpScreen({ navigation }) {
 
         // A SUB-AGENT can fund their super agent's wallet.
         //
-        // This is a real transfer of someone else's money, so the screen has to
-        // say so plainly rather than letting a generic "Top up" button imply the
-        // balance is theirs. `verify-wallet-topup` credits the resolved
-        // super agent, not the payer, and returns `funded_someone_else` so the
-        // confirmation can name who was funded.
+        // THIS CHECK MUST COME FIRST.
+        // ---------------------
+        // Since migrations 008 and 012, EVERY sub-agent has their own
+        // `super_agent_wallets` row (008 backfills it at balance 0, and 012
+        // seeds it from paid-in history). `super_agent_wallets` is keyed on
+        // `super_agent_id` with no role term, so a sub-agent is a row holder
+        // exactly like a super agent - which means `retainsWallet` is TRUE for
+        // them, and it was being read as "demoted ex-super-agent".
         //
-        // A demoted ex-super-agent is different: they have no super agent to
-        // fund (the ownership key is cleared on demotion), so funding would
-        // have no destination. They get the read-only balance view below.
-        if (retainsWallet(user, wallet)) {
-          setIsSuperAgentUser(false);
-          setIsFormerSuperAgent(true);
-          return;
-        }
-
+        // That is what made sub-agent top-up impossible: with this order, every
+        // sub-agent returned early as READ-ONLY, the Pay button was disabled,
+        // and the label read "Top-up unavailable" - the screen for a demoted
+        // account that genuinely has no Super Agent to fund. The ownership test
+        // is correct about the DATA and was answering the wrong QUESTION: a row
+        // is a precondition for funding your own wallet, and a sub-agent's row
+        // is a MIRROR, not a former super agent's leftover.
+        //
+        // Ordering by role rather than by row existence also matches the
+        // authority `verify-wallet-topup` enforces: it resolves
+        // `identity.superAgentId` from `user_profiles` and credits that owner.
         if (subAgentFundsSuperAgent) {
           setIsSuperAgentUser(false);
           setFundsSuperAgent(true);
           setSuperAgentName(assignedSuperAgentName || "your Super Agent");
+          return;
+        }
+
+        // A demoted ex-super-agent is different: they have no super agent to
+        // fund (the ownership key is cleared on demotion), so funding would
+        // have no destination. They keep the read-only balance view - which is
+        // correct for them precisely BECAUSE they hold a row with no owner to
+        // fund, and the check above has already ruled out the sub-agent case.
+        if (retainsWallet(user, wallet)) {
+          setIsSuperAgentUser(false);
+          setIsFormerSuperAgent(true);
           return;
         }
 

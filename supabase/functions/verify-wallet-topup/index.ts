@@ -370,10 +370,54 @@ Deno.serve(async (req) => {
     // self-assignable, so any authenticated user could claim Super Agent and
     // top up a wallet; and `user_metadata?.super_agent_id` could be re-pointed
     // at somebody else, mis-routing the settlement lookup below.
-    if (!identityIsSuperAgent(identity)) {
+    //
+    // WHO MAY FUND A WALLET
+    // ---------------------
+    // A Super Agent funds their own. A SUB-AGENT funds their assigned Super
+    // Agent's wallet, which is the whole point of the mirror model: their money
+    // becomes that agent's real balance and raises their own spending power by
+    // the same figure.
+    //
+    // This gate used to be `identityIsSuperAgent(identity)` alone, admitting
+    // only `role === "super_agent"`. That made EVERYTHING below it unreachable
+    // for a sub-agent - `isSelfFundedSuperAgent`, the
+    // `resolvedWalletOwnerId = identity.superAgentId` resolution, the double
+    // credit on both sides of the mirror, and `funded_someone_else` /
+    // `sub_agent_balance` in the response. The sub-agent implementation was
+    // complete and dead: every sub-agent top-up returned 403 before reaching
+    // it. It failed SILENTLY in the dashboard because this branch had no
+    // `console.error`, so the log simply stopped after the request line.
+    //
+    // A sub-agent with NO `super_agent_id` is still refused, and refused HERE
+    // rather than deeper in: that is the same case the handler returns 400 for
+    // ("no wallet for this top-up to fund"), and their money genuinely has no
+    // destination. Failing at the gate keeps that one answer in one place.
+    //
+    // A `normal_user` is still refused by omission: their `superAgentId` is
+    // null, so the new arm cannot be satisfied. This is the check that
+    // `WalletTopUpScreen` mirrors client-side, and the reason the client can
+    // hide the entry without being the thing that enforces it.
+    const canFundWallet =
+      identityIsSuperAgent(identity) ||
+      (identity.role === "sub_agent" && Boolean(identity.superAgentId));
+    if (!canFundWallet) {
+      console.error(
+        "[verify-wallet-topup] Refused: role may not fund a wallet",
+        {
+          user_id: identity.id,
+          role: identity.role,
+          // Present-but-null is the diagnostic: it means a sub_agent with no
+          // assignment, which is a data problem an admin can fix.
+          super_agent_id: identity.superAgentId,
+          profile_missing: identity.profileMissing,
+        },
+      );
       return new Response(
         JSON.stringify({
-          error: "Only Super Agents can fund an operational wallet",
+          error:
+            identity.role === "sub_agent"
+              ? "You are not assigned to a Super Agent, so there is no wallet for this top-up to fund."
+              : "Only Super Agents can fund an operational wallet",
         }),
         {
           status: 403,

@@ -15,6 +15,7 @@ import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { supabase } from "../lib/supabase";
+import { accountRole } from "../lib/superAgent";
 import { useNotification } from "../contexts/NotificationContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
@@ -657,44 +658,52 @@ export default function HomeScreen({ navigation }) {
     } = await supabase.auth.getUser();
     setUser(user);
 
-    const normalizedRole = (
-      user?.user_metadata?.role ||
-      user?.app_metadata?.role ||
-      ""
-    )
-      .toString()
-      .trim()
-      .toLowerCase();
-    const isSuperAgentUser =
-      normalizedRole === "superagent" || normalizedRole === "super_agent";
-    setIsSuperAgent(isSuperAgentUser);
-    // `normal_user` is the signup role and the value migration 20260928_003
-    // backfills. It has to be recognised explicitly: `isSuperAgentUser` is
-    // false for BOTH a normal user and a sub-agent, so the wallet gate cannot
-    // tell them apart from this flag's absence.
-    setIsNormalUser(
-      normalizedRole === "normal_user" ||
-        normalizedRole === "normaluser" ||
-        normalizedRole === "user",
-    );
+    // `accountRole` is the single role resolver (see lib/superAgent.js). It
+    // folds an ABSENT role into "NormalUser", which is the canonical
+    // representation of a normal user: `setUserRole` deletes both role keys
+    // when demoting rather than writing `normal_user`, and
+    // `handle_new_user()` (20260928_002) leaves a role-less signup as
+    // `normal_user` in the profile.
+    //
+    // The local check this replaces only matched the LITERAL strings, so for
+    // the most common normal user - the one carrying no role at all - it set
+    // `isNormalUser` to false, `hasWallet` went true, and the wallet card
+    // rendered the balance. The gate was right and its input was wrong.
+    const role = accountRole(user);
+    setIsSuperAgent(role === "SuperAgent");
+    // Explicit, so the wallet gate can DENY rather than infer. "Not a super
+    // agent" is the wrong test: a sub-agent is also not a super agent, and
+    // they legitimately DO get a wallet.
+    setIsNormalUser(role === "NormalUser");
     setIsEnterpriseSuperAgent(
-      !isSuperAgentUser ||
+      role !== "SuperAgent" ||
         String(
-          user?.user_metadata?.super_agent_badge ||
-            user?.app_metadata?.super_agent_badge ||
+          user?.app_metadata?.super_agent_badge ||
+            user?.user_metadata?.super_agent_badge ||
             "enterprise",
         ).toLowerCase() !== "pro",
     );
 
-    // Check if user is a sub-agent using role and assignment metadata.
+    // Check if user is a sub-agent using role or assignment metadata.
+    //
+    // `role` is the folded display value ("Agent" for a sub-agent), so this
+    // compares THAT rather than a lowercase copy of the raw metadata. It must
+    // read `role` and not a `normalizedRole` local: the local was removed
+    // when the resolution above moved to `accountRole`, and leaving the
+    // reference behind made every mount throw
+    // `ReferenceError: Property 'normalizedRole' doesn't exist` - caught by
+    // the `catch` below, which then silently forced `isAgent` to false, so
+    // every sub-agent and super agent loaded their transactions and ads as a
+    // NON-agent. The failure looked like missing orders rather than a crash.
     if (user) {
       try {
         const agentStatus =
-          normalizedRole === "agent" ||
-          normalizedRole === "sub_agent" ||
+          role === "Agent" ||
           Boolean(
             user.user_metadata?.super_agent_id ||
-            user.user_metadata?.superAgentId,
+            user.user_metadata?.superAgentId ||
+            user.app_metadata?.super_agent_id ||
+            user.app_metadata?.superAgentId,
           );
         setIsAgent(agentStatus);
 
@@ -725,41 +734,33 @@ export default function HomeScreen({ navigation }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user) {
-        const normalizedRole = (
-          user?.user_metadata?.role ||
-          user?.app_metadata?.role ||
-          ""
-        )
-          .toString()
-          .trim()
-          .toLowerCase();
-        const isSuperAgentUser =
-          normalizedRole === "superagent" || normalizedRole === "super_agent";
-        setIsSuperAgent(isSuperAgentUser);
-        // See the note on the first resolution above - a sub-agent and a normal
-        // user are both non-super-agents, so the wallet gate needs this told
-        // apart explicitly. Both paths must set it or a refresh can silently
-        // reset it to false and re-expose the hero.
-        setIsNormalUser(
-          normalizedRole === "normal_user" ||
-            normalizedRole === "normaluser" ||
-            normalizedRole === "user",
-        );
+        // Same single resolver as `getCurrentUser` - see the note there on why
+        // an absent role must fold to "NormalUser". Both paths must set these
+        // flags, or a refresh silently resets the wallet gate and re-exposes
+        // the hero.
+        const role = accountRole(user);
+        setIsSuperAgent(role === "SuperAgent");
+        setIsNormalUser(role === "NormalUser");
         setIsEnterpriseSuperAgent(
-          !isSuperAgentUser ||
+          role !== "SuperAgent" ||
             String(
-              user?.user_metadata?.super_agent_badge ||
-                user?.app_metadata?.super_agent_badge ||
+              user?.app_metadata?.super_agent_badge ||
+                user?.user_metadata?.super_agent_badge ||
                 "enterprise",
             ).toLowerCase() !== "pro",
         );
 
+        // A sub-agent is recognised by role OR by having an owner. `role` is
+        // the folded display value here, so the raw key is compared instead of
+        // a lowercase copy of the metadata - the same two literals the old
+        // inline check used.
         const agentStatus =
-          normalizedRole === "agent" ||
-          normalizedRole === "sub_agent" ||
+          role === "Agent" ||
           Boolean(
             user.user_metadata?.super_agent_id ||
-            user.user_metadata?.superAgentId,
+            user.user_metadata?.superAgentId ||
+            user.app_metadata?.super_agent_id ||
+            user.app_metadata?.superAgentId,
           );
         setIsAgent(agentStatus);
 
@@ -1236,13 +1237,23 @@ export default function HomeScreen({ navigation }) {
       tint: c.sky,
       onPress: () => navigation.navigate("AfaRegistration"),
     },
-    {
-      key: "topup",
-      icon: "wallet-outline",
-      label: "Wallet Top-up",
-      tint: c.mint,
-      onPress: () => navigation.navigate("WalletTopUp"),
-    },
+    // Hidden outright for a normal user, matching the hero card and the dock's
+    // More popup. Showing a "Wallet Top-up" entry to an account with no wallet
+    // is a dead tap: `WalletTopUpScreen` refuses them on mount with "Access
+    // denied" and navigates back, so the entry promised something the screen
+    // would not deliver. The screen's own guard stays in place - this is
+    // presentation, not authorization.
+    ...(isNormalUser
+      ? []
+      : [
+          {
+            key: "topup",
+            icon: "wallet-outline",
+            label: "Wallet Top-up",
+            tint: c.mint,
+            onPress: () => navigation.navigate("WalletTopUp"),
+          },
+        ]),
     {
       key: "settings",
       icon: "options-outline",

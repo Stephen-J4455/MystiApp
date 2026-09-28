@@ -21,6 +21,7 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
 import { uniqueTopic } from "./src/lib/realtime";
+import { accountRole } from "./src/lib/superAgent";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
 import { useProfileRoleSubscription } from "./src/hooks/useProfileRoleSubscription";
@@ -64,32 +65,26 @@ SplashScreen.preventAutoHideAsync().catch(() => {
 
 const Stack = createNativeStackNavigator();
 
-const normalizeUserRole = (user) => {
-  const role = (user?.user_metadata?.role || user?.app_metadata?.role || "")
-    .toString()
-    .trim();
-
-  if (!role) return null;
-
-  const normalized = role.toLowerCase();
-  if (normalized === "admin") return "Admin";
-  if (normalized === "superagent" || normalized === "super_agent")
-    return "SuperAgent";
-  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
-  // `normal_user` is the role assigned at signup and by the repair migration
-  // 20260928_003. It was MISSING here, so a normal user normalised to the raw
-  // string "normal_user" rather than a known value - which meant `userRole`
-  // matched no branch at all, and any gate phrased as "not a super agent"
-  // silently had a third, unlabelled category to account for.
-  if (
-    normalized === "user" ||
-    normalized === "normal_user" ||
-    normalized === "normaluser"
-  )
-    return "NormalUser";
-
-  return role;
-};
+/**
+ * The signed-in user's role, folding a MISSING role into "NormalUser".
+ *
+ * The local `normalizeUserRole` this replaces returned `null` for an absent
+ * role, which is the honest reading of the metadata in isolation. But "no role
+ * key in either store" IS the canonical representation of a normal user here:
+ * `admin-users.setUserRole` DELETES both role keys when demoting rather than
+ * writing `normal_user`, and `handle_new_user()` (20260928_002) leaves a
+ * role-less signup with `user_profiles.role = 'normal_user'`. So the single
+ * most common kind of normal user is the one with NO role to read - which made
+ * every `userRole === "NormalUser"` wallet veto evaluate false, i.e. fail OPEN,
+ * and put the wallet card in front of exactly the accounts it was written to
+ * protect.
+ *
+ * `accountRole` in lib/superAgent.js is now the single implementation, so the
+ * two copies cannot drift. The `null` is still preserved for "no user at all",
+ * which must stay distinguishable from "signed in as a normal user" - folding
+ * that into `NormalUser` would make the signed-out state look like a role.
+ */
+const resolveAccountRole = (user) => (user ? accountRole(user) : null);
 
 /**
  * Hosts the bottom dock. Needs the theme (for the palette) and the visibility
@@ -210,7 +205,7 @@ export default function App() {
           // without this the role stays null for the first frames and the dock
           // renders its reduced (normal-user) menu until something else
           // happens to trigger the listener.
-          setUserRole(normalizeUserRole(session?.user ?? null));
+          setUserRole(resolveAccountRole(session?.user ?? null));
           setAuthInitialized(true);
         }
 
@@ -226,7 +221,7 @@ export default function App() {
             if (mounted) {
               const refreshedUser = refreshData.session.user;
               setUser(refreshedUser);
-              setUserRole(normalizeUserRole(refreshedUser));
+              setUserRole(resolveAccountRole(refreshedUser));
             }
           }
         }
@@ -293,7 +288,7 @@ export default function App() {
       if (!mounted) return;
 
       const nextUser = session?.user ?? null;
-      const nextRole = normalizeUserRole(nextUser);
+      const nextRole = resolveAccountRole(nextUser);
       setUser(nextUser);
       setUserRole(nextRole);
 
@@ -305,7 +300,7 @@ export default function App() {
 
       // Check agent status when user changes. Sub-agents no longer use wallets.
       if (session?.user) {
-        const nextRole = normalizeUserRole(session.user);
+        const nextRole = resolveAccountRole(session.user);
         if (mounted) {
           setUserRole(nextRole);
           setIsAgent(nextRole === "Agent");
@@ -355,7 +350,7 @@ export default function App() {
       .then(({ data, error }) => {
         if (error || !data?.session) return;
         setUser(data.session.user);
-        setUserRole(normalizeUserRole(data.session.user));
+        setUserRole(resolveAccountRole(data.session.user));
       })
       .catch((refreshError) => {
         // Not fatal: the cached session is valid until it expires, and the
@@ -472,7 +467,7 @@ export default function App() {
           if (!subscribed || error || !data?.session) return;
           const refreshedUser = data.session.user;
           setUser(refreshedUser);
-          setUserRole(normalizeUserRole(refreshedUser));
+          setUserRole(resolveAccountRole(refreshedUser));
         })
         .catch((refreshError) => {
           // A failed refresh is not fatal - the cached session is still valid
