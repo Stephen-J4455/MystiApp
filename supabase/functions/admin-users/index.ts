@@ -541,27 +541,39 @@ Deno.serve(async (req) => {
         // Clearing every role alias leaves a normal user, which the app reads
         // as "no role". Stale badge / assignment keys would keep granting
         // Super Agent behaviour, so remove them too.
-        delete nextMetadata.role;
-        delete nextMetadata.super_agent_badge;
-        delete nextMetadata.super_agent_id;
-        delete nextMetadata.superAgentId;
-        delete nextAppMetadata.super_agent_badge;
+        //
+        // Set to `null`, NOT `delete`d. GoTrue MERGES the metadata object it is
+        // given (JSON merge-patch), so a key that is merely absent from the
+        // patch is never sent and the stored value survives untouched. A
+        // `delete nextMetadata.x` looked correct and silently did nothing,
+        // which is how a demoted Enterprise super agent kept logging in as
+        // "Super Agent - Enterprise": the badge was still in both metadata
+        // stores and the Enterprise gates in five functions read it.
+        //
+        // An explicit JSON `null` IS transmitted by merge-patch, which removes
+        // the key. It also reads as "no badge" to every consumer, because they
+        // all coerce with `|| ""` or `String(x || "")`.
+        nextMetadata.role = null;
+        nextMetadata.super_agent_badge = null;
+        nextMetadata.super_agent_id = null;
+        nextMetadata.superAgentId = null;
+        nextAppMetadata.super_agent_badge = null;
         // A normal user has no role, and "no role" is how the app represents
         // that - do not leave a stale one behind in app_metadata either.
-        delete nextAppMetadata.role;
+        nextAppMetadata.role = null;
       } else if (requestedRole === "sub_agent") {
         nextMetadata.role = "sub_agent";
         nextMetadata.super_agent_id = resolvedSuperAgentId;
-        delete nextMetadata.superAgentId;
+        nextMetadata.superAgentId = null;
         // An Agent is not a Super Agent, so drop any badge.
-        delete nextMetadata.super_agent_badge;
-        delete nextAppMetadata.super_agent_badge;
+        nextMetadata.super_agent_badge = null;
+        nextAppMetadata.super_agent_badge = null;
       } else {
         nextMetadata.role = "super_agent";
         nextMetadata.super_agent_badge = badge;
         // A Super Agent answers to the platform, not to another one.
-        delete nextMetadata.super_agent_id;
-        delete nextMetadata.superAgentId;
+        nextMetadata.super_agent_id = null;
+        nextMetadata.superAgentId = null;
         nextAppMetadata.super_agent_badge = badge;
       }
 
@@ -583,14 +595,12 @@ Deno.serve(async (req) => {
       // activity". Role writes are a service-role operation with no
       // cross-device push, so nothing else would ever fix it.
       //
-      // For normal_user the key is DELETED, not set to "normal_user": no
-      // policy grants on the literal string, and an explicit value is what a
-      // later promotion would otherwise have to overwrite. Assigning
-      // unconditionally here would also have undone the `delete` in the
+      // For normal_user the key is set to `null`, not "normal_user": no policy
+      // grants on the literal string, and an explicit value is what a later
+      // promotion would otherwise have to overwrite. Assigning
+      // unconditionally here would also have undone the `null` in the
       // normal_user branch above, since this runs after it.
-      if (requestedRole === "normal_user") {
-        delete nextAppMetadata.role;
-      } else {
+      if (requestedRole !== "normal_user") {
         nextAppMetadata.role = requestedRole;
       }
 
