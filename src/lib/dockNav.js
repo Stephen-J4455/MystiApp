@@ -68,6 +68,8 @@ export const PRIMARY_TABS = [
  *                Home with "Enterprise access", so exposing the entry in the
  *                dock just produced a dead tap that looked like the dock
  *                "reopening" the previous screen.
+ *   wallet     : anyone who OWNS a `super_agent_wallets` row, whatever their
+ *                role. See the note on the Wallet entry below.
  */
 export const MORE_ITEMS = [
   {
@@ -76,12 +78,23 @@ export const MORE_ITEMS = [
     caption: "Top up balance",
     icon: "wallet-outline",
     activeIcon: "wallet",
-    // Only super agents hold an operational wallet. `agent_wallet` is a
-    // legacy table for sub-agents that is no longer funded or read anywhere -
-    // sub-agents pay per order, not from a balance. `WalletTopUpScreen`
-    // already hard-blocks non-super-agents with "Only Super Agents can fund
-    // an operational wallet", so listing it here was a guaranteed dead tap.
-    requires: "superAgent",
+    // Gated on OWNERSHIP, not on role.
+    //
+    // A sub-agent demoted from Super Agent keeps their `super_agent_wallets`
+    // row - that table is keyed on `super_agent_id` and its RLS is
+    // `super_agent_id = auth.uid()` with no role term, so the balance is still
+    // theirs to read. Nothing deletes the row on a role change, which is the
+    // whole point: they earned it.
+    //
+    // This entry used to be `superAgent`, which hid the balance from exactly
+    // the people who still had money sitting in it. `WalletTopUpScreen` now
+    // shows those accounts a READ-ONLY view and blocks funding with
+    // "Top-up unavailable", so this is not a dead tap - it is the one place
+    // they can see the balance.
+    //
+    // `moreItemsFor` resolves this against the `ownsWallet` flag the caller
+    // passes, which comes from actually reading the wallet row.
+    requires: "wallet",
   },
   {
     routeName: "Notifications",
@@ -153,24 +166,38 @@ export const MORE_ITEMS = [
  *   - Enterprise Super Agent: the full suite.
  *   - Pro Super Agent:        Insights, Wallet, plus the universal items. No
  *                             Tiers, Offers, Agents or Paystack.
- *   - Everyone else (normal
- *     users, sub-agents):    Alerts, AFA and Privacy only. No wallet - a
- *                             sub-agent has no funded balance to top up
- *                             (`agent_wallet` is legacy and unused), and a
- *                             normal user has no wallet at all.
+ *   - Sub-agent who was
+ *     demoted from Super
+ *     Agent and still owns a
+ *     wallet row:             Wallet (read-only), plus the universal items.
+ *   - Everyone else:          Alerts, AFA and Privacy only. A normal user has
+ *                             no wallet at all, and a sub-agent who was never
+ *                             a super agent has none either.
  *
  * `isSuperAgent` here is the ACCOUNT TYPE, not the badge - a Pro Super Agent
  * still owns sub-agents, wallet and analytics, just not the management suite.
+ *
+ * `ownsWallet` is deliberately a separate input rather than being derived from
+ * `isSuperAgent`. Ownership of a `super_agent_wallets` row is a property of
+ * the DATA, not of the role: a demoted ex-super-agent has the row and the
+ * role, and a promoted super agent may have no row yet. Only the caller knows
+ * the answer, because it is the caller that reads the row.
  */
 export const moreItemsFor = ({
   isSuperAgent = false,
   isEnterprise = false,
+  ownsWallet = false,
 } = {}) =>
   MORE_ITEMS.filter((item) => {
     if (item.requires === "enterprise") {
       return Boolean(isSuperAgent) && Boolean(isEnterprise);
     }
     if (item.requires === "superAgent") return Boolean(isSuperAgent);
+    // Ownership OR role: a current super agent always keeps the entry, even
+    // before their wallet row exists, so the top-up flow can create it.
+    if (item.requires === "wallet") {
+      return Boolean(isSuperAgent) || Boolean(ownsWallet);
+    }
     return true;
   });
 

@@ -61,7 +61,11 @@ export default function DockTabBar({
   // previous screen. Filtered here rather than gated on tap.
   const moreItems = useMemo(
     () => moreItemsFor(account || {}),
-    [account?.isSuperAgent, account?.isEnterprise],
+    // `ownsWallet` is part of the input and MUST be listed. Leaving it out
+    // would let the memo return a stale menu after a first top-up creates the
+    // wallet row, or after a demotion - the Wallet entry would simply not
+    // appear until something else forced a re-render.
+    [account?.isSuperAgent, account?.isEnterprise, account?.ownsWallet],
   );
 
   const popupAnim = useRef(new Animated.Value(0)).current;

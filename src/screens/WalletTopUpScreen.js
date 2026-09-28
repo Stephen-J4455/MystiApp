@@ -162,6 +162,11 @@ export default function WalletTopUpScreen({ navigation }) {
   // view of their balance; funding stays blocked, because
   // `verify-payment` will not let a non-super-agent spend it.
   const [isFormerSuperAgent, setIsFormerSuperAgent] = useState(false);
+  // A SUB-AGENT funding their super agent's wallet. Distinct from
+  // `isSuperAgentUser`: this account does NOT own the wallet, cannot spend
+  // from it, and is spending real money into someone else's balance - so the
+  // screen says so instead of showing a generic "Top up".
+  const [fundsSuperAgent, setFundsSuperAgent] = useState(false);
   const [subaccountCode, setSubaccountCode] = useState(null);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
   const paymentCompletedRef = useRef(false);
@@ -261,21 +266,59 @@ export default function WalletTopUpScreen({ navigation }) {
           const charge = Number(result.charge_amount || 0);
           const gross = Number(result.gross_amount || 0);
           const percent = Number(result.charge_percent || 0);
+
+          // A sub-agent's top-up is credited to their SUPER AGENT's wallet as
+          // real money, AND raises the sub-agent's own available balance by the
+          // same figure - it is their spending power, not a second pot.
+          //
+          // So this is no longer "their money went to someone else and you got
+          // nothing". It is: your payment funds their wallet, and your own
+          // available balance rises by the same amount. `new_balance` is the
+          // SUPER AGENT's real balance and must never be written into this
+          // screen's balance; `sub_agent_balance` is the payer's own.
+          const creditedToSuperAgent = Boolean(result.funded_someone_else);
+          const balanceLine =
+            charge > 0
+              ? `Ghc ${credited.toFixed(2)} after a ${percent}% Paystack charge of Ghc ${charge.toFixed(2)} (Ghc ${gross.toFixed(2)} paid).`
+              : `Ghc ${credited.toFixed(2)}`;
+
           showSuccess(
             "Top-up Successful!",
-            charge > 0
-              ? `Your wallet has been credited with Ghc ${credited.toFixed(2)} after a ${percent}% Paystack charge of Ghc ${charge.toFixed(2)} (Ghc ${gross.toFixed(2)} paid).`
-              : `Your wallet has been credited with Ghc ${credited.toFixed(2)}`,
+            creditedToSuperAgent
+              ? `Your available balance rose by ${balanceLine} ${superAgentName || "Your Super Agent"}'s wallet was funded with the same amount.`
+              : `Your wallet has been credited with ${balanceLine}`,
           );
-          if (result.new_balance !== undefined)
+          // The payer's own balance, from `sub_agent_balance`. Falls back to a
+          // refresh-free no-op rather than the super agent's figure, which
+          // would display another person's money as the payer's.
+          if (
+            creditedToSuperAgent &&
+            result.sub_agent_balance !== null &&
+            result.sub_agent_balance !== undefined
+          ) {
+            setCurrentBalance(Number(result.sub_agent_balance));
+          } else if (
+            !creditedToSuperAgent &&
+            result.new_balance !== undefined
+          ) {
             setCurrentBalance(result.new_balance);
+          }
           setAmount("");
           setCurrentReference("");
           setBusinessName("");
         } else if (result && result.already_processed) {
           // Edge function already credited this reference; just refresh UI.
-          if (result.new_balance !== undefined)
+          // Same ownership rule: only overwrite a balance this account owns.
+          if (result.funded_someone_else) {
+            if (
+              result.sub_agent_balance !== null &&
+              result.sub_agent_balance !== undefined
+            ) {
+              setCurrentBalance(Number(result.sub_agent_balance));
+            }
+          } else if (result.new_balance !== undefined) {
             setCurrentBalance(result.new_balance);
+          }
           setAmount("");
           setCurrentReference("");
           setBusinessName("");
@@ -290,7 +333,7 @@ export default function WalletTopUpScreen({ navigation }) {
         showError("Verification Error", "Please contact support");
       }
     },
-    [currentReference, amount, showError, showSuccess],
+    [currentReference, amount, superAgentName, showError, showSuccess],
   );
 
   const handlePaymentClose = useCallback(() => {
@@ -389,19 +432,58 @@ export default function WalletTopUpScreen({ navigation }) {
         setCurrentBalance(wallet.balance || 0);
       }
 
+      // Resolve the funding target from `public.user_profiles`, NOT from
+      // `user_metadata`. `user_metadata.role` is writable by the account owner
+      // via `auth.updateUser({ data: { role: 'super_agent' } })`, so reading
+      // it to decide "whose wallet does this money land in" would let anyone
+      // nominate a wallet they have no relationship to. The edge function reads
+      // the same table with the same precedence, so this is a display-only
+      // mirror of an authority that is enforced server-side either way.
+      const { data: profile, error: profileError } = await supabase
+        .from("user_profiles")
+        .select("role, super_agent_id, full_name")
+        .eq("id", user.id)
+        .maybeSingle();
+      if (profileError) {
+        console.error("Profile fetch error:", profileError);
+      }
+
+      const profileRole = String(profile?.role || "").toLowerCase();
+      const assignedSuperAgentId = profile?.super_agent_id || null;
+      const assignedSuperAgentName = profile?.full_name || "";
+
+      // A sub-agent funds their super agent ONLY when the server-authoritative
+      // profile says so. `profileError` fails closed: an unreadable profile
+      // leaves both flags false, so the gate below refuses rather than
+      // guessing a destination for the money.
+      const subAgentFundsSuperAgent =
+        !isSuperAgentRole &&
+        (profileRole === "sub_agent" || profileRole === "subagent") &&
+        Boolean(assignedSuperAgentId) &&
+        assignedSuperAgentId !== user.id;
+
       if (!isSuperAgentRole) {
-        // Read-only fallback, NOT an early return. Bouncing straight to
-        // `goBack()` is what made the balance look like it had vanished: the
-        // row survived, the screen just refused to show it.
+        // A SUB-AGENT can fund their super agent's wallet.
         //
-        // Funding stays blocked, and deliberately so - a top-up credits a
-        // wallet whose only spender is the super agent role, and
-        // `verify-payment` will not let a sub-agent spend it. Letting a
-        // demoted account PAY money into a wallet they cannot use is worse
-        // than showing them the balance and saying why they cannot top up.
+        // This is a real transfer of someone else's money, so the screen has to
+        // say so plainly rather than letting a generic "Top up" button imply the
+        // balance is theirs. `verify-wallet-topup` credits the resolved
+        // super agent, not the payer, and returns `funded_someone_else` so the
+        // confirmation can name who was funded.
+        //
+        // A demoted ex-super-agent is different: they have no super agent to
+        // fund (the ownership key is cleared on demotion), so funding would
+        // have no destination. They get the read-only balance view below.
         if (retainsWallet(user, wallet)) {
           setIsSuperAgentUser(false);
           setIsFormerSuperAgent(true);
+          return;
+        }
+
+        if (subAgentFundsSuperAgent) {
+          setIsSuperAgentUser(false);
+          setFundsSuperAgent(true);
+          setSuperAgentName(assignedSuperAgentName || "your Super Agent");
           return;
         }
 
@@ -583,15 +665,44 @@ export default function WalletTopUpScreen({ navigation }) {
                   : "Wallet Top-up"}
             </Text>
             <Text style={styles.subtitle}>
-              Add funds to your wallet to start serving customers
+              {isFormerSuperAgent
+                ? "Your wallet is still here, but this account can no longer fund it"
+                : fundsSuperAgent
+                  ? `Topping up. Ghc ${currentBalance.toFixed(2)} is your available balance, funded by your payments and spent on your orders.`
+                  : "Add funds to your wallet to start serving customers"}
             </Text>
           </View>
-          <View style={styles.balanceCard}>
-            <Text style={styles.balanceLabel}>Current Balance</Text>
-            <Text style={styles.balanceAmount}>
-              Ghc {currentBalance.toFixed(2)}
-            </Text>
-          </View>
+          {fundsSuperAgent ? (
+            // A SUB-AGENT NOW HAS A REAL BALANCE.
+            //
+            // It is a mirror of the spending power their payments bought,
+            // funded against their super agent's money - not money of their own,
+            // and not withdrawable. It is debited on every wallet order, which
+            // is why it can legitimately be lower than what they have paid in.
+            //
+            // The previous version of this card claimed they held no balance at
+            // all and rendered nothing, which is what made the wallet read as
+            // "missing". It also has to be labelled as a limit rather than a
+            // balance, because a super agent topping up more does NOT raise it -
+            // only the sub-agent's own payments do.
+            <View style={styles.balanceCard}>
+              <Text style={styles.balanceLabel}>Your available balance</Text>
+              <Text style={styles.balanceAmount}>
+                Ghc {currentBalance.toFixed(2)}
+              </Text>
+              <Text style={styles.balanceHint}>
+                Funded by your own top-ups and spent on your orders. Not
+                withdrawable, and not raised by money your Super Agent adds.
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.balanceCard}>
+              <Text style={styles.balanceLabel}>Current Balance</Text>
+              <Text style={styles.balanceAmount}>
+                Ghc {currentBalance.toFixed(2)}
+              </Text>
+            </View>
+          )}
           <View>
             <Text style={styles.sectionTitle}>Quick Select</Text>
             <View style={styles.amountGrid}>
@@ -672,10 +783,23 @@ export default function WalletTopUpScreen({ navigation }) {
                       styles.payButtonTextDisabled,
                   ]}
                 >
-                  {isFormerSuperAgent ? "Top-up unavailable" : "Proceed to Pay"}
+                  {isFormerSuperAgent
+                    ? "Top-up unavailable"
+                    : fundsSuperAgent
+                      ? "Top up"
+                      : "Proceed to Pay"}
                 </Text>
               )}
             </TouchableOpacity>
+            {fundsSuperAgent && (
+              <Text style={[styles.balanceHint, { marginTop: 10 }]}>
+                The amount you pay is credited to{" "}
+                {superAgentName || "your Super Agent"}'s wallet as their real
+                money, and raises your available balance by the same figure. The
+                1.95% charge applies to this top-up only — orders placed from
+                your balance are not charged again.
+              </Text>
+            )}
           </View>
         </KeyboardAwareScrollView>
         {Platform.OS !== "web" && (
@@ -861,6 +985,17 @@ const useWalletTopUpStyles = (c, topInset = 0) => {
       fontFamily: fonts.display,
       fontSize: 36,
       color: c.textPrimary,
+    },
+    // Explains what a sub-agent's mirrored balance IS, and specifically that it
+    // is a limit rather than withdrawable money. Without this the number is
+    // indistinguishable from a super agent's, and the natural assumption is
+    // that their own money is sitting in it.
+    balanceHint: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      lineHeight: 19,
+      color: c.textSecondary,
+      marginTop: 12,
     },
 
     sectionTitle: {

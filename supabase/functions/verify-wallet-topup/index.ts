@@ -254,6 +254,21 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type",
 };
 
+// `wallet_topups` columns that a database may not have yet, because the
+// migration that adds them has not been applied. None of them are required for
+// the credit to be correct - they are provenance only - so a top-up whose
+// payment already succeeded must never 500 just because bookkeeping is
+// missing. The credit itself is idempotent via the RPC's p_reference.
+const OPTIONAL_TOPUP_COLUMNS = [
+  "paystack_subaccount_code",
+  "charge_percent",
+  "charge_amount",
+  "gross_amount",
+  // migration 20260928_007 - records who paid and whose wallet was funded
+  "funder_user_id",
+  "wallet_owner_id",
+];
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -595,22 +610,73 @@ Deno.serve(async (req) => {
       charge_percent: topUpChargePercent,
     };
 
-    // The payer IS the super agent funding their own wallet, so their own id is
-    // the wallet owner. Read from the authoritative profile rather than
-    // `user_metadata.super_agent_id`, which the user could rewrite to point at
-    // a different agent and mis-route the settlement reconciliation.
-    let resolvedSuperAgentId: string | null = identity.superAgentId ?? user.id;
+    // WHO FUNDS WHOSE WALLET
+    // -----------------------
+    // A Super Agent funding their own wallet owns it, so owner == payer. A
+    // SUB-AGENT's top-up funds the SUPER AGENT they report to: the sub-agent
+    // has no spendable wallet of their own, because `verify-payment` debits by
+    // `p_super_agent_id => user.id` and their own row would never be touched.
+    //
+    // The previous code computed `resolvedSuperAgentId` here and then ignored
+    // it, crediting `user.id` unconditionally. So a sub-agent's money settled
+    // to their super agent's Paystack SUB-ACCOUNT but was credited to a wallet
+    // row keyed on the sub-agent - a row no order ever debits. Reconciling a
+    // settlement against that is how money goes missing at month end.
+    //
+    // Ownership comes from `user_profiles.super_agent_id`, the AUTHORITATIVE
+    // column. `user_metadata.super_agent_id` is writable by the account itself
+    // via `auth.updateUser()`, so reading it would let a sub-agent name ANY
+    // super agent as the destination of their money.
+    const isSelfFundedSuperAgent = identity.role === "super_agent";
+    // Fail closed for a sub-agent with no super agent assigned: their money
+    // has no legitimate destination, and guessing one would credit a stranger.
+    const resolvedWalletOwnerId: string | null = isSelfFundedSuperAgent
+      ? user.id
+      : identity.superAgentId;
+
+    if (!isSelfFundedSuperAgent && !resolvedWalletOwnerId) {
+      console.error(
+        "[verify-wallet-topup] Sub-agent top-up with no super agent assigned; refusing to credit an unknown wallet:",
+        { userId: user.id, reference },
+      );
+      return new Response(
+        JSON.stringify({
+          error:
+            "Your account is not assigned to a Super Agent, so there is no wallet for this top-up to fund. Contact support.",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    // Settlement routing. A self-funded super agent's money already arrived at
+    // their own sub-account (Paystack resolved it from the token), so that
+    // value wins. A sub-agent's payment is charged to the PLATFORM main
+    // account, and the super agent's sub-account is only recorded for
+    // reconciliation.
     let resolvedSubaccountCode: string | null =
       verifyData.data?.subaccount?.subaccount_code ||
       verifyData.data?.subaccount_code ||
       null;
 
-    if (resolvedSuperAgentId && !resolvedSubaccountCode) {
+    // Stamped onto the top-up row so the credit, the settlement record and the
+    // analytics can never disagree about who funded what. Requires migration
+    // 20260928_007; tolerated as absent below.
+    updateData.funder_user_id = user.id;
+    updateData.wallet_owner_id = resolvedWalletOwnerId;
+
+    if (
+      isSelfFundedSuperAgent &&
+      resolvedWalletOwnerId &&
+      !resolvedSubaccountCode
+    ) {
       try {
         const { data: subaccountRow } = await supabaseAdmin
           .from("super_agent_paystack")
           .select("subaccount_code, is_active")
-          .eq("super_agent_id", resolvedSuperAgentId)
+          .eq("super_agent_id", resolvedWalletOwnerId)
           .maybeSingle();
         if (subaccountRow?.is_active && subaccountRow.subaccount_code) {
           resolvedSubaccountCode = subaccountRow.subaccount_code;
@@ -627,83 +693,54 @@ Deno.serve(async (req) => {
       updateData.paystack_subaccount_code = resolvedSubaccountCode;
     }
 
-    const { error: updateError } = await supabaseAdmin
-      .from("wallet_topups")
-      .update(updateData)
-      .eq("reference", reference);
-
-    if (updateError) {
+    {
       // Tolerate a database that hasn't run a migration yet by retrying
       // without the columns it is missing.
       //
-      // `paystack_subaccount_code` (migration 004) and the three charge
-      // snapshot columns (migration 20260927_003) are both optional here. The
-      // previous check only recognised the subaccount column, so on a database
-      // missing the newer ones the retry still carried them and failed the same
-      // way - the top-up then 500'd even though the payment had succeeded. The
-      // offending columns are now stripped from the error text generically, so
-      // this keeps working as columns are added.
-      if (updateError.code === "42703") {
+      // `paystack_subaccount_code` (migration 004), the three charge snapshot
+      // columns (migration 20260927_003) and the two owner columns
+      // (migration 20260928_007) are all optional here. The previous check
+      // only recognised the subaccount column, so on a database missing the
+      // newer ones the retry still carried them and failed the same way - the
+      // top-up then 500'd even though the payment had succeeded. The offending
+      // columns are now stripped from the error text generically, so this keeps
+      // working as columns are added.
+      //
+      // This is a LOOP, not a single retry: Postgres reports one missing column
+      // per error, so a database several migrations behind needs several
+      // passes. A single retry stripped one column, found the next one missing,
+      // and gave up - 500 after a successful payment. Every pass removes one
+      // entry from a fixed list, so it cannot loop forever.
+      let updateError: { code?: string; message?: string } | null = null;
+      for (;;) {
+        const attempt = await supabaseAdmin
+          .from("wallet_topups")
+          .update(updateData)
+          .eq("reference", reference);
+        updateError = attempt.error;
+        if (!updateError || updateError.code !== "42703") break;
+
         const missingColumn =
           /column\s+"?(\w+)"?\s+of relation\s+"?wallet_topups"?\s+does not exist/i.exec(
             updateError.message || "",
           )?.[1] ||
-          /paystack_subaccount_code|charge_percent|charge_amount|gross_amount/.exec(
+          /paystack_subaccount_code|charge_percent|charge_amount|gross_amount|funder_user_id|wallet_owner_id/.exec(
             updateError.message || "",
           )?.[0];
 
-        if (missingColumn) {
-          // Not a wallet_topups column: some other constraint, so retrying
-          // without a field cannot help.
-          if (
-            missingColumn !== "paystack_subaccount_code" &&
-            !["charge_percent", "charge_amount", "gross_amount"].includes(
-              missingColumn,
-            )
-          ) {
-            console.error("Failed to update wallet_topups:", updateError);
-            return new Response(
-              JSON.stringify({
-                error: "Failed to update wallet topup",
-                details: updateError,
-              }),
-              {
-                status: 500,
-                headers: {
-                  ...corsHeaders,
-                  "Content-Type": "application/json",
-                },
-              },
-            );
-          }
-
-          delete updateData[missingColumn];
-          console.warn(
-            `[verify-wallet-topup] Column "${missingColumn}" is absent; retrying without it. Apply the pending migration.`,
-          );
-
-          const { error: retryError } = await supabaseAdmin
-            .from("wallet_topups")
-            .update(updateData)
-            .eq("reference", reference);
-          if (retryError) {
-            console.error(
-              `Failed to update wallet_topups (without ${missingColumn}):`,
-              retryError,
-            );
-            return new Response(
-              JSON.stringify({
-                error: "Failed to update wallet topup",
-                details: retryError,
-              }),
-              {
-                status: 500,
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
-              },
-            );
-          }
+        // A 42703 naming no column we recognise is some other missing
+        // relation/column, and retrying without a field cannot help.
+        if (!missingColumn || !OPTIONAL_TOPUP_COLUMNS.includes(missingColumn)) {
+          break;
         }
-      } else {
+
+        delete updateData[missingColumn];
+        console.warn(
+          `[verify-wallet-topup] Column "${missingColumn}" is absent; retrying without it. Apply the pending migration.`,
+        );
+      }
+
+      if (updateError) {
         console.error("Failed to update wallet_topups:", updateError);
         return new Response(
           JSON.stringify({
@@ -719,50 +756,160 @@ Deno.serve(async (req) => {
     }
 
     {
-      const { data: creditResult, error: creditError } =
-        await supabaseAdmin.rpc("credit_super_agent_wallet", {
-          p_super_agent_id: user.id,
+      // Credit BOTH the payer and the wallet owner, by the same NET figure.
+      //
+      // WHY TWO CREDITS
+      // ---------------
+      // The model is a MIRROR, not a duplicate pot. A sub-agent who tops up
+      // 100 has 100 of real money added to their super agent's wallet, and
+      // 100 of SPENDING POWER, which is a ceiling drawn against that money.
+      // Crediting only the super agent - the previous behaviour - left the
+      // sub-agent with no balance and nothing they could see or spend, which
+      // is why the wallet looked "missing" on their account.
+      //
+      // Crediting only the sub-agent would be worse: `verify-payment` debits
+      // the super agent, so their real balance would never move and the
+      // platform would fund orders out of thin air.
+      //
+      // It must be the SAME amount on both sides. Crediting `gross_amount` to
+      // one and `amount` to the other would quietly have the platform absorb
+      // 1.95% of the mirror, and the two ledger rows would not reconcile
+      // against Paystack. The 1.95% is charged once, here, at top-up, and is
+      // already netted out of `existingTopup.amount`.
+      //
+      // INVARIANT: super_agent.balance - sum(sub_agent.balance) >= 0. Since
+      // every order debits both sides by the same amount, and the pre-flight
+      // check refuses an order the payer cannot afford, the mirror can never
+      // overspend what the super agent actually holds.
+      //
+      // REFERENCES MUST DIFFER. `super_agent_wallet_ledger.reference` is
+      // `text NOT NULL UNIQUE` GLOBALLY, so two rows cannot share one. The
+      // mirrored entry is suffixed with the sub-agent's id, which is derived
+      // from the ids rather than a counter or a clock - that is what makes a
+      // replay of the same reference idempotent on BOTH rows.
+      const creditErrorFrom = (result: { data: unknown; error: unknown }) => {
+        const payload = result.data as { success?: boolean } | null;
+        return result.error || !payload?.success;
+      };
+
+      const creditOwner = async (
+        walletId: string,
+        referenceSuffix: string,
+        reason: string,
+      ) => {
+        const result = await supabaseAdmin.rpc("credit_super_agent_wallet", {
+          p_super_agent_id: walletId,
           p_amount: existingTopup.amount,
-          p_reference: `wallet-topup-${existingTopup.id}`,
-          p_reason: "wallet_topup",
+          p_reference: `wallet-topup-${existingTopup.id}${referenceSuffix}`,
+          p_reason: reason,
           p_metadata: {
             topup_id: existingTopup.id,
             paystack_transaction_id: verifyData.data.id,
+            // Recorded so reconciliation can tell a super agent's own top-up
+            // from one their sub-agent funded, and which side of the mirror
+            // this row is.
+            funded_by: user.id,
+            funded_by_role: identity.role,
+            wallet_side: reason,
           },
         });
 
-      if (creditError || !creditResult?.success) {
-        console.error("Failed to credit Super Agent wallet:", {
-          creditError,
-          creditResult,
-        });
+        if (creditErrorFrom(result)) {
+          console.error("Failed to credit wallet:", {
+            result,
+            walletId,
+            reason,
+            fundedBy: user.id,
+          });
+          throw new Error(`credit failed for ${walletId}`);
+        }
+        return result;
+      };
+
+      try {
+        // Side 1: the super agent's REAL money. Always.
+        const ownerCredit = await creditOwner(
+          resolvedWalletOwnerId as string,
+          "",
+          isSelfFundedSuperAgent
+            ? "wallet_topup"
+            : "sub_agent_wallet_topup_super_agent_side",
+        );
+
+        // Side 2: the sub-agent's spending power. Only when payer != owner.
+        // Skipped entirely for a super agent, so the common case is one RPC
+        // and one ledger row exactly as before.
+        let subAgentBalance: number | null = null;
+        if (!isSelfFundedSuperAgent) {
+          const subAgentCredit = await creditOwner(
+            user.id,
+            `:sub:${user.id}`,
+            "sub_agent_wallet_topup_sub_agent_side",
+          );
+          subAgentBalance = Number(
+            (subAgentCredit.data as { balance?: number } | null)?.balance ?? 0,
+          );
+        }
+
+        const ownerBalance = Number(
+          (ownerCredit.data as { balance?: number } | null)?.balance ?? 0,
+        );
+
         return new Response(
-          JSON.stringify({ error: "Failed to credit Super Agent wallet" }),
+          JSON.stringify({
+            success: true,
+            // The OWNER's balance, which is the real money. Unchanged
+            // semantics for a super agent, who is their own owner.
+            new_balance: ownerBalance,
+            already_processed:
+              (ownerCredit.data as { already_processed?: boolean } | null)
+                ?.already_processed || false,
+            // The verified split, so the client can confirm exactly what was
+            // charged and credited rather than restating figures it computed
+            // locally before the payment.
+            credited_amount: Number(
+              (ownerCredit.data as { credited_amount?: number } | null)
+                ?.credited_amount ?? expectedNet,
+            ),
+            charge_amount: expectedFee,
+            charge_percent: topUpChargePercent,
+            gross_amount: expectedGross,
+            // Echoed so a sub-agent is told plainly whose real money was
+            // funded, rather than seeing their own "top up" succeed with no
+            // indication the money went to someone else.
+            wallet_owner_id: resolvedWalletOwnerId,
+            funded_someone_else: !isSelfFundedSuperAgent,
+            // The sub-agent's own spending power. Null for a super agent.
+            sub_agent_balance: subAgentBalance,
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      } catch (mirrorError) {
+        // Side 1 may have committed before side 2 failed, so this is a genuine
+        // partial write. It is NOT rolled back here: the money was received
+        // and the super agent's side is real and correct. Both credits are
+        // idempotent on their reference, so a retry converges rather than
+        // double-crediting - `verify-wallet-topup` is re-invoked by the client
+        // on failure, and a completed top-up row is rejected with 409 anyway.
+        console.error(
+          "[verify-wallet-topup] Mirror credit incomplete; the super agent side may be committed:",
+          mirrorError,
+        );
+        return new Response(
+          JSON.stringify({
+            error:
+              "Your payment succeeded but the wallet could not be fully credited. Contact support with your reference.",
+            partial_credit: true,
+          }),
           {
             status: 500,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           },
         );
       }
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          new_balance: creditResult.balance,
-          already_processed: creditResult.already_processed || false,
-          // The verified split, so the client can confirm exactly what was
-          // charged and credited rather than restating figures it computed
-          // locally before the payment.
-          credited_amount: Number(creditResult.credited_amount ?? expectedNet),
-          charge_amount: expectedFee,
-          charge_percent: topUpChargePercent,
-          gross_amount: expectedGross,
-        }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
     }
   } catch (error) {
     console.error("Unexpected error:", error);

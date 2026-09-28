@@ -20,6 +20,7 @@ import {
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
+import { uniqueTopic } from "./src/lib/realtime";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
 import { useProfileRoleSubscription } from "./src/hooks/useProfileRoleSubscription";
@@ -123,6 +124,16 @@ export default function App() {
   const [isAgent, setIsAgent] = useState(false);
   const [authInitialized, setAuthInitialized] = useState(false);
   const [isResettingPassword, setIsResettingPassword] = useState(false);
+  // Does this account own a `super_agent_wallets` row? Read once per session
+  // change rather than derived from the role, because ownership is a property
+  // of the DATA: a sub-agent demoted from Super Agent still owns their wallet,
+  // and a freshly promoted Super Agent may not have one yet.
+  //
+  // It gates ONE thing - the Wallet entry in the dock's More popup - so a
+  // demoted account can still see a balance they earned. It grants no ability
+  // to move money: `verify-payment` refuses the wallet path unless the role is
+  // super_agent, and `WalletTopUpScreen` disables funding.
+  const [ownsWallet, setOwnsWallet] = useState(false);
   const navigationRef = useRef(null);
   // Route name of the focused screen. The dock highlights the matching tab; the
   // app uses a single Stack.Navigator (not tabs), so this has to be tracked off
@@ -347,6 +358,80 @@ export default function App() {
   });
 
   /**
+   * Does this account own a `super_agent_wallets` row?
+   *
+   * WHY THIS IS A SEPARATE READ RATHER THAN A ROLE CHECK
+   * ---------------------------------------------------
+   * Demoting a Super Agent to sub_agent must not hide money they earned.
+   * Nothing deletes the wallet row on a role change, and the table's RLS is
+   * `super_agent_id = auth.uid()` with NO role term - so ownership is a
+   * property of the DATA, not of the role. Deriving it from the role was the
+   * original bug: the dock's Wallet entry was gated on `superAgent`, so a
+   * demoted ex-super-agent had a real balance they could never open.
+   *
+   * Kept live on the `super_agent_wallets` channel so the entry appears the
+   * moment a first top-up creates the row, rather than needing a restart.
+   */
+  useEffect(() => {
+    const userId = user?.id;
+    if (!userId) {
+      setOwnsWallet(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const checkOwnership = async () => {
+      try {
+        // `select("super_agent_id")` only. Deliberately not the balance: this
+        // flag is about EXISTENCE, and fetching money into app-level state for
+        // a flag that never reads it is needless exposure.
+        const { data, error } = await supabase
+          .from("super_agent_wallets")
+          .select("super_agent_id")
+          .eq("super_agent_id", userId)
+          .maybeSingle();
+        if (cancelled) return;
+        if (error) {
+          // A read error must not claim they have no wallet and hide the
+          // entry - fail to the visible side and let the screen itself decide.
+          console.error("Wallet ownership check failed:", error);
+          setOwnsWallet(true);
+          return;
+        }
+        setOwnsWallet(Boolean(data));
+      } catch (ownershipError) {
+        if (cancelled) return;
+        console.error("Wallet ownership check threw:", ownershipError);
+        setOwnsWallet(true);
+      }
+    };
+
+    checkOwnership();
+
+    const channel = supabase
+      .channel(uniqueTopic("app_wallet_ownership_realtime"))
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "super_agent_wallets",
+          filter: `super_agent_id=eq.${userId}`,
+        },
+        () => {
+          checkOwnership();
+        },
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel).catch(() => {});
+    };
+  }, [user?.id]);
+
+  /**
    * Resume-time refresh, kept as a second line of defence.
    *
    * The subscription above covers the common case, but it only fires while the
@@ -410,6 +495,9 @@ export default function App() {
           user?.user_metadata?.super_agent_badge ||
           "enterprise",
       ).toLowerCase() !== "pro",
+    // Whether this account owns a `super_agent_wallets` row, INDEPENDENT of
+    // role. See the effect below.
+    ownsWallet: ownsWallet,
   };
 
   // Web-only linking config. Without it the container never subscribes to

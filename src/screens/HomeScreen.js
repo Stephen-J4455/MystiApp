@@ -252,6 +252,20 @@ export default function HomeScreen({ navigation }) {
   ).toLowerCase();
   const isProSuperAgent = isSuperAgent && badgeValue === "pro";
 
+  // Does this hero show a WALLET, as opposed to the "Your data hub" summary?
+  //
+  // A wallet row is not the same thing as holding the super agent role. A
+  // sub-agent demoted from Super Agent still owns their `super_agent_wallets`
+  // row - the table is keyed on `super_agent_id` and its RLS is
+  // `super_agent_id = auth.uid()` with no role term - so their balance is real
+  // and belongs on screen. Gating this on the role is what made the money look
+  // like it had vanished.
+  //
+  // A current super agent gets the wallet presentation even before their row
+  // exists, because the top-up flow is what creates it; the amount itself still
+  // renders the "Ghc —.—" placeholder until the read lands.
+  const hasWallet = isSuperAgent || walletBalance !== null;
+
   const networkCards = [
     {
       key: "mtn",
@@ -475,12 +489,17 @@ export default function HomeScreen({ navigation }) {
   }, []);
 
   // Super-agent wallet balance for the hero card, kept live.
+  //
+  // NOT gated on the role. `super_agent_wallets` is keyed on `super_agent_id`
+  // and its RLS is `super_agent_id = auth.uid()` with no role term, so a
+  // sub-agent demoted from Super Agent still owns their row and the balance is
+  // still theirs. This effect used to return early for every non-super-agent,
+  // which is why a demoted account with a real balance saw "Your data hub"
+  // instead of the number.
+  //
+  // The read itself decides: no row means `walletBalance` stays null and the
+  // hero falls back to the non-wallet presentation below.
   useEffect(() => {
-    if (!isSuperAgent) {
-      setWalletBalance(null);
-      return;
-    }
-
     let cancelled = false;
     // Keyed by user id: the channel needs the id in its filter, which is only
     // known after `getUser()` resolves. Registering the channel in a ref as
@@ -515,12 +534,22 @@ export default function HomeScreen({ navigation }) {
           .on(
             "postgres_changes",
             {
-              event: "UPDATE",
+              // INSERT and DELETE, not just UPDATE. The first top-up CREATES
+              // the row, so on an `UPDATE`-only subscription the hero would
+              // never notice the wallet appearing - and a DELETE (row removed)
+              // would leave a stale balance on screen.
+              event: "*",
               schema: "public",
               table: "super_agent_wallets",
               filter: `super_agent_id=eq.${user.id}`,
             },
-            (payload) => setWalletBalance(Number(payload.new.balance || 0)),
+            (payload) => {
+              if (payload.eventType === "DELETE") {
+                setWalletBalance(null);
+                return;
+              }
+              setWalletBalance(Number(payload.new?.balance || 0));
+            },
           )
           .subscribe();
       } catch (error) {
@@ -1357,27 +1386,29 @@ export default function HomeScreen({ navigation }) {
               <View style={styles.heroTopRow}>
                 <View style={styles.heroLabelRow}>
                   <Ionicons
-                    name={isSuperAgent ? "wallet" : "sparkles"}
+                    name={hasWallet ? "wallet" : "sparkles"}
                     size={13}
                     color={c.textSecondary}
                   />
                   <Text style={styles.heroLabel}>
-                    {isSuperAgent ? "Available balance" : "Your data hub"}
+                    {hasWallet ? "Available balance" : "Your data hub"}
                   </Text>
                 </View>
                 <View style={styles.heroPill}>
                   <View style={styles.heroPillDot} />
                   <Text style={styles.heroPillText}>
-                    {isSuperAgent
-                      ? isProSuperAgent
-                        ? "Pro"
-                        : "Enterprise"
+                    {hasWallet
+                      ? isSuperAgent
+                        ? isProSuperAgent
+                          ? "Pro"
+                          : "Enterprise"
+                        : "Held"
                       : "Live"}
                   </Text>
                 </View>
               </View>
 
-              {isSuperAgent ? (
+              {hasWallet ? (
                 <>
                   <Text style={styles.heroAmount}>
                     {loadingWallet && walletBalance === null
@@ -1385,7 +1416,9 @@ export default function HomeScreen({ navigation }) {
                       : formatGhc(walletBalance)}
                   </Text>
                   <Text style={styles.heroFootnote}>
-                    Operational balance for agent orders
+                    {isSuperAgent
+                      ? "Operational balance for agent orders"
+                      : "Balance held from a previous Super Agent role"}
                   </Text>
 
                   <View style={styles.heroActions}>

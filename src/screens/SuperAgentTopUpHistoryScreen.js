@@ -32,6 +32,7 @@ const getStatusColor = (status) => {
 export default function SuperAgentTopUpHistoryScreen({ navigation }) {
   const { showError } = useNotification();
   const [topUps, setTopUps] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -77,6 +78,7 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
               businessName: topUp.business_name || "Sub-agent",
             })),
           );
+          setSummary(topUpData?.summary || null);
           return;
         }
 
@@ -101,6 +103,7 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
         );
         if (subAgentIds.length === 0) {
           setTopUps([]);
+          setSummary(null);
           return;
         }
 
@@ -112,10 +115,22 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
           .limit(100);
         if (error) throw error;
 
+        // The same summary the `listTopUps` action computes, so the header
+        // does not shift shape when one deployment has the action and another
+        // falls back to the direct query. Left null rather than half-built:
+        // these rows may predate the charge-snapshot columns, so any total
+        // derived here would be a guess presented as a fact.
+        setSummary(null);
         setTopUps(
           (data || []).map((topUp) => ({
             ...topUp,
             businessName: namesById.get(topUp.agent_id) || "Sub-agent",
+            gross_amount: topUp.gross_amount ?? topUp.amount,
+            charge_amount: topUp.charge_amount ?? 0,
+            charge_percent: topUp.charge_percent ?? null,
+            wallet_owner_id: topUp.wallet_owner_id ?? topUp.agent_id,
+            funded_someone_else:
+              (topUp.wallet_owner_id ?? topUp.agent_id) !== topUp.agent_id,
           })),
         );
       } catch (error) {
@@ -161,6 +176,23 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
             </Text>
           </View>
         </View>
+
+        {summary && summary.count > 0 ? (
+          <View style={styles.summaryRow}>
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryLabel}>Credited to you</Text>
+              <Text style={styles.summaryValue}>
+                Ghc {Number(summary.total_credited || 0).toFixed(2)}
+              </Text>
+            </View>
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryLabel}>Charged to them</Text>
+              <Text style={styles.summaryValue}>
+                Ghc {Number(summary.total_charged || 0).toFixed(2)}
+              </Text>
+            </View>
+          </View>
+        ) : null}
 
         {loading ? (
           <View style={styles.centered}>
@@ -225,6 +257,22 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
                       <Text style={styles.amount}>
                         Ghc {Number(topUp.amount || 0).toFixed(2)}
                       </Text>
+                      {Number(topUp.charge_amount || 0) > 0 ? (
+                        <Text style={styles.chargeNote}>
+                          {topUp.charge_percent !== null &&
+                          topUp.charge_percent !== undefined
+                            ? `${Number(topUp.charge_percent).toFixed(2)}%`
+                            : ""}{" "}
+                          charge of Ghc{" "}
+                          {Number(topUp.charge_amount || 0).toFixed(2)} — total
+                          paid Ghc {Number(topUp.gross_amount || 0).toFixed(2)}
+                        </Text>
+                      ) : null}
+                      {topUp.funded_someone_else ? (
+                        <Text style={styles.chargeNote}>
+                          Credited to your wallet balance.
+                        </Text>
+                      ) : null}
                       <View style={styles.detailRow}>
                         <Text style={styles.detailLabel}>Reference</Text>
                         <Text style={styles.detailValue} numberOfLines={1}>
@@ -338,6 +386,43 @@ const styles = StyleSheet.create({
     borderTopColor: colors.border,
   },
   amount: { color: colors.dark, fontSize: 18, fontWeight: "800" },
+  // The 1.95% breakdown, and the note that the money landed in the super
+  // agent's balance rather than the sub-agent's. Both sit directly under the
+  // amount because those are the two facts the number alone gets wrong.
+  chargeNote: {
+    color: colors.secondary,
+    fontSize: 12,
+    marginTop: 4,
+    lineHeight: 17,
+  },
+  summaryRow: {
+    flexDirection: "row",
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+  },
+  summaryCard: {
+    flex: 1,
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+  },
+  summaryLabel: {
+    color: colors.secondary,
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.4,
+  },
+  summaryValue: {
+    color: colors.dark,
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 4,
+  },
   detailRow: {
     flexDirection: "row",
     justifyContent: "space-between",

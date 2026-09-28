@@ -407,7 +407,7 @@ Deno.serve(async (req) => {
 
       const { data: myAgents } = await supabaseAdmin
         .from("user_profiles")
-        .select("id")
+        .select("id, full_name, role")
         .eq("super_agent_id", identity.id);
       const myAgentIds = new Set((myAgents || []).map((row) => String(row.id)));
       const subAgents = (usersData?.users || []).filter((member: any) =>
@@ -443,14 +443,29 @@ Deno.serve(async (req) => {
         .limit(100);
       if (topUpsError) throw topUpsError;
 
+      // Names come from `user_profiles.full_name` FIRST, then auth metadata.
+      //
+      // `user_metadata` is writable by the account owner via
+      // `auth.updateUser({ data: { business_name: '...' } })`, so a sub-agent
+      // can put any string there and have it rendered as their name on a super
+      // agent's financials screen. `user_profiles.full_name` is not
+      // self-writable. Falling back to metadata is still worth it for display,
+      // but the authoritative value has to win when it exists.
+      const profilesById = new Map(
+        (myAgents || []).map((row: any) => [String(row.id), row]),
+      );
       const businessNames = new Map(
-        subAgents.map((member: any) => [
-          member.id,
-          member.user_metadata?.business_name ||
-            member.user_metadata?.full_name ||
-            member.email ||
-            "Sub-agent",
-        ]),
+        subAgents.map((member: any) => {
+          const profile = profilesById.get(String(member.id));
+          return [
+            member.id,
+            profile?.full_name ||
+              member.user_metadata?.business_name ||
+              member.user_metadata?.full_name ||
+              member.email ||
+              "Sub-agent",
+          ];
+        }),
       );
 
       return new Response(
@@ -463,7 +478,53 @@ Deno.serve(async (req) => {
               paystackConfig?.subaccount_code ||
               null,
             split_percentage_charge: paystackConfig?.percentage_charge ?? null,
+            // The 1.95% breakdown, so the super agent can reconcile a sub-agent's
+            // top-up against the Paystack dashboard without doing the arithmetic
+            // themselves.
+            //
+            // `amount` is the NET credited to the wallet, `gross_amount` is what
+            // was actually charged. Both were null before migration
+            // 20260927_003, so each field falls back to a derived value rather
+            // than rendering "N/A" on every historical row: a pre-snapshot row
+            // simply reports gross == net, which is the honest reading of a row
+            // that did not record a charge.
+            gross_amount: topUp.gross_amount ?? topUp.amount,
+            charge_amount: topUp.charge_amount ?? 0,
+            charge_percent: topUp.charge_percent ?? null,
+            // Whose wallet the net was credited to. Equals the payer's id for a
+            // self-funded top-up; for a sub-agent it is the super agent, whose
+            // balance actually grew. Surfaced so the screen never implies the
+            // money sits with the sub-agent.
+            wallet_owner_id: topUp.wallet_owner_id ?? topUp.agent_id,
+            funded_someone_else:
+              (topUp.wallet_owner_id ?? topUp.agent_id) !== topUp.agent_id,
           })),
+          // Totals across every sub-agent top-up, so the header does not have to
+          // sum 100 client-side and can be shown without a second request.
+          summary: {
+            count: (topUps || []).filter(
+              (topUp: any) => topUp.status === "success",
+            ).length,
+            total_credited: Number(
+              (topUps || [])
+                .filter((topUp: any) => topUp.status === "success")
+                .reduce(
+                  (sum: number, topUp: any) => sum + Number(topUp.amount || 0),
+                  0,
+                )
+                .toFixed(2),
+            ),
+            total_charged: Number(
+              (topUps || [])
+                .filter((topUp: any) => topUp.status === "success")
+                .reduce(
+                  (sum: number, topUp: any) =>
+                    sum + Number(topUp.gross_amount ?? topUp.amount ?? 0),
+                  0,
+                )
+                .toFixed(2),
+            ),
+          },
         }),
         {
           status: 200,
