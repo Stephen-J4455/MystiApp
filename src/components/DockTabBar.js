@@ -65,7 +65,12 @@ export default function DockTabBar({
     // would let the memo return a stale menu after a first top-up creates the
     // wallet row, or after a demotion - the Wallet entry would simply not
     // appear until something else forced a re-render.
-    [account?.isSuperAgent, account?.isEnterprise, account?.ownsWallet],
+    [
+      account?.isSuperAgent,
+      account?.isEnterprise,
+      account?.ownsWallet,
+      account?.isNormalUser,
+    ],
   );
 
   const popupAnim = useRef(new Animated.Value(0)).current;

@@ -170,12 +170,21 @@ export const MORE_ITEMS = [
  *     demoted from Super
  *     Agent and still owns a
  *     wallet row:             Wallet (read-only), plus the universal items.
- *   - Everyone else:          Alerts, AFA and Privacy only. A normal user has
- *                             no wallet at all, and a sub-agent who was never
- *                             a super agent has none either.
+ *   - Sub-agent (current or
+ *     mirrored):             Wallet, plus the universal items.
+ *   - Normal user:            Alerts, AFA and Privacy only. NO Wallet. They
+ *                             have no wallet and cannot acquire one - see the
+ *                             explicit denial in `moreItemsFor`.
  *
  * `isSuperAgent` here is the ACCOUNT TYPE, not the badge - a Pro Super Agent
  * still owns sub-agents, wallet and analytics, just not the management suite.
+ *
+ * `isNormalUser` is a separate input and the Wallet entry treats it as a VETO,
+ * not as another way of qualifying. That asymmetry is the point: "is a super
+ * agent" and "owns a wallet row" are both ways of EARNING the entry, while
+ * "is a normal user" is a reason to REFUSE it regardless of either. A sub
+ * agent and a normal user are both non-super-agents, but only one of them may
+ * see a wallet, so the gate cannot be phrased as a positive test.
  *
  * `ownsWallet` is deliberately a separate input rather than being derived from
  * `isSuperAgent`. Ownership of a `super_agent_wallets` row is a property of
@@ -187,6 +196,7 @@ export const moreItemsFor = ({
   isSuperAgent = false,
   isEnterprise = false,
   ownsWallet = false,
+  isNormalUser = false,
 } = {}) =>
   MORE_ITEMS.filter((item) => {
     if (item.requires === "enterprise") {
@@ -195,7 +205,16 @@ export const moreItemsFor = ({
     if (item.requires === "superAgent") return Boolean(isSuperAgent);
     // Ownership OR role: a current super agent always keeps the entry, even
     // before their wallet row exists, so the top-up flow can create it.
+    //
+    // A NORMAL USER IS EXPLICITLY DENIED, not merely excluded by omission.
+    // A normal user has no wallet and cannot acquire one - `verify-wallet-topup`
+    // refuses the payment because `identity.superAgentId` is null - so any row
+    // that somehow exists is not theirs to see. Without the explicit denial,
+    // a normal user who was ever mis-seeded with a `super_agent_wallets` row
+    // (by a demotion, a bad backfill, or a manual fix) would be shown a
+    // wallet entry and a balance for money they cannot spend or withdraw.
     if (item.requires === "wallet") {
+      if (isNormalUser) return false;
       return Boolean(isSuperAgent) || Boolean(ownsWallet);
     }
     return true;

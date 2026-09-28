@@ -463,6 +463,38 @@ export default function WalletTopUpScreen({ navigation }) {
         assignedSuperAgentId !== user.id;
 
       if (!isSuperAgentRole) {
+        // A NORMAL USER IS REFUSED, and refused FIRST - before the wallet row
+        // is even read.
+        //
+        // A normal user cannot own a wallet: `verify-wallet-topup` rejects their
+        // payment outright because they have no super agent for the money to
+        // fund, so any `super_agent_wallets` row that exists for them is not
+        // theirs to see. The previous code read the row first and only fell
+        // through to the generic "Access denied" afterwards, which meant the
+        // read still happened and a stray row would have been loaded into state
+        // before the redirect.
+        //
+        // The check is on the AUTHORITATIVE profile role, not `user_metadata`:
+        // `user_metadata` is writable by the account owner via
+        // `auth.updateUser({ data: { role: 'super_agent' } })`, so gating on it
+        // would let a normal user unlock this screen by editing their own
+        // metadata.
+        if (
+          profileRole === "normal_user" ||
+          profileRole === "normaluser" ||
+          profileRole === "user"
+        ) {
+          console.warn(
+            "[WalletTopUpScreen] Normal user reached the wallet screen; refusing.",
+          );
+          showError(
+            "Access denied",
+            "This feature is not available on your account.",
+          );
+          navigation.goBack();
+          return;
+        }
+
         // A SUB-AGENT can fund their super agent's wallet.
         //
         // This is a real transfer of someone else's money, so the screen has to

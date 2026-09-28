@@ -666,6 +666,85 @@ Deno.serve(async (req) => {
         );
       }
 
+      // ------------------------------------------------------------------------
+      // A promoted account gets its wallet HERE, not by a separate admin click
+      // ------------------------------------------------------------------------
+      // `setUserRole` never created a wallet row, and `initializeSuperAgentWallet`
+      // is a manual per-user action behind a button. So promoting a user left
+      // them with NO `super_agent_wallets` row at all, which the admin app
+      // renders as "Not initialized" - the badge reads as though the account is
+      // stuck or on hold, when in fact nothing exists yet. The main app had the
+      // mirrorrow waiting on the same event, so a promoted sub-agent started
+      // with a real balance the admin screen could not see.
+      //
+      // Done here rather than in the client so it is not bypassable: the role
+      // change and the wallet it implies must land together, and only this
+      // function knows the promotion actually succeeded.
+      //
+      // The row is created EMPTY. Balance is never invented - it arrives only
+      // from a real top-up, and for a sub-agent from their own top-ups being
+      // mirrored (see the note on `initializeSubAgentMirror` below).
+      if (requestedRole === "super_agent" || requestedRole === "sub_agent") {
+        // A promoted SUB-AGENT should not start at zero when they have already
+        // paid money in. `sub_agent_mirror_seed` (migration 011) computes their
+        // mirror from their own top-up history; a promoted SUPER AGENT is not in
+        // that view at all and correctly starts empty, because their balance
+        // only ever comes from a real top-up.
+        //
+        // Read defensively: this function must not FAIL if the view is missing
+        // (an unapplied 011). A missing view just means 0, which is the same
+        // place they would have started anyway.
+        let seededBalance = 0;
+        if (requestedRole === "sub_agent") {
+          try {
+            const { data: seedRow, error: seedError } = await admin
+              .from("sub_agent_mirror_seed")
+              .select("target_balance")
+              .eq("sub_agent_id", targetUserId)
+              .maybeSingle();
+            if (seedError) {
+              console.warn(
+                "[setUserRole] mirror seed unreadable; starting the promoted sub-agent at 0:",
+                seedError.message,
+              );
+            } else if (seedRow) {
+              seededBalance = Number(seedRow.target_balance || 0);
+            }
+          } catch (seedLookupError) {
+            console.warn(
+              "[setUserRole] mirror seed lookup threw; starting the promoted sub-agent at 0:",
+              seedLookupError,
+            );
+          }
+        }
+
+        // Insert-if-absent, NOT an upsert. An upsert would overwrite an existing
+        // balance with 0, which is how a demoted super agent re-promoted months
+        // later would have their real money silently zeroed by an admin simply
+        // saving the role again. The conflict target is the primary key, so a
+        // row that already exists is left completely untouched.
+        const { error: walletSeedError } = await admin
+          .from("super_agent_wallets")
+          .insert({ super_agent_id: targetUserId, balance: seededBalance })
+          .select("super_agent_id")
+          .maybeSingle();
+
+        if (walletSeedError && walletSeedError.code !== "23505") {
+          // Non-fatal, and deliberately so. The ROLE change is the
+          // authorization decision and it has already been committed to both
+          // stores; failing the whole request here would leave the account in a
+          // worse state - demoted in the app, promoted in the database. Report it
+          // loudly and let the admin retry the wallet separately.
+          //
+          // 23505 (unique violation) is the expected outcome for anyone who
+          // already has a wallet, and is success for our purposes.
+          console.error(
+            "[setUserRole] wallet row could not be created for the promoted account:",
+            { userId: targetUserId, role: requestedRole, walletSeedError },
+          );
+        }
+      }
+
       return json({
         user: updated.user,
         // The row as persisted, echoed back so the admin app renders the

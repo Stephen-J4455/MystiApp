@@ -159,6 +159,11 @@ export default function HomeScreen({ navigation }) {
   const [user, setUser] = useState(null);
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgent, setIsSuperAgent] = useState(false);
+  // A NORMAL USER must never be shown a wallet. Tracked as its own flag rather
+  // than inferred from `!isSuperAgent`, because a sub-agent is also not a super
+  // agent and they legitimately DO get a wallet - the two cases need opposite
+  // answers from the same-looking question.
+  const [isNormalUser, setIsNormalUser] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [transactions, setTransactions] = useState([]);
   const [loadingTransactions, setLoadingTransactions] = useState(true);
@@ -261,10 +266,18 @@ export default function HomeScreen({ navigation }) {
   // and belongs on screen. Gating this on the role is what made the money look
   // like it had vanished.
   //
+  // A NORMAL USER is the one case that is excluded outright. `isNormalUser`
+  // must be in this expression, not just left to fall out of the other two:
+  // `walletBalance !== null` is true for anyone with a stray row, and a normal
+  // user cannot earn a legitimate one - `verify-wallet-topup` refuses their
+  // payment outright because they have no super agent. If a row was ever
+  // created for one by a bad backfill or a demotion, showing the hero would be
+  // advertising a balance they can neither spend nor withdraw.
+  //
   // A current super agent gets the wallet presentation even before their row
   // exists, because the top-up flow is what creates it; the amount itself still
   // renders the "Ghc —.—" placeholder until the read lands.
-  const hasWallet = isSuperAgent || walletBalance !== null;
+  const hasWallet = !isNormalUser && (isSuperAgent || walletBalance !== null);
 
   const networkCards = [
     {
@@ -525,6 +538,13 @@ export default function HomeScreen({ navigation }) {
         if (cancelled) return;
         if (error) {
           console.error("Wallet balance fetch error:", error);
+        } else if (isNormalUser) {
+          // A normal user has no legitimate wallet, so a row is not read even
+          // though RLS would return one (`super_agent_id = auth.uid()` has no
+          // role term). This is the belt to the hero gate's braces: hiding the
+          // entry is a presentation concern, and a stray row from a bad
+          // backfill or a demotion should never put a number on this screen.
+          setWalletBalance(null);
         } else {
           setWalletBalance(Number(data?.balance || 0));
         }
@@ -565,7 +585,13 @@ export default function HomeScreen({ navigation }) {
       cancelled = true;
       removeChannelSafe(walletChannelRef.current);
     };
-  }, [isSuperAgent]);
+    // `isNormalUser` is a dependency, not just `isSuperAgent`. Both flags are
+    // set from the same async `getUser()` and start as false, so with only
+    // `isSuperAgent` in the list this effect could run once BEFORE the role
+    // resolved - reading a stray row for a normal user and rendering it. The
+    // role flags flip together, so listing both means the read is re-attempted
+    // with the correct authority once the role is actually known.
+  }, [isSuperAgent, isNormalUser]);
 
   // Auto-scroll ads effect
   useEffect(() => {
@@ -642,6 +668,15 @@ export default function HomeScreen({ navigation }) {
     const isSuperAgentUser =
       normalizedRole === "superagent" || normalizedRole === "super_agent";
     setIsSuperAgent(isSuperAgentUser);
+    // `normal_user` is the signup role and the value migration 20260928_003
+    // backfills. It has to be recognised explicitly: `isSuperAgentUser` is
+    // false for BOTH a normal user and a sub-agent, so the wallet gate cannot
+    // tell them apart from this flag's absence.
+    setIsNormalUser(
+      normalizedRole === "normal_user" ||
+        normalizedRole === "normaluser" ||
+        normalizedRole === "user",
+    );
     setIsEnterpriseSuperAgent(
       !isSuperAgentUser ||
         String(
@@ -701,6 +736,15 @@ export default function HomeScreen({ navigation }) {
         const isSuperAgentUser =
           normalizedRole === "superagent" || normalizedRole === "super_agent";
         setIsSuperAgent(isSuperAgentUser);
+        // See the note on the first resolution above - a sub-agent and a normal
+        // user are both non-super-agents, so the wallet gate needs this told
+        // apart explicitly. Both paths must set it or a refresh can silently
+        // reset it to false and re-expose the hero.
+        setIsNormalUser(
+          normalizedRole === "normal_user" ||
+            normalizedRole === "normaluser" ||
+            normalizedRole === "user",
+        );
         setIsEnterpriseSuperAgent(
           !isSuperAgentUser ||
             String(

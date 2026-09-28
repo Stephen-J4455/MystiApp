@@ -76,6 +76,17 @@ const normalizeUserRole = (user) => {
   if (normalized === "superagent" || normalized === "super_agent")
     return "SuperAgent";
   if (normalized === "agent" || normalized === "sub_agent") return "Agent";
+  // `normal_user` is the role assigned at signup and by the repair migration
+  // 20260928_003. It was MISSING here, so a normal user normalised to the raw
+  // string "normal_user" rather than a known value - which meant `userRole`
+  // matched no branch at all, and any gate phrased as "not a super agent"
+  // silently had a third, unlabelled category to account for.
+  if (
+    normalized === "user" ||
+    normalized === "normal_user" ||
+    normalized === "normaluser"
+  )
+    return "NormalUser";
 
   return role;
 };
@@ -488,6 +499,11 @@ export default function App() {
   // every gated screen already gates on it that way. See roles-and-badges.md.
   const account = {
     isSuperAgent: userRole === "SuperAgent",
+    // Explicit, so a gate can DENY a normal user rather than infer it from the
+    // absence of a super agent role. A normal user must never see a wallet, and
+    // "not a super agent" is the wrong test for that: a sub-agent is also not
+    // a super agent, and they legitimately DO get the wallet.
+    isNormalUser: userRole === "NormalUser",
     isEnterprise:
       userRole === "SuperAgent" &&
       String(
