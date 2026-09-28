@@ -532,7 +532,17 @@ Deno.serve(async (req) => {
       // PostgREST answered 200 with `[]`, which the screen renders as "no
       // activity". Role writes are a service-role operation with no
       // cross-device push, so nothing else would ever fix it.
-      nextAppMetadata.role = requestedRole;
+      //
+      // For normal_user the key is DELETED, not set to "normal_user": no
+      // policy grants on the literal string, and an explicit value is what a
+      // later promotion would otherwise have to overwrite. Assigning
+      // unconditionally here would also have undone the `delete` in the
+      // normal_user branch above, since this runs after it.
+      if (requestedRole === "normal_user") {
+        delete nextAppMetadata.role;
+      } else {
+        nextAppMetadata.role = requestedRole;
+      }
 
       const { data: updated, error: updateError } =
         await admin.auth.admin.updateUserById(targetUserId, {
@@ -541,26 +551,31 @@ Deno.serve(async (req) => {
         });
       if (updateError) throw updateError;
 
-      // `user_profiles` is now the AUTHORITATIVE store that every edge function
-      // reads, so this write is what makes the change take effect - the
-      // metadata write above only keeps the app's existing readers working.
+      // `user_profiles` is the AUTHORITATIVE store that every edge function
+      // reads via `resolveIdentity`, so THIS write - not the metadata write
+      // above - is what actually changes the user's permissions.
       //
-      // `role` MUST be one of the CHECK-constrained values
-      // (super_agent | sub_agent | admin). The previous code wrote
-      // "normal_user", which is not a legal value, so every demotion to a
-      // normal user failed this upsert and left the profile claiming the old
-      // role - a user the admin had just demoted kept their super_agent
-      // privileges in every migrated function.
-      const profileRole =
-        requestedRole === "sub_agent" ? "sub_agent" : "super_agent";
+      // Migration 20260925_004 widened the CHECK constraint to
+      // ('normal_user','super_agent','sub_agent','admin'), so `normal_user`
+      // IS representable and is written verbatim. The previous code
+      // downgraded it to "sub_agent" on the grounds that the constraint did
+      // not allow it - true when written, false after that migration.
+      // Demoting a Super Agent therefore left the profile claiming
+      // `sub_agent`, which is NOT "no role", so the demotion never took
+      // effect in any migrated function. That is what made an admin role
+      // swap look like a no-op in the main app.
+      //
+      // `requestedRole` is already validated against
+      // ['normal_user','sub_agent','super_agent'] above, so it is a legal
+      // CHECK value by construction. No mapping is required.
+      const profileRole = requestedRole;
 
-      // normal_user has no row in the CHECK list, so it is stored as the
-      // least-privileged role that does. `sub_agent` grants strictly less than
-      // super_agent, and the app distinguishes the two from auth metadata.
+      // normal_user is now written as normal_user - see the note above the
+      // `profileRole` assignment.
       const { error: profileError } = await admin.from("user_profiles").upsert(
         {
           id: targetUserId,
-          role: requestedRole === "normal_user" ? "sub_agent" : profileRole,
+          role: profileRole,
           super_agent_id: resolvedSuperAgentId,
           email: updated.user.email || null,
           full_name:

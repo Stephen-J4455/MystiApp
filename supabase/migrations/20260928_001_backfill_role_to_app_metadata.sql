@@ -71,22 +71,67 @@ UPDATE auth.users
    AND COALESCE(raw_user_meta_data ->> 'super_agent_id', '') <> ''
    AND COALESCE(raw_app_meta_data ->> 'super_agent_id', '') = '';
 
--- ---------------------------------------------------------------------------
--- Verify: every admin should now resolve `is_mysti_admin()` to true.
--- Run as an AUTHENTICATED ADMIN SESSION, not as the service role - the service
--- role bypasses RLS, so testing it proves nothing.
--- ---------------------------------------------------------------------------
---   SELECT public.is_mysti_admin() AS should_be_true;
+-- ===========================================================================
+-- PART 2 - repair `user_profiles.role` for demoted accounts
+-- ===========================================================================
+-- WHY
+-- ---
+-- `setUserRole` wrote `sub_agent` into `user_profiles.role` whenever the admin
+-- demoted anyone to a normal user, on the stated grounds that "normal_user" was
+-- not a legal CHECK value. Migration 20260925_004 HAD ALREADY WIDENED the
+-- constraint to include 'normal_user', so that rationale expired - but the
+-- mapping stayed.
 --
--- Confirm no role is left stranded in user_metadata only:
+-- `user_profiles.role` is the store every edge function's `resolveIdentity`
+-- reads. A demoted Super Agent was therefore still recorded as `sub_agent`,
+-- which is NOT "no role" - so they retained sub-agent behaviour (ownership
+-- checks, assignment-derived affordances) after the admin had removed it.
+-- Migration 20260926_009 has the same expired premise: it maps an absent role
+-- to 'sub_agent' rather than 'normal_user'.
+--
+-- This statement maps ONLY rows whose auth metadata now says "no role at all",
+-- which is the admin app's own representation of a normal user (see
+-- `ROLE_LADDER` in UserManagementScreen.js: "normal_user" is represented by
+-- having no role metadata). It is deliberately narrow - it never promotes
+-- anyone and never touches an account that still carries a role.
+--
+-- Ordering note: this runs AFTER part 1, so `raw_app_meta_data` has already
+-- been repaired and is authoritative when the WHERE clause below reads it.
+-- Without that ordering a role stranded in `user_metadata` alone would make
+-- the second predicate false and this statement would skip the account.
+-- ===========================================================================
+
+UPDATE public.user_profiles p
+   SET role = 'normal_user',
+       updated_at = now()
+  FROM auth.users u
+ WHERE p.id = u.id
+   -- auth metadata now says "no role" in BOTH stores...
+   AND COALESCE(btrim(COALESCE(u.raw_app_meta_data ->> 'role', '')), '') = ''
+   AND COALESCE(btrim(COALESCE(u.raw_user_meta_data ->> 'role', '')), '') = ''
+   -- ...but the profile still claims an agent role from the stale mapping.
+   AND p.role IN ('sub_agent', 'normal_user');
+
+-- ---------------------------------------------------------------------------
+-- PART 3 - verify
+-- ---------------------------------------------------------------------------
+-- Role distribution after the backfill. Expect admins and super agents to
+-- appear; the bulk will be normal_user and sub_agent.
+--
+--   SELECT role, count(*) FROM public.user_profiles GROUP BY role ORDER BY role;
+--
+-- No role stranded in user_metadata only (expect 0):
 --
 --   SELECT count(*) AS still_missing
 --     FROM auth.users
 --    WHERE COALESCE(raw_user_meta_data ->> 'role', '') <> ''
 --      AND COALESCE(raw_app_meta_data ->> 'role', '') = '';
 --
--- Expect 0. A non-zero result means an account has a role that no RLS policy
--- can see - investigate it before closing this out.
+-- Every admin should resolve `is_mysti_admin()` to true. Run this as an
+-- AUTHENTICATED ADMIN SESSION, not as the service role - the service role
+-- bypasses RLS, so testing it proves nothing:
+--
+--   SELECT public.is_mysti_admin() AS should_be_true;
 -- ---------------------------------------------------------------------------
 
 COMMIT;
