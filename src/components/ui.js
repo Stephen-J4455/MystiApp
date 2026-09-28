@@ -15,6 +15,28 @@ import { useTheme } from "../contexts/ThemeContext";
 import { fonts } from "./theme";
 
 /**
+ * Applies the web-only input reset globally, once.
+ *
+ * Preferred over per-call-site styles: there are 20+ `<TextInput>` elements
+ * across the screens, and any new one would silently reintroduce the UA ring.
+ * React Native Web has no official global-stylesheet escape hatch, so the
+ * stylesheet is injected directly. Native never reaches this branch.
+ *
+ * `:focus-visible` is deliberately NOT targeted - only the plain `outline` is
+ * removed, so the ring that does show is still the themed container border
+ * from `fieldFocused`, and keyboard focus is still announced.
+ */
+export const installWebInputReset = () => {
+  if (Platform.OS !== "web" || typeof document === "undefined") return;
+  const ID = "mysti-web-input-reset";
+  if (document.getElementById(ID)) return;
+  const style = document.createElement("style");
+  style.id = ID;
+  style.textContent = "input, textarea, select { outline: none !important; }";
+  document.head.appendChild(style);
+};
+
+/**
  * Shared, theme-aware building blocks.
  *
  * These exist because every screen was previously hand-rolling the same

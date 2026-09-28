@@ -1,5 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm run build",
-  "outputDirectory": "dist"
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/((?!_expo/|assets/|reset-password.html|manifest.json|service-worker.js|favicon.ico).*)",
+      "destination": "/index.html"
+    }
+  ]
 }

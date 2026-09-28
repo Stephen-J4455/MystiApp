@@ -1,4 +1,4 @@
-import { buildWhatsAppLink, openWhatsApp } from "./whatsapp";
+import { SUPPORT_WHATSAPP, buildWhatsAppLink, openWhatsApp } from "./whatsapp";
 
 export const COMPLAINT_REASONS = [
   { id: "not_delivered", label: "Data not delivered" },
@@ -114,7 +114,10 @@ export const buildComplaintMessage = (order, reasonId, extra) => {
  * for any surface that needs the raw URL (e.g. a copy-to-clipboard fallback).
  */
 export const buildComplaintLink = (order, reasonId, extra) =>
-  buildWhatsAppLink(buildComplaintMessage(order, reasonId, extra));
+  buildWhatsAppLink(
+    SUPPORT_WHATSAPP,
+    buildComplaintMessage(order, reasonId, extra),
+  );
 
 /**
  * Opens the complaint chat.
@@ -126,4 +129,4 @@ export const buildComplaintLink = (order, reasonId, extra) =>
  * @returns {Promise<{ok: true} | {ok: false, message: string}>}
  */
 export const openComplaintChat = async (order, reasonId, extra) =>
-  openWhatsApp(buildComplaintMessage(order, reasonId, extra));
+  openWhatsApp(SUPPORT_WHATSAPP, buildComplaintMessage(order, reasonId, extra));

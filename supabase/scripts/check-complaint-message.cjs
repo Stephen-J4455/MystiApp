@@ -140,4 +140,57 @@ assert.ok(
   "unknown reason leaked undefined",
 );
 
+// --- Regression: the message actually reaches the chat -----------------------
+// Three separate defects shipped together, each of which alone emptied the
+// report. Any one of them reopening is a silent data loss, so pin all three.
+
+// 1. `wa.me/message/<businessId>` DROPS ?text= in its redirect. Only the
+//    phone-number form carries the body.
+assert.ok(
+  !link.includes("/message/"),
+  "the wa.me/message/<id> form silently discards ?text=; use a phone number",
+);
+
+// 2. The destination number must be the one the caller passed. The wrappers
+//    used to call buildWhatsAppLink/openWhatsApp with only the MESSAGE, so the
+//    complaint body was passed off as the number and vanished.
+assert.ok(
+  buildComplaintLink(heldSubAgentOrder, "other", "").startsWith(
+    `https://wa.me/${whatsapp.SUPPORT_WHATSAPP}?text=`,
+  ),
+  "the complaint link must address the support number",
+);
+
+// 3. A local Ghanaian number must be normalised to international digits.
+//    wa.me passes "0501703777" through verbatim as phone=0501703777, which
+//    matches no account, so the chat never opens.
+const { toInternationalNumber, ADMIN_WHATSAPP, buildWhatsAppLink } = whatsapp;
+const cases = [
+  ["0501703777", "233501703777"],
+  ["+233 50 170 3777", "233501703777"],
+  ["00233532973455", "233532973455"],
+  ["233532973455", "233532973455"],
+];
+for (const [input, expected] of cases) {
+  assert.strictEqual(
+    toInternationalNumber(input),
+    expected,
+    `${input} should normalise to ${expected}`,
+  );
+}
+assert.ok(
+  buildWhatsAppLink(ADMIN_WHATSAPP, "Hi").startsWith(
+    "https://wa.me/233501703777?text=",
+  ),
+  "the admin number must resolve to an international wa.me link",
+);
+
+// A missing number must fail loudly rather than deep-linking to wa.me/,
+// which WhatsApp answers with a generic page instead of a chat.
+assert.throws(
+  () => buildWhatsAppLink("", "Hi"),
+  /destination number/,
+  "an empty number must not produce a chatless link",
+);
+
 console.log("\nAll checks passed.");

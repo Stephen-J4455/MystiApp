@@ -30,8 +30,8 @@ import { fonts, networks } from "../components/theme";
 
 // Contact numbers and the WhatsApp opener both come from lib/whatsapp.js.
 // The admin number used to be defined HERE as "45GU7PROOYDFE1", which is a
-// Paystack SUBACCOUNT CODE rather than a phone number - `wa.me/45GU7PROOYDFE1`
-// opens a dead chat, so the drawer's "Chat with admin" did nothing at all.
+// WhatsApp BUSINESS ACCOUNT ID, not a phone number. See lib/whatsapp.js for
+// why the `wa.me/message/<id>` form silently drops the message body.
 // Do not reintroduce local copies of these constants.
 import {
   ADMIN_WHATSAPP,

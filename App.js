@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { Linking, Platform } from "react-native";
@@ -54,6 +54,7 @@ import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
 import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
 import DockTabBar from "./src/components/DockTabBar";
 import { DOCK_BAR_HEIGHT, isAuthRoute } from "./src/lib/dockNav";
+import { getWebLinking } from "./src/lib/webLinking";
 
 SplashScreen.preventAutoHideAsync().catch(() => {
   // The splash module is unavailable on web.
@@ -289,6 +290,26 @@ export default function App() {
     };
   }, []);
 
+  const isSignedIn = Boolean(user);
+
+  // Web-only linking config. Without it the container never subscribes to
+  // `popstate`, so the browser Back button changes the URL without issuing a
+  // `GO_BACK` and the stack is stuck on the pushed screen.
+  //
+  // Gated on web only: the native build already has its own `Linking` handling
+  // in the effect above for the password-recovery deep link, and a second
+  // config would give the container its own URL listener and compete with it.
+  //
+  // Deps are on the BOOLEAN, not on `user`. The config's content only changes
+  // when the navigator swaps between its auth and app branches, and React
+  // Navigation re-subscribes whenever the `linking` object identity changes -
+  // so depending on the `user` object itself (which changes identity on every
+  // token refresh) would resubscribe for no reason.
+  const webLinking = useMemo(
+    () => (Platform.OS === "web" ? getWebLinking(isSignedIn) : undefined),
+    [isSignedIn],
+  );
+
   // Configure notifications on app start
   useEffect(() => {
     // Notifications are configured automatically by the service
@@ -379,6 +400,9 @@ export default function App() {
             {canEnterApp && fontsReady ? (
               <NavigationContainer
                 ref={navigationRef}
+                // Web only. `undefined` on native - see the memo above. This is
+                // what makes the browser Back button pop the stack.
+                linking={webLinking}
                 // The dock highlights whichever tab matches the focused screen,
                 // so the route has to be tracked from the container.
                 //

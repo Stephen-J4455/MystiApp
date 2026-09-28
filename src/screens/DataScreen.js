@@ -1714,6 +1714,19 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
+  // The hero photo is painted under an 88%-opaque near-black scrim (`adScrim`),
+  // which is deliberately dark in BOTH schemes. The hero text therefore must not
+  // follow the scheme: in light mode `c.textPrimary` is near-black, and rendered
+  // on that scrim it was effectively invisible. Text is light whenever the
+  // scrim is present, falling back to the scheme colours only for the
+  // no-image variant, which has no scrim and a plain `c.surface` behind it.
+  const heroImage = getNetworkImage(displayNetwork);
+  const heroText = heroImage ? c.heroText : c.textPrimary;
+  const heroTextDim = heroImage ? c.heroTextDim : c.textMuted;
+  // `mintDim` is mid-tone and fails against the scrim in light mode; the hero
+  // count needs a fixed bright mint that reads on near-black in both schemes.
+  const heroAccent = heroImage ? "#5CF0C8" : c.mintDim;
+
   const renderBundlePlaceholders = () => (
     <View style={s.bundleList}>
       {[0, 1, 2, 3, 4].map((index) => (
@@ -1750,9 +1763,9 @@ export default function DataScreen({ navigation, route }) {
             carrier art have no guaranteed brightness), and the badge initial
             uses the carrier brand token. */}
         <View style={s.hero}>
-          {getNetworkImage(displayNetwork) ? (
+          {heroImage ? (
             <ImageBackground
-              source={getNetworkImage(displayNetwork)}
+              source={heroImage}
               style={s.heroImage}
               resizeMode="cover"
             >
@@ -1772,13 +1785,15 @@ export default function DataScreen({ navigation, route }) {
                 </Text>
               </View>
               <View style={s.heroHeadText}>
-                <Text style={s.heroTitle}>{displayNetwork}</Text>
-                <Text style={s.heroSubtitle}>
+                <Text style={[s.heroTitle, { color: heroText }]}>
+                  {displayNetwork}
+                </Text>
+                <Text style={[s.heroSubtitle, { color: heroTextDim }]}>
                   Choose your preferred data bundle
                 </Text>
               </View>
             </View>
-            <Text style={s.heroCount}>
+            <Text style={[s.heroCount, { color: heroAccent }]}>
               {loading || !agentChecked
                 ? "Loading packages…"
                 : `${visibleBundles.length} package${
