@@ -1,6 +1,6 @@
 import { Linking } from "react-native";
-export const ADMIN_WHATSAPP = "0501703777";
-export const SUPPORT_WHATSAPP = "233532973455";
+export const ADMIN_WHATSAPP = "233501703777";
+export const SUPPORT_WHATSAPP = "233501703777";
 
 /**
  * Ghana's country code. Every number this app chats to is a local `0XX`/`XXX`
