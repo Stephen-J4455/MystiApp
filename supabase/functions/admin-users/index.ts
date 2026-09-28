@@ -266,6 +266,46 @@ Deno.serve(async (req) => {
         perPage,
       });
       if (error) throw error;
+
+      // Read the AUTHORITATIVE role/ownership for the returned page.
+      //
+      // `listUsers` returns `auth.users` only, so the role the admin app
+      // renders comes from that row's user-writable `user_metadata` /
+      // `app_metadata`. Every edge function instead reads `user_profiles`, so
+      // the two can disagree - and when they do, the admin app shows a role
+      // that does not match the permissions the target actually has. This is
+      // the same "role swap did nothing" class of bug
+      // (role-swap-three-write-targets.md), seen from the admin's side.
+      //
+      // The profile is returned alongside rather than merged INTO the user
+      // object, so the client keeps one obvious authority per field and no
+      // existing `user.user_metadata` read silently changes meaning.
+      const pageIds = (data.users || []).map((member) => String(member.id));
+      const { data: profileRows, error: profileError } = pageIds.length
+        ? await admin
+            .from("user_profiles")
+            .select("id, role, super_agent_id")
+            .in("id", pageIds)
+        : { data: [], error: null };
+      if (profileError) {
+        // Non-fatal: the list is still useful from auth metadata alone, and
+        // failing the whole page would make a missing profile look like a
+        // broken User Management screen.
+        console.error(
+          "[listUsers] Could not read authoritative profiles:",
+          profileError.message,
+        );
+      }
+      const profilesById = new Map(
+        (profileRows || []).map((row: any) => [
+          String(row.id),
+          {
+            role: String(row.role || ""),
+            superAgentId: String(row.super_agent_id || "") || null,
+          },
+        ]),
+      );
+
       // A Super Agent may only see their own sub-agents. Membership is read
       // from `user_profiles` (authoritative) joined against the auth list,
       // not from each member's user-writable metadata.
@@ -278,11 +318,15 @@ Deno.serve(async (req) => {
         visibleUserIds = new Set((myAgents || []).map((row) => String(row.id)));
       }
 
-      const users = isAdmin
-        ? data.users
-        : data.users.filter((member: AuthUser) =>
-            visibleUserIds!.has(String(member.id)),
-          );
+      const users = (data.users || [])
+        .map((member: AuthUser) => ({
+          ...member,
+          profile: profilesById.get(String(member.id)) || null,
+        }))
+        .filter(
+          (member: AuthUser) =>
+            isAdmin || visibleUserIds!.has(String(member.id)),
+        );
       return json({ ...data, users });
     }
 
@@ -578,19 +622,23 @@ Deno.serve(async (req) => {
 
       // normal_user is now written as normal_user - see the note above the
       // `profileRole` assignment.
-      const { error: profileError } = await admin.from("user_profiles").upsert(
-        {
-          id: targetUserId,
-          role: profileRole,
-          super_agent_id: resolvedSuperAgentId,
-          email: updated.user.email || null,
-          full_name:
-            String(nextMetadata.full_name || nextMetadata.name || "") || null,
-          business_name: String(nextMetadata.business_name || "") || null,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "id" },
-      );
+      const { data: savedProfile, error: profileError } = await admin
+        .from("user_profiles")
+        .upsert(
+          {
+            id: targetUserId,
+            role: profileRole,
+            super_agent_id: resolvedSuperAgentId,
+            email: updated.user.email || null,
+            full_name:
+              String(nextMetadata.full_name || nextMetadata.name || "") || null,
+            business_name: String(nextMetadata.business_name || "") || null,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "id" },
+        )
+        .select("id, role, super_agent_id")
+        .single();
       if (profileError) {
         // Loud: the auth record and the authoritative store now disagree, and
         // every migrated function reads the latter.
@@ -610,6 +658,17 @@ Deno.serve(async (req) => {
 
       return json({
         user: updated.user,
+        // The row as persisted, echoed back so the admin app renders the
+        // AUTHORITATIVE role rather than re-deriving it from auth metadata.
+        // This is also what the `user_profiles` realtime channel delivers to
+        // every other signed-in client, so the two cannot drift.
+        profile: savedProfile
+          ? {
+              id: String(savedProfile.id),
+              role: String(savedProfile.role || ""),
+              superAgentId: String(savedProfile.super_agent_id || "") || null,
+            }
+          : null,
         role: requestedRole,
         badge: requestedRole === "super_agent" ? badge : null,
         superAgentId: resolvedSuperAgentId,

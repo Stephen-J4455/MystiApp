@@ -1061,9 +1061,36 @@ Deno.serve(async (req) => {
       // `user_metadata.super_agent_id` first, so a sub-agent could point
       // themselves at a different super agent and read that agent's offers.
       const assignedSuperAgentId = String(identity.superAgentId || "").trim();
-      const agentTier = String(
-        user.user_metadata?.tier_name || user.app_metadata?.tier_name || "",
-      ).trim();
+
+      // The tier is NOT on `user_profiles`, so it has to come from the auth
+      // record. It is not on `identity` either, and it cannot be read off the
+      // `user` alias above: that object is a synthetic
+      // `{ id, email }` built from the verified token (see the comment where it
+      // is declared) and deliberately carries no metadata, so
+      // `user.user_metadata?.tier_name` was permanently `undefined`.
+      //
+      // The effect was silent and severe: `agentTier` was always "", so
+      // `tierOffers` was always empty and ONLY the super agent's untiered
+      // "General" offers ever reached a sub-agent. Any bundle priced under
+      // that sub-agent's tier was filtered out by `tierOffers` never matching,
+      // and a super agent who published tier-only pricing (no General offers at
+      // all) produced an empty list - the Data Screen showed no packages.
+      //
+      // `super-agent-user-management` `updateSubAgent` writes this field to
+      // `user_metadata` only, so that is the store to read. It is a display
+      // and pricing-precedence input, not an authorization decision, so
+      // reading the user-writable store is acceptable here - the same argument
+      // as the badge read above. Ownership still comes from
+      // `identity.superAgentId`, so this cannot be used to reach another
+      // agent's offers.
+      const { data: callerAuth } = await supabaseAdmin.auth.admin.getUserById(
+        identity.id,
+      );
+      const callerMeta = {
+        ...(callerAuth?.user?.app_metadata || {}),
+        ...(callerAuth?.user?.user_metadata || {}),
+      };
+      const agentTier = String(callerMeta.tier_name || "").trim();
 
       if (!assignedSuperAgentId) {
         return new Response(

@@ -22,6 +22,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
+import { useProfileRoleSubscription } from "./src/hooks/useProfileRoleSubscription";
 import {
   registerForPushNotifications,
   savePushToken,
@@ -300,23 +301,61 @@ export default function App() {
   }, []);
 
   /**
-   * Re-sync the signed-in user's identity from the server.
+   * Re-sync the signed-in user's identity when an admin changes their role.
    *
-   * WHY THIS EXISTS: `supabase.auth.onAuthStateChange` does NOT fire when an
-   * admin changes your role in the admin app. That write is a service-role
-   * `updateUserById`, and supabase-js has no cross-device push for auth
-   * metadata - the running client is never told. Worse, the role that the app
-   * reads lives in the ACCESS TOKEN, and `getSession()` returns the cached
-   * token, so a promoted/demoted user keeps the role they had at sign-in until
-   * that token expires (up to an hour) or the app is killed.
+   * WHY A SUBSCRIPTION AND NOT JUST THE RESUME NUZZLE
+   * --------------------------------------------------
+   * `supabase.auth.onAuthStateChange` does NOT fire when an admin changes your
+   * role in the admin app. That write is a service-role `updateUserById`, and
+   * supabase-js has no cross-device push for auth metadata - the running
+   * client is never told. Worse, the role the app reads lives in the ACCESS
+   * TOKEN, and `getSession()` returns the cached token, so a promoted/demoted
+   * user keeps their sign-in role until the token expires (up to an hour) or
+   * the app is killed.
    *
-   * `refreshSession()` forces a new token from the auth server, which then
-   * emits `TOKEN_REFRESHED` and updates the local `user` object. Call it when
-   * the app returns to the foreground - that is the moment a user is most
-   * likely to have just been given a new role on another device.
+   * The previous mitigation was a `refreshSession()` on AppState "active".
+   * That only helps if the user backgrounds and re-foregrounds the app, so a
+   * demotion could stay invisible indefinitely on a foregrounded app.
    *
-   * Guarded so a backgrounded app or a rapid app-switch does not fire a token
-   * request per resume.
+   * `user_profiles` IS the store every edge function authorizes from, so
+   * watching the signed-in user's own row turns this into a live update. The
+   * row's `role` is treated as a SIGNAL that permissions changed; a token
+   * refresh is still what actually re-reads the auth metadata the UI renders,
+   * because the JWT is the only place the app's display role comes from.
+   *
+   * Migration `20260928_004_user_profiles_realtime_rls.sql` puts the table on
+   * the `supabase_realtime` publication and restricts SELECT by RLS to the
+   * caller's own row.
+   */
+  useProfileRoleSubscription(user, () => {
+    supabase.auth
+      .refreshSession()
+      .then(({ data, error }) => {
+        if (error || !data?.session) return;
+        setUser(data.session.user);
+        setUserRole(normalizeUserRole(data.session.user));
+      })
+      .catch((refreshError) => {
+        // Not fatal: the cached session is valid until it expires, and the
+        // app is already signed in. Swallow so a dropped refresh does not
+        // become an unhandled rejection.
+        console.error(
+          "Session refresh after role change failed:",
+          refreshError,
+        );
+      });
+  });
+
+  /**
+   * Resume-time refresh, kept as a second line of defence.
+   *
+   * The subscription above covers the common case, but it only fires while the
+   * app is in the foreground AND the socket is healthy. A backgrounded app, a
+   * dropped connection, or a mobile OS that froze the process can all miss an
+   * event, so resuming is still the moment a token refresh is cheapest and
+   * most valuable.
+   *
+   * Guarded so a rapid app-switch does not fire a token request per resume.
    */
   useEffect(() => {
     // Local flag, NOT the `mounted` from the init effect above - that one is
