@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useRef } from "react";
 import { NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { Linking, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
 import Constants from "expo-constants";
@@ -102,7 +102,7 @@ const normalizeUserRole = (user) => {
  * there is no user, so "no session" implies "auth screen" regardless of what
  * the (possibly stale) route name says.
  */
-function DockHost({ navigationRef, currentRouteName, isSignedIn }) {
+function DockHost({ navigationRef, currentRouteName, isSignedIn, account }) {
   if (!isSignedIn || isAuthRoute(currentRouteName)) return null;
 
   return (
@@ -110,6 +110,7 @@ function DockHost({ navigationRef, currentRouteName, isSignedIn }) {
       <DockTabBar
         navigationRef={navigationRef}
         currentRouteName={currentRouteName}
+        account={account}
       />
     </DockVisibilityProvider>
   );
@@ -181,6 +182,12 @@ export default function App() {
 
         if (mounted) {
           setUser(session?.user ?? null);
+          // `userRole` must be set here too, not just in the auth listener.
+          // `getSession()` on a cold start does NOT emit an auth event, so
+          // without this the role stays null for the first frames and the dock
+          // renders its reduced (normal-user) menu until something else
+          // happens to trigger the listener.
+          setUserRole(normalizeUserRole(session?.user ?? null));
           setAuthInitialized(true);
         }
 
@@ -194,7 +201,9 @@ export default function App() {
           } else if (refreshData.session) {
             console.log("Session refreshed successfully");
             if (mounted) {
-              setUser(refreshData.session.user);
+              const refreshedUser = refreshData.session.user;
+              setUser(refreshedUser);
+              setUserRole(normalizeUserRole(refreshedUser));
             }
           }
         }
@@ -290,7 +299,79 @@ export default function App() {
     };
   }, []);
 
+  /**
+   * Re-sync the signed-in user's identity from the server.
+   *
+   * WHY THIS EXISTS: `supabase.auth.onAuthStateChange` does NOT fire when an
+   * admin changes your role in the admin app. That write is a service-role
+   * `updateUserById`, and supabase-js has no cross-device push for auth
+   * metadata - the running client is never told. Worse, the role that the app
+   * reads lives in the ACCESS TOKEN, and `getSession()` returns the cached
+   * token, so a promoted/demoted user keeps the role they had at sign-in until
+   * that token expires (up to an hour) or the app is killed.
+   *
+   * `refreshSession()` forces a new token from the auth server, which then
+   * emits `TOKEN_REFRESHED` and updates the local `user` object. Call it when
+   * the app returns to the foreground - that is the moment a user is most
+   * likely to have just been given a new role on another device.
+   *
+   * Guarded so a backgrounded app or a rapid app-switch does not fire a token
+   * request per resume.
+   */
+  useEffect(() => {
+    // Local flag, NOT the `mounted` from the init effect above - that one is
+    // a `let` scoped to its own effect body and is not visible here.
+    let subscribed = true;
+    let lastResumedAt = 0;
+
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+
+      const now = Date.now();
+      if (now - lastResumedAt < 5000) return;
+      lastResumedAt = now;
+
+      supabase.auth
+        .refreshSession()
+        .then(({ data, error }) => {
+          if (!subscribed || error || !data?.session) return;
+          const refreshedUser = data.session.user;
+          setUser(refreshedUser);
+          setUserRole(normalizeUserRole(refreshedUser));
+        })
+        .catch((refreshError) => {
+          // A failed refresh is not fatal - the cached session is still valid
+          // until it expires, and the user is already signed in. Swallowing it
+          // avoids an unhandled rejection on every resume.
+          console.error("Session refresh on resume failed:", refreshError);
+        });
+    });
+
+    return () => {
+      subscribed = false;
+      subscription?.remove?.();
+    };
+  }, []);
+
   const isSignedIn = Boolean(user);
+
+  // What the dock is allowed to show. Derived from the SAME `user` the
+  // navigator branches on, so the dock and the hamburger drawer can never
+  // disagree about who is a Super Agent or which badge they hold.
+  //
+  // The badge is read from `app_metadata` first: it is the authoritative store
+  // (the user can self-write `user_metadata` via `auth.updateUser()`), and
+  // every gated screen already gates on it that way. See roles-and-badges.md.
+  const account = {
+    isSuperAgent: userRole === "SuperAgent",
+    isEnterprise:
+      userRole === "SuperAgent" &&
+      String(
+        user?.app_metadata?.super_agent_badge ||
+          user?.user_metadata?.super_agent_badge ||
+          "enterprise",
+      ).toLowerCase() !== "pro",
+  };
 
   // Web-only linking config. Without it the container never subscribes to
   // `popstate`, so the browser Back button changes the URL without issuing a
@@ -509,7 +590,8 @@ export default function App() {
                   <DockHost
                     navigationRef={navigationRef}
                     currentRouteName={currentRouteName}
-                    isSignedIn={Boolean(user)}
+                    isSignedIn={isSignedIn}
+                    account={account}
                   />
                 ) : null}
               </NavigationContainer>

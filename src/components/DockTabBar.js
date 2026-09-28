@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Easing,
@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { fonts } from "./theme";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDockVisibility } from "../contexts/DockVisibilityContext";
-import { DOCK_BAR_HEIGHT, MORE_ITEMS, PRIMARY_TABS } from "../lib/dockNav";
+import { DOCK_BAR_HEIGHT, PRIMARY_TABS, moreItemsFor } from "../lib/dockNav";
 
 const MORE_SLOT_WIDTH = 64;
 
@@ -44,11 +44,25 @@ const MORE_SLOT_WIDTH = 64;
  *    `Modal` is a separate native window, so nothing in the tree can cover it
  *    and the tap can never be eaten.
  */
-export default function DockTabBar({ navigationRef, currentRouteName }) {
+export default function DockTabBar({
+  navigationRef,
+  currentRouteName,
+  account,
+}) {
   const [moreOpen, setMoreOpen] = useState(false);
   const insets = useSafeAreaInsets();
   const { dockVisible } = useDockVisibility();
   const { c } = useTheme();
+
+  // The More popup lists only what this account can actually open. A Pro Super
+  // Agent and a normal user get different menus, and the entries they are NOT
+  // shown are exactly the ones whose screen would `replace("Home")` on mount -
+  // which is what made a Pro Super Agent's "Offers" tap appear to reopen the
+  // previous screen. Filtered here rather than gated on tap.
+  const moreItems = useMemo(
+    () => moreItemsFor(account || {}),
+    [account?.isSuperAgent, account?.isEnterprise],
+  );
 
   const popupAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(0)).current;
@@ -160,7 +174,7 @@ export default function DockTabBar({ navigationRef, currentRouteName }) {
   const leftTabs = PRIMARY_TABS.slice(0, 2);
   const rightTabs = PRIMARY_TABS.slice(2);
 
-  const moreIsActive = MORE_ITEMS.some(
+  const moreIsActive = moreItems.some(
     (item) => item.routeName === currentRouteName,
   );
 
@@ -302,7 +316,7 @@ export default function DockTabBar({ navigationRef, currentRouteName }) {
             </View>
 
             <View style={styles.grid}>
-              {MORE_ITEMS.map((item) => (
+              {moreItems.map((item) => (
                 <Pressable
                   key={item.routeName}
                   accessibilityRole="button"
@@ -475,7 +489,13 @@ const buildStyles = (c) =>
     grid: {
       flexDirection: "row",
       flexWrap: "wrap",
-      justifyContent: "space-between",
+      // `flex-start` + gap, not `space-between`. The menu no longer has a fixed
+      // nine items, so the row count varies by account (4 items for a normal
+      // user, 9 for an Enterprise Super Agent) and `space-between` would fling
+      // a short last row across the full width.
+      justifyContent: "flex-start",
+      columnGap: "3%",
+      rowGap: 6,
     },
     gridItem: {
       width: "31%",

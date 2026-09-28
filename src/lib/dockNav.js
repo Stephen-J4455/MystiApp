@@ -55,7 +55,20 @@ export const PRIMARY_TABS = [
   },
 ];
 
-/** Everything in the centre "More" popup, in display order. */
+/**
+ * Everything in the centre "More" popup, in display order.
+ *
+ * `requires` gates an item by account type. Omitted means "everyone".
+ *
+ *   superAgent : Super Agent only (any badge)
+ *   enterprise : Enterprise badge only - the same rule the web overflow drawer
+ *                in `HomeScreen.js` applies to its `menuItems`, and the same
+ *                rule each gated screen enforces on mount. Pro Super Agents
+ *                do not get these; the screens themselves bounce them back to
+ *                Home with "Enterprise access", so exposing the entry in the
+ *                dock just produced a dead tap that looked like the dock
+ *                "reopening" the previous screen.
+ */
 export const MORE_ITEMS = [
   {
     routeName: "WalletTopUp",
@@ -63,6 +76,12 @@ export const MORE_ITEMS = [
     caption: "Top up balance",
     icon: "wallet-outline",
     activeIcon: "wallet",
+    // Only super agents hold an operational wallet. `agent_wallet` is a
+    // legacy table for sub-agents that is no longer funded or read anywhere -
+    // sub-agents pay per order, not from a balance. `WalletTopUpScreen`
+    // already hard-blocks non-super-agents with "Only Super Agents can fund
+    // an operational wallet", so listing it here was a guaranteed dead tap.
+    requires: "superAgent",
   },
   {
     routeName: "Notifications",
@@ -84,6 +103,7 @@ export const MORE_ITEMS = [
     caption: "Sub-agents",
     icon: "people-outline",
     activeIcon: "people",
+    requires: "enterprise",
   },
   {
     routeName: "SuperAgentOffers",
@@ -91,6 +111,7 @@ export const MORE_ITEMS = [
     caption: "Promo plans",
     icon: "pricetags-outline",
     activeIcon: "pricetags",
+    requires: "enterprise",
   },
   {
     routeName: "SuperAgentTierManagement",
@@ -98,6 +119,7 @@ export const MORE_ITEMS = [
     caption: "Level rules",
     icon: "layers-outline",
     activeIcon: "layers",
+    requires: "enterprise",
   },
   {
     routeName: "SuperAgentAnalytics",
@@ -105,6 +127,7 @@ export const MORE_ITEMS = [
     caption: "Business trends",
     icon: "stats-chart-outline",
     activeIcon: "stats-chart",
+    requires: "superAgent",
   },
   {
     routeName: "SuperAgentPaystack",
@@ -112,6 +135,7 @@ export const MORE_ITEMS = [
     caption: "Sub-account",
     icon: "card-outline",
     activeIcon: "card",
+    requires: "enterprise",
   },
   {
     routeName: "PrivacyPolicy",
@@ -121,6 +145,34 @@ export const MORE_ITEMS = [
     activeIcon: "document-text",
   },
 ];
+
+/**
+ * Narrow `MORE_ITEMS` to what this account may actually open.
+ *
+ * Mirrors the drawer rules in `HomeScreen.js`:
+ *   - Enterprise Super Agent: the full suite.
+ *   - Pro Super Agent:        Insights, Wallet, plus the universal items. No
+ *                             Tiers, Offers, Agents or Paystack.
+ *   - Everyone else (normal
+ *     users, sub-agents):    Alerts, AFA and Privacy only. No wallet - a
+ *                             sub-agent has no funded balance to top up
+ *                             (`agent_wallet` is legacy and unused), and a
+ *                             normal user has no wallet at all.
+ *
+ * `isSuperAgent` here is the ACCOUNT TYPE, not the badge - a Pro Super Agent
+ * still owns sub-agents, wallet and analytics, just not the management suite.
+ */
+export const moreItemsFor = ({
+  isSuperAgent = false,
+  isEnterprise = false,
+} = {}) =>
+  MORE_ITEMS.filter((item) => {
+    if (item.requires === "enterprise") {
+      return Boolean(isSuperAgent) && Boolean(isEnterprise);
+    }
+    if (item.requires === "superAgent") return Boolean(isSuperAgent);
+    return true;
+  });
 
 /** Route names the dock considers "the More section", for active-state tinting. */
 export const MORE_ROUTE_NAMES = MORE_ITEMS.map((item) => item.routeName);
