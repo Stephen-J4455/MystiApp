@@ -77,7 +77,7 @@ function resolvePaystackKeys(req: Request) {
 //
 // Requires `createClient` to be imported from "npm:@supabase/supabase-js@2".
 
-type CanonicalRole = "admin" | "super_agent" | "sub_agent";
+type CanonicalRole = "admin" | "super_agent" | "sub_agent" | "normal_user";
 
 interface Identity {
   id: string;
@@ -108,6 +108,11 @@ interface SupabaseClients {
  * variously-cased values. That produced live authorization bugs in BOTH
  * directions. Everything funnels through here so there is exactly one spelling
  * to reason about.
+ *
+ * `normal_user` is a member in its own right, NOT an alias of `sub_agent`. It
+ * previously WAS collapsed onto `sub_agent` here, which made every
+ * `role === "sub_agent"` check unconditionally true for ordinary customers
+ * and mis-routed their orders into `agent_orders`. Keep the two distinct.
  */
 const normalizeRole = (value: unknown): CanonicalRole | null => {
   const normalized = String(value ?? "")
@@ -127,10 +132,11 @@ const normalizeRole = (value: unknown): CanonicalRole | null => {
     case "agent":
     case "subagent":
     case "sub_agent":
+      return "sub_agent";
     case "user":
     case "normal_user":
     case "normaluser":
-      return "sub_agent";
+      return "normal_user";
     default:
       return null;
   }
@@ -1097,13 +1103,22 @@ Deno.serve(async (req) => {
     // Whether this purchase goes to `agent_orders` (the settlement-split
     // table) rather than `orders`.
     //
-    // The old second term compared a raw, un-cased `user_metadata.role`
-    // against the literal "Agent". That read was both user-writable and
-    // case-brittle: it missed "agent"/"sub_agent"/"Agent" spellings depending on
-    // how the account was created, so an agent with no assigned super agent
-    // could have their order written to the wrong table and silently lose the
-    // settlement split. `sub_agent` is the normalized spelling of both "agent"
-    // and "sub_agent".
+    // An earlier version of the second term compared a raw, un-cased
+    // `user_metadata.role` against the literal "Agent". That read was both
+    // user-writable and case-brittle: it missed "agent"/"sub_agent"/"Agent"
+    // spellings depending on how the account was created, so an agent with no
+    // assigned super agent could have their order written to the wrong table
+    // and silently lose the settlement split. `sub_agent` is the normalized
+    // spelling of both "agent" and "sub_agent".
+    //
+    // The inlined `normalizeRole` USED to collapse "normal_user" and "user"
+    // onto "sub_agent" as well, which made this second term unconditionally
+    // true and sent EVERY order in the platform - including ordinary
+    // customers' - to `agent_orders` with `agent_id` set to the buyer's own id
+    // and `buyer_type` = 'sub_agent'. `normalizeRole` now returns
+    // "normal_user" for those spellings, so this gate excludes them as
+    // intended. The rows the bad signup trigger had already mis-stamped are
+    // repaired by migration 20260928_003.
     const isAgentOrder = Boolean(
       resolvedSuperAgentId || identity.role === "sub_agent",
     );

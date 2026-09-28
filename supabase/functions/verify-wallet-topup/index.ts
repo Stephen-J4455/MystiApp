@@ -78,7 +78,7 @@ function resolvePaystackKeys(req: Request) {
 //
 // Requires `createClient` to be imported from "npm:@supabase/supabase-js@2".
 
-type CanonicalRole = "admin" | "super_agent" | "sub_agent";
+type CanonicalRole = "admin" | "super_agent" | "sub_agent" | "normal_user";
 
 interface Identity {
   id: string;
@@ -109,6 +109,11 @@ interface SupabaseClients {
  * variously-cased values. That produced live authorization bugs in BOTH
  * directions. Everything funnels through here so there is exactly one spelling
  * to reason about.
+ *
+ * `normal_user` is a member in its own right, NOT an alias of `sub_agent`. It
+ * previously WAS collapsed onto `sub_agent` here, which made every
+ * `role === "sub_agent"` check unconditionally true for ordinary customers
+ * and mis-routed their orders into `agent_orders`. Keep the two distinct.
  */
 const normalizeRole = (value: unknown): CanonicalRole | null => {
   const normalized = String(value ?? "")
@@ -128,10 +133,11 @@ const normalizeRole = (value: unknown): CanonicalRole | null => {
     case "agent":
     case "subagent":
     case "sub_agent":
+      return "sub_agent";
     case "user":
     case "normal_user":
     case "normaluser":
-      return "sub_agent";
+      return "normal_user";
     default:
       return null;
   }

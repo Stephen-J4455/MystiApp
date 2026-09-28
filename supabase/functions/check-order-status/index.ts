@@ -37,7 +37,7 @@ interface OrderStatusResponse {
 // not the others is how a `ReferenceError` gets into production.
 // ===========================================================================
 
-type CanonicalRole = "admin" | "super_agent" | "sub_agent";
+type CanonicalRole = "admin" | "super_agent" | "sub_agent" | "normal_user";
 
 // A deliberately loose client type. `createClient` returns different generic
 // instantiations depending on the installed supabase-js version, and pinning
@@ -71,10 +71,11 @@ const normalizeRole = (value: unknown): CanonicalRole | null => {
     case "agent":
     case "subagent":
     case "sub_agent":
+      return "sub_agent";
     case "user":
     case "normal_user":
     case "normaluser":
-      return "sub_agent";
+      return "normal_user";
     default:
       return null;
   }
