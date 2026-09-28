@@ -101,8 +101,8 @@ export function AuthShell({
           />
 
           <View style={s.brandText}>
-            <Text style={s.brand} numberOfLines={1}>
-              Mystiwan
+            <Text style={s.brand} numberOfLines={1} adjustsFontSizeToFit>
+              Mystiwan E-Business Center
             </Text>
             <Text style={s.brandTag} numberOfLines={1}>
               Data bundles, delivered
@@ -228,9 +228,10 @@ const s = StyleSheet.create({
   },
   brand: {
     fontFamily: fonts.displayBold,
-    fontSize: 24,
+    fontSize: 21,
     color: "#FFFFFF",
     letterSpacing: -0.3,
+    textAlign: "center",
   },
   brandTag: {
     fontFamily: fonts.body,

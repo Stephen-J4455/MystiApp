@@ -288,6 +288,16 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                             {tx.agent_id || "N/A"}
                           </Text>
                         </View>
+                        {/* `payment_transactions.recipient_phone` is written by
+                            verify-payment for every row, but this card never
+                            showed it, so a super agent could not see who they
+                            bought data for without opening each transaction. */}
+                        <View style={styles.txInfoRow}>
+                          <Text style={styles.txInfoLabel}>Recipient</Text>
+                          <Text style={styles.txInfoValue}>
+                            {tx.recipient_phone || "N/A"}
+                          </Text>
+                        </View>
                         <View style={styles.txInfoRow}>
                           <Text style={styles.txInfoLabel}>Base share</Text>
                           <Text style={styles.txInfoValue}>

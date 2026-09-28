@@ -124,6 +124,7 @@ export default function ResetPasswordScreen({ navigation }) {
             style={styles.logo}
             resizeMode="contain"
           />
+          <Text style={styles.brandName}>Mystiwan E-Business Center</Text>
           <Text style={styles.title}>Reset Password</Text>
           <Text style={styles.subtitle}>Enter your new password below</Text>
 
@@ -228,6 +229,14 @@ const styles = StyleSheet.create({
     alignSelf: "center",
     marginBottom: 20,
     borderRadius: 60,
+  },
+  brandName: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: colors.primary,
+    textAlign: "center",
+    marginBottom: 12,
+    letterSpacing: -0.2,
   },
   title: {
     fontSize: 32,

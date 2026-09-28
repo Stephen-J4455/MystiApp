@@ -718,7 +718,11 @@ export default function HistoryScreen({ navigation }) {
                         : `Phone: ${transaction.displayPhone || "N/A"}`
                       : (transaction.network
                           ? `${transaction.network.toUpperCase()} - `
-                          : "") + (transaction.data_amount || "Data Bundle")}
+                          : "") +
+                        (transaction.data_amount || "Data Bundle") +
+                        (transaction.displayPhone
+                          ? ` · ${transaction.displayPhone}`
+                          : "")}
                   </Text>
 
                   {/* Sub-agent orders carry a settlement breakdown instead of a
