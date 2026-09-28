@@ -762,7 +762,20 @@ Deno.serve(async (req) => {
         offer_title: orderTitle,
         amount: walletAmount,
         network: orderNetwork,
-        status: "pending",
+        // 'processing', not 'pending'.
+        //
+        // A wallet order is created, debited and confirmed in one request, so
+        // by the time the row exists the purchase is real and there is nothing
+        // left to wait for. 'pending' implied "not yet sent", which sent the
+        // admin hunting for an order that was never stuck.
+        //
+        // It is still DOWNGRADED to 'pending' by `dispatch-order` if the
+        // provider account is unfunded or the provider rejects the order, so
+        // "genuinely waiting on the provider" keeps a distinct status. The
+        // holder of the row must therefore never infer health from the
+        // creation status alone - `jehuca_order_id` is the real evidence of
+        // dispatch.
+        status: "processing",
         payment_reference: reference,
         is_self: recipientPhone === (user.user_metadata?.phone || ""),
         data_amount: orderTitle,
@@ -1436,7 +1449,10 @@ Deno.serve(async (req) => {
         // Agents buy on behalf of a recipient and no longer collect a name for
         // them, so this stays null rather than borrowing the buyer's own name.
         recipient_name: null,
-        status: "pending",
+        // 'processing', not 'pending'. Same reasoning as the customer path: the
+        // payment is verified before this insert, and `dispatch-order`
+        // downgrades to 'pending' on a genuine provider deferral.
+        status: "processing",
         transaction_status: verifyData.data.status,
         // Persisted so the replay guard above can find this order, and so the
         // partial unique index from migration 20260926_008 can reject a
@@ -1488,7 +1504,11 @@ Deno.serve(async (req) => {
         offer_title: orderTitle,
         amount: orderAmount,
         network: orderNetwork,
-        status: "pending",
+        // 'processing', not 'pending'. The payment is verified by the time this
+        // row is written, so the order is live. `dispatch-order` downgrades it
+        // to 'pending' if the provider is unfunded or rejects it, which is what
+        // keeps "waiting on the provider" distinguishable from "in flight".
+        status: "processing",
         payment_reference: reference,
         is_self: isSelfPurchase,
         data_amount: orderTitle,

@@ -568,7 +568,14 @@ Deno.serve(async (req) => {
     const { error: orderUpdateError } = await admin
       .from("agent_orders")
       .update({
-        status: "pending",
+        // 'processing', matching `dispatch-order` on a successful hand-off.
+        //
+        // This wrote 'pending' on an order the provider had just ACCEPTED, so a
+        // successful reorder landed in the admin's deferral bucket and looked
+        // like it still needed sending. 'pending' is reserved for orders the
+        // provider has not taken; once `jehuca_order_id` is set the order is in
+        // flight and 'processing' is the accurate status.
+        status: "processing",
         transaction_status: "success",
         jehuca_order_id: providerOrderId,
         jehuca_order_status: providerStatus,
