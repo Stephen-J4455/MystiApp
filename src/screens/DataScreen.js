@@ -603,6 +603,23 @@ export default function DataScreen({ navigation, route }) {
         setUserEmail(user.email);
         setUserPhone(profile?.phone || user.user_metadata?.phone || "");
 
+        // The owning Super Agent, from `public.user_profiles.super_agent_id`
+        // via the profile context.
+        //
+        // This local was REMOVED during the profile refactor while the
+        // `if (assignedSuperAgentId)` below still read it. That threw a
+        // `ReferenceError`, which the `catch` at the end of this function
+        // swallowed into `setAgentChecked(true)` - so nothing surfaced, the
+        // sub-account block was simply skipped, and a sub-agent ended up buying
+        // with the PLATFORM Paystack account instead of their Super Agent's
+        // settlement subaccount.
+        //
+        // Lesson (twice now, see the `retainsWallet(userId, ...)` call):
+        // removing a declaration means grepping for EVERY reference to it, not
+        // just the block being edited - and note the failure here was worse
+        // than a crash, because the catch turned it into missing behaviour.
+        const assignedSuperAgentId = profileSuperAgentId || null;
+
         // Role and ownership come from `public.user_profiles` (the profile
         // context), NOT from auth metadata: `user_metadata.role` and
         // `user_metadata.super_agent_id` are both writable by the account owner

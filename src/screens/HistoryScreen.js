@@ -254,7 +254,17 @@ export default function HistoryScreen({ navigation }) {
         } = await supabase.auth.getUser();
         if (!user || cancelled) return;
 
-        const isAssignedSuperAgent = isSuperAgent(user);
+        // From the profile context (`public.user_profiles`), NOT
+        // `isSuperAgent(user)`. The old call was left over from the metadata
+        // era: `isSuperAgent` was no longer imported here, so it threw a
+        // `ReferenceError` that the `catch` below swallowed into a console log -
+        // meaning the realtime channel was NEVER created and this screen's
+        // live order updates silently did not work.
+        //
+        // Importing the predicate would not have fixed it either: it takes a
+        // PROFILE now, and `user` here is an auth user, which folds to
+        // "NormalUser" and would have reported every super agent as a customer.
+        const isAssignedSuperAgent = isSuperAgentProfile;
         const channel = supabase.channel(
           uniqueTopic("history_orders_realtime"),
         );
@@ -408,7 +418,7 @@ export default function HistoryScreen({ navigation }) {
           }
         }
 
-        if (isSuperAgent(user)) {
+        if (isSuperAgentProfile) {
           const { data: assignedOrders, error: assignedError } = await supabase
             .from("agent_orders")
             .select("*")
