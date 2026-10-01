@@ -17,6 +17,7 @@ import { isSuperAgent } from "../lib/superAgent";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 
 const money = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 const count = (value) => Number(value || 0).toLocaleString();
@@ -135,6 +136,10 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const topInset = Platform.OS === "android" ? insets.top : 0;
   const styles = useAnalyticsStyles(c, topInset);
+  // The bottom dock is absolutely positioned on native, so it floats over the
+  // scroll view. Adds its height plus the safe-area inset so the final metric
+  // card is never stranded underneath. Web returns just `extra`.
+  const dockBottomPadding = useDockBottomPadding(24);
   const [analytics, setAnalytics] = useState(EMPTY_ANALYTICS);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -224,7 +229,10 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
         </View>
       ) : (
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: dockBottomPadding },
+          ]}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}

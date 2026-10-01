@@ -17,6 +17,7 @@ import { isSuperAgent } from "../lib/superAgent";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 
 export default function SuperAgentManagementScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -29,6 +30,10 @@ export default function SuperAgentManagementScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const topInset = Platform.OS === "android" ? insets.top : 0;
   const styles = useManagementStyles(c, topInset);
+  // The bottom dock is absolutely positioned on native, so it floats over the
+  // scroll view. Adds its height plus the safe-area inset so the trailing
+  // action cards are never stranded underneath. Web returns just `extra`.
+  const dockBottomPadding = useDockBottomPadding(40);
 
   // The gate is Enterprise-only, so every management action is driven off one
   // resolved badge. Previously this expression was re-evaluated inline five
@@ -102,7 +107,12 @@ export default function SuperAgentManagementScreen({ navigation }) {
         <Text style={styles.title}>Super Agent</Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: dockBottomPadding },
+        ]}
+      >
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Management Center</Text>
           <Text style={styles.cardText}>

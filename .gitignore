@@ -1,6 +1,7 @@
 .expo/
 .expo-shared/
 dist/
+android
 web-build/
 android/.gradle/
 android/app/build/
@@ -36,3 +37,9 @@ supabase/.temp/
 supabase/.branches/
 supabase/.env
 supabase/functions/**/*.zip
+
+# Android release signing -- never commit keystores or their passwords
+*.keystore
+!android/app/debug.keystore
+android/keystore.properties
+android/signing.properties

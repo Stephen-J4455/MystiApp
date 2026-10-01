@@ -21,6 +21,7 @@ import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import {
   upsertTierOffer,
   fetchCatalogPackages,
@@ -129,6 +130,11 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const topInset = Platform.OS === "android" ? insets.top : 0;
   const styles = useTierStyles(c, topInset);
+  // The bottom dock is absolutely positioned on native, so it floats over the
+  // scroll view. Replaces the static `content` paddingBottom so the last tier's
+  // save button is never stranded underneath it. Returns the plain `extra`
+  // spacing on web, where there is no dock.
+  const dockBottomPadding = useDockBottomPadding(10);
 
   const buildMaps = useCallback((tierRows, catalog, pricingRows, offers) => {
     const basePrices = {};
@@ -638,7 +644,10 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
       </View>
 
       <KeyboardAwareScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: dockBottomPadding },
+        ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >

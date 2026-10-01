@@ -18,6 +18,7 @@ import { sanitizeGhanaPhone } from "../lib/ghanaPhone";
 import { useThemedStyles } from "../components/ui";
 import { fonts } from "../components/theme";
 import { getEdgeFunctionName } from "../lib/env";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import {
   updateSubAgentTier,
   fetchSuperAgentTiers,
@@ -62,6 +63,10 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const insets = useSafeAreaInsets();
   const topInset = Platform.OS === "android" ? insets.top : 0;
   const styles = useAgentsStyles(c, topInset);
+  // The bottom dock is absolutely positioned on native, so it floats over the
+  // scroll view. Adds its height plus the safe-area inset so the trailing
+  // create button is never stranded underneath. Web returns just `extra`.
+  const dockBottomPadding = useDockBottomPadding(28);
 
   useEffect(() => {
     loadData();
@@ -297,6 +302,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
       <KeyboardAwareScrollView
         style={styles.scroll}
+        contentContainerStyle={{ paddingBottom: dockBottomPadding }}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
@@ -580,7 +586,6 @@ const useAgentsStyles = (c, topInset = 0) =>
     scroll: {
       flex: 1,
       paddingHorizontal: 18,
-      paddingBottom: 28,
     },
     card: {
       backgroundColor: c.surface,
