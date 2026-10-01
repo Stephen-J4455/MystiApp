@@ -6,11 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/mystiwan.png",
     "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/mystiwan.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
+
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.stephenj2.mystiwanebusiness",
@@ -23,13 +19,6 @@
       "package": "com.stephenj2.mystiwanebusiness",
       "googleServicesFile": "./google-services.json",
       "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "WAKE_LOCK"]
-    },
-    "notification": {
-      "icon": "./assets/mystiwan.png",
-      "color": "#ffffff",
-      "androidMode": "default",
-      "androidCollapsedTitle": "Mystiwan-E-Business",
-      "iosDisplayInForeground": true
     },
     "plugins": [
       [
