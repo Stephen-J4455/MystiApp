@@ -22,7 +22,7 @@ import {
 
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -34,6 +34,7 @@ import { getEdgeFunctionName } from "../lib/env";
 
 export default function SuperAgentPaystackScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
+  const { isSuperAgent } = useProfile();
   const theme = useTheme();
   const c = theme.c;
   // Edge-to-edge on Android with no navigator header, so the screen insets
@@ -67,7 +68,7 @@ export default function SuperAgentPaystackScreen({ navigation }) {
           return;
         }
 
-        if (!isSuperAgent(user)) {
+        if (!isSuperAgent) {
           // A demoted Super Agent keeps their existing Paystack sub-account
           // row; nothing deletes it on a role change. Rather than bouncing
           // them Home - which makes the settlement account look like it was
@@ -95,10 +96,13 @@ export default function SuperAgentPaystackScreen({ navigation }) {
           setReadOnly(true);
           return;
         }
+        // Badge from `app_metadata` ONLY. `user_profiles` has no badge column,
+        // but `user_metadata.super_agent_badge` is writable by the account
+        // owner via `auth.updateUser()` - so the old `user_metadata`-first read
+        // let a Pro agent self-assign Enterprise. `app_metadata` is
+        // service-role-only and cannot be forged.
         const badge = String(
-          user.app_metadata?.super_agent_badge ||
-            user.user_metadata?.super_agent_badge ||
-            "",
+          user.app_metadata?.super_agent_badge || "",
         ).toLowerCase();
         if (badge !== "enterprise") {
           showError(

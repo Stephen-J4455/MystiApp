@@ -13,7 +13,7 @@ import { Platform } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -129,6 +129,10 @@ const MetricCard = ({ icon, label, value, detail, tone }) => {
 
 export default function SuperAgentAnalyticsScreen({ navigation }) {
   const { showError } = useNotification();
+  // Role from `public.user_profiles`, the store every edge function authorizes
+  // from. NOT from the auth record: `user_metadata` is self-writable and
+  // `app_metadata` lives in the access token.
+  const { isSuperAgent } = useProfile();
   const theme = useTheme();
   const c = theme.c;
   // Edge-to-edge on Android with no navigator header, so the screen insets
@@ -159,7 +163,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           navigation.replace("Login");
           return;
         }
-        if (!isSuperAgent(user)) {
+        if (!isSuperAgent) {
           navigation.replace("Home");
           return;
         }

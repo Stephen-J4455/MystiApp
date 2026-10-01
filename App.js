@@ -21,10 +21,9 @@ import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
 import { uniqueTopic } from "./src/lib/realtime";
-import { accountRole } from "./src/lib/superAgent";
+import { useProfile, ProfileProvider } from "./src/contexts/ProfileContext";
 import { NotificationProvider } from "./src/contexts/NotificationContext";
 import { useAppVersion } from "./src/hooks/useAppVersion";
-import { useProfileRoleSubscription } from "./src/hooks/useProfileRoleSubscription";
 import {
   registerForPushNotifications,
   savePushToken,
@@ -64,27 +63,6 @@ SplashScreen.preventAutoHideAsync().catch(() => {
 });
 
 const Stack = createNativeStackNavigator();
-
-/**
- * The signed-in user's role, folding a MISSING role into "NormalUser".
- *
- * The local `normalizeUserRole` this replaces returned `null` for an absent
- * role, which is the honest reading of the metadata in isolation. But "no role
- * key in either store" IS the canonical representation of a normal user here:
- * `admin-users.setUserRole` DELETES both role keys when demoting rather than
- * writing `normal_user`, and `handle_new_user()` (20260928_002) leaves a
- * role-less signup with `user_profiles.role = 'normal_user'`. So the single
- * most common kind of normal user is the one with NO role to read - which made
- * every `userRole === "NormalUser"` wallet veto evaluate false, i.e. fail OPEN,
- * and put the wallet card in front of exactly the accounts it was written to
- * protect.
- *
- * `accountRole` in lib/superAgent.js is now the single implementation, so the
- * two copies cannot drift. The `null` is still preserved for "no user at all",
- * which must stay distinguishable from "signed in as a normal user" - folding
- * that into `NormalUser` would make the signed-out state look like a role.
- */
-const resolveAccountRole = (user) => (user ? accountRole(user) : null);
 
 /**
  * Hosts the bottom dock. Needs the theme (for the palette) and the visibility
@@ -200,12 +178,12 @@ export default function App() {
 
         if (mounted) {
           setUser(session?.user ?? null);
-          // `userRole` must be set here too, not just in the auth listener.
-          // `getSession()` on a cold start does NOT emit an auth event, so
-          // without this the role stays null for the first frames and the dock
-          // renders its reduced (normal-user) menu until something else
-          // happens to trigger the listener.
-          setUserRole(resolveAccountRole(session?.user ?? null));
+          // The role is NOT derived here. It comes from `public.user_profiles`
+          // via `useProfile()`, which reads the same table every edge function
+          // authorizes from. Setting it from the auth record is what let a stale
+          // token role disagree with the server for up to an hour, and the role
+          // lives in the access token precisely because that is a bad place to
+          // keep it.
           setAuthInitialized(true);
         }
 
@@ -221,7 +199,6 @@ export default function App() {
             if (mounted) {
               const refreshedUser = refreshData.session.user;
               setUser(refreshedUser);
-              setUserRole(resolveAccountRole(refreshedUser));
             }
           }
         }
@@ -288,25 +265,12 @@ export default function App() {
       if (!mounted) return;
 
       const nextUser = session?.user ?? null;
-      const nextRole = resolveAccountRole(nextUser);
       setUser(nextUser);
-      setUserRole(nextRole);
 
       if (event === "PASSWORD_RECOVERY") {
         setIsResettingPassword(true);
       } else if (event === "USER_UPDATED" && isResettingPassword) {
         setIsResettingPassword(false);
-      }
-
-      // Check agent status when user changes. Sub-agents no longer use wallets.
-      if (session?.user) {
-        const nextRole = resolveAccountRole(session.user);
-        if (mounted) {
-          setUserRole(nextRole);
-          setIsAgent(nextRole === "Agent");
-        }
-      } else {
-        if (mounted) setIsAgent(false);
       }
     });
 
@@ -318,50 +282,26 @@ export default function App() {
   }, []);
 
   /**
-   * Re-sync the signed-in user's identity when an admin changes their role.
+   * Mirror the authoritative role into the one piece of app state the dock
+   * still needs.
    *
-   * WHY A SUBSCRIPTION AND NOT JUST THE RESUME NUZZLE
-   * --------------------------------------------------
-   * `supabase.auth.onAuthStateChange` does NOT fire when an admin changes your
-   * role in the admin app. That write is a service-role `updateUserById`, and
-   * supabase-js has no cross-device push for auth metadata - the running
-   * client is never told. Worse, the role the app reads lives in the ACCESS
-   * TOKEN, and `getSession()` returns the cached token, so a promoted/demoted
-   * user keeps their sign-in role until the token expires (up to an hour) or
-   * the app is killed.
+   * `ProfileProvider` already watches the signed-in user's own
+   * `public.user_profiles` row over realtime (migration 20260928_004), so a
+   * promotion or demotion lands immediately. This effect only forwards it.
    *
-   * The previous mitigation was a `refreshSession()` on AppState "active".
-   * That only helps if the user backgrounds and re-foregrounds the app, so a
-   * demotion could stay invisible indefinitely on a foregrounded app.
-   *
-   * `user_profiles` IS the store every edge function authorizes from, so
-   * watching the signed-in user's own row turns this into a live update. The
-   * row's `role` is treated as a SIGNAL that permissions changed; a token
-   * refresh is still what actually re-reads the auth metadata the UI renders,
-   * because the JWT is the only place the app's display role comes from.
-   *
-   * Migration `20260928_004_user_profiles_realtime_rls.sql` puts the table on
-   * the `supabase_realtime` publication and restricts SELECT by RLS to the
-   * caller's own row.
+   * The `refreshSession()` workaround that used to live here is GONE, and that
+   * is the point of the whole change: it existed solely to re-read a role out
+   * of the access token after `user_profiles` had already changed. The token
+   * is no longer a role source, so there is nothing to re-read and nothing to
+   * wait an hour for.
    */
-  useProfileRoleSubscription(user, () => {
-    supabase.auth
-      .refreshSession()
-      .then(({ data, error }) => {
-        if (error || !data?.session) return;
-        setUser(data.session.user);
-        setUserRole(resolveAccountRole(data.session.user));
-      })
-      .catch((refreshError) => {
-        // Not fatal: the cached session is valid until it expires, and the
-        // app is already signed in. Swallow so a dropped refresh does not
-        // become an unhandled rejection.
-        console.error(
-          "Session refresh after role change failed:",
-          refreshError,
-        );
-      });
-  });
+  const profile = useProfile();
+  const profileRoleValue = profile.role;
+
+  useEffect(() => {
+    setUserRole(profileRoleValue);
+    setIsAgent(profileRoleValue === "Agent");
+  }, [profileRoleValue]);
 
   /**
    * Does this account own a `super_agent_wallets` row?
@@ -465,9 +405,12 @@ export default function App() {
         .refreshSession()
         .then(({ data, error }) => {
           if (!subscribed || error || !data?.session) return;
-          const refreshedUser = data.session.user;
-          setUser(refreshedUser);
-          setUserRole(resolveAccountRole(refreshedUser));
+          // Session validity only. The ROLE is not re-derived here: it lives in
+          // `public.user_profiles` now, and `ProfileProvider` is subscribed to
+          // that row directly, so a role change is already applied the moment it
+          // is written. Re-reading it from the token is what used to take up to
+          // an hour to catch up.
+          setUser(data.session.user);
         })
         .catch((refreshError) => {
           // A failed refresh is not fatal - the cached session is still valid
@@ -502,9 +445,7 @@ export default function App() {
     isEnterprise:
       userRole === "SuperAgent" &&
       String(
-        user?.app_metadata?.super_agent_badge ||
-          user?.user_metadata?.super_agent_badge ||
-          "enterprise",
+        user?.app_metadata?.super_agent_badge || "enterprise",
       ).toLowerCase() !== "pro",
     // Whether this account owns a `super_agent_wallets` row, INDEPENDENT of
     // role. See the effect below.
@@ -616,124 +557,139 @@ export default function App() {
       <SafeAreaProvider>
         <NotificationProvider>
           <ThemeProvider>
-            {canEnterApp && fontsReady ? (
-              <NavigationContainer
-                ref={navigationRef}
-                // Web only. `undefined` on native - see the memo above. This is
-                // what makes the browser Back button pop the stack.
-                linking={webLinking}
-                // The dock highlights whichever tab matches the focused screen,
-                // so the route has to be tracked from the container.
-                //
-                // `onReady` matters as much as `onStateChange`: on the very
-                // first render the state does not CHANGE, so without this the
-                // route name stays null and the dock renders for a frame over
-                // the Login screen before the first navigation corrects it.
-                // That flash is visible on cold start, which is exactly when a
-                // signed-out user is looking at it.
-                onReady={() =>
-                  setCurrentRouteName(
-                    navigationRef.current?.getCurrentRoute()?.name ?? null,
-                  )
-                }
-                onStateChange={() =>
-                  setCurrentRouteName(
-                    navigationRef.current?.getCurrentRoute()?.name ?? null,
-                  )
-                }
-              >
-                <Stack.Navigator
-                  screenOptions={{ headerShown: false }}
-                  initialRouteName={
-                    isResettingPassword
-                      ? "ResetPassword"
-                      : user
-                        ? "Home"
-                        : "Login"
+            {/* Wraps everything the navigator renders so every screen reads the
+                same authoritative role. Inside the theme but outside the
+                navigation container: it needs no navigation, and screens reach
+                it through context rather than props. */}
+            <ProfileProvider user={user}>
+              {canEnterApp && fontsReady ? (
+                <NavigationContainer
+                  ref={navigationRef}
+                  // Web only. `undefined` on native - see the memo above. This is
+                  // what makes the browser Back button pop the stack.
+                  linking={webLinking}
+                  // The dock highlights whichever tab matches the focused screen,
+                  // so the route has to be tracked from the container.
+                  //
+                  // `onReady` matters as much as `onStateChange`: on the very
+                  // first render the state does not CHANGE, so without this the
+                  // route name stays null and the dock renders for a frame over
+                  // the Login screen before the first navigation corrects it.
+                  // That flash is visible on cold start, which is exactly when a
+                  // signed-out user is looking at it.
+                  onReady={() =>
+                    setCurrentRouteName(
+                      navigationRef.current?.getCurrentRoute()?.name ?? null,
+                    )
+                  }
+                  onStateChange={() =>
+                    setCurrentRouteName(
+                      navigationRef.current?.getCurrentRoute()?.name ?? null,
+                    )
                   }
                 >
-                  {user && !isResettingPassword ? (
-                    <>
-                      <Stack.Screen name="Home" component={HomeScreen} />
-                      <Stack.Screen name="Profile" component={ProfileScreen} />
-                      <Stack.Screen
-                        name="PrivacyPolicy"
-                        component={PrivacyPolicyScreen}
-                      />
-                      <Stack.Screen
-                        name="Notifications"
-                        component={NotificationsScreen}
-                      />
-                      <Stack.Screen name="Data" component={DataScreen} />
-                      <Stack.Screen
-                        name="SuperAgentManagement"
-                        component={SuperAgentManagementScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentOffers"
-                        component={SuperAgentOffersScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentTierManagement"
-                        component={SuperAgentTierManagementScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentAgents"
-                        component={SuperAgentAgentsScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentPaystack"
-                        component={SuperAgentPaystackScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentAnalytics"
-                        component={SuperAgentAnalyticsScreen}
-                      />
-                      <Stack.Screen
-                        name="SuperAgentHeldOrders"
-                        component={SuperAgentHeldOrdersScreen}
-                      />
-                      <Stack.Screen name="Receipt" component={ReceiptScreen} />
-                      <Stack.Screen name="History" component={HistoryScreen} />
-                      <Stack.Screen
-                        name="WalletTopUp"
-                        component={WalletTopUpScreen}
-                      />
-                      <Stack.Screen
-                        name="AfaRegistration"
-                        component={AfaRegistrationScreen}
-                      />
-                    </>
-                  ) : (
-                    <>
-                      <Stack.Screen name="Login" component={LoginScreen} />
-                      <Stack.Screen name="Signup" component={SignupScreen} />
-                      <Stack.Screen
-                        name="ForgotPassword"
-                        component={ForgotPasswordScreen}
-                      />
-                      <Stack.Screen
-                        name="ResetPassword"
-                        component={ResetPasswordScreen}
-                        initialParams={{ isResetting: isResettingPassword }}
-                      />
-                    </>
-                  )}
-                </Stack.Navigator>
-                {/* Bottom dock, native only. The web build keeps the top-bar
+                  <Stack.Navigator
+                    screenOptions={{ headerShown: false }}
+                    initialRouteName={
+                      isResettingPassword
+                        ? "ResetPassword"
+                        : user
+                          ? "Home"
+                          : "Login"
+                    }
+                  >
+                    {user && !isResettingPassword ? (
+                      <>
+                        <Stack.Screen name="Home" component={HomeScreen} />
+                        <Stack.Screen
+                          name="Profile"
+                          component={ProfileScreen}
+                        />
+                        <Stack.Screen
+                          name="PrivacyPolicy"
+                          component={PrivacyPolicyScreen}
+                        />
+                        <Stack.Screen
+                          name="Notifications"
+                          component={NotificationsScreen}
+                        />
+                        <Stack.Screen name="Data" component={DataScreen} />
+                        <Stack.Screen
+                          name="SuperAgentManagement"
+                          component={SuperAgentManagementScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentOffers"
+                          component={SuperAgentOffersScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentTierManagement"
+                          component={SuperAgentTierManagementScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentAgents"
+                          component={SuperAgentAgentsScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentPaystack"
+                          component={SuperAgentPaystackScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentAnalytics"
+                          component={SuperAgentAnalyticsScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentHeldOrders"
+                          component={SuperAgentHeldOrdersScreen}
+                        />
+                        <Stack.Screen
+                          name="Receipt"
+                          component={ReceiptScreen}
+                        />
+                        <Stack.Screen
+                          name="History"
+                          component={HistoryScreen}
+                        />
+                        <Stack.Screen
+                          name="WalletTopUp"
+                          component={WalletTopUpScreen}
+                        />
+                        <Stack.Screen
+                          name="AfaRegistration"
+                          component={AfaRegistrationScreen}
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <Stack.Screen name="Login" component={LoginScreen} />
+                        <Stack.Screen name="Signup" component={SignupScreen} />
+                        <Stack.Screen
+                          name="ForgotPassword"
+                          component={ForgotPasswordScreen}
+                        />
+                        <Stack.Screen
+                          name="ResetPassword"
+                          component={ResetPasswordScreen}
+                          initialParams={{ isResetting: isResettingPassword }}
+                        />
+                      </>
+                    )}
+                  </Stack.Navigator>
+                  {/* Bottom dock, native only. The web build keeps the top-bar
                     overflow menu, so the dock is gated on Platform.OS. It sits
                     inside the container as a sibling of the navigator so it
                     floats over the active screen rather than pushing layout. */}
-                {Platform.OS !== "web" ? (
-                  <DockHost
-                    navigationRef={navigationRef}
-                    currentRouteName={currentRouteName}
-                    isSignedIn={isSignedIn}
-                    account={account}
-                  />
-                ) : null}
-              </NavigationContainer>
-            ) : null}
+                  {Platform.OS !== "web" ? (
+                    <DockHost
+                      navigationRef={navigationRef}
+                      currentRouteName={currentRouteName}
+                      isSignedIn={isSignedIn}
+                      account={account}
+                    />
+                  ) : null}
+                </NavigationContainer>
+              ) : null}
+            </ProfileProvider>
             <UpdateNotification
               visible={updateModal.visible}
               title={updateModal.title}

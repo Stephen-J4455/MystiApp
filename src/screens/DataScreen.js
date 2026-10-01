@@ -22,6 +22,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
+import { useProfile } from "../contexts/ProfileContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { ConfirmDialog, EmptyState } from "../components/ui";
 import { fonts, networks } from "../components/theme";
@@ -114,6 +115,15 @@ export default function DataScreen({ navigation, route }) {
     walletTopUpPercent: 1.95,
   });
   const { showError, showSuccess } = useNotification();
+  // Role + ownership from `public.user_profiles`. See ProfileContext: the auth
+  // record is not a trustworthy role source (`user_metadata` is self-writable,
+  // `app_metadata` lives in the access token).
+  const {
+    isSuperAgent: isSuperAgentProfile,
+    isSubAgent: isAgentProfile,
+    superAgentId: profileSuperAgentId,
+    profile,
+  } = useProfile();
   const bundleSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
   useEffect(() => {
@@ -591,31 +601,26 @@ export default function DataScreen({ navigation, route }) {
       } = await supabase.auth.getUser();
       if (user && user.email) {
         setUserEmail(user.email);
-        setUserPhone(user.user_metadata?.phone || "");
+        setUserPhone(profile?.phone || user.user_metadata?.phone || "");
 
-        const assignedSuperAgentId =
-          user.user_metadata?.super_agent_id ||
-          user.user_metadata?.superAgentId ||
-          user.app_metadata?.super_agent_id ||
-          user.app_metadata?.superAgentId ||
-          null;
-        setSuperAgentId(assignedSuperAgentId);
+        // Role and ownership come from `public.user_profiles` (the profile
+        // context), NOT from auth metadata: `user_metadata.role` and
+        // `user_metadata.super_agent_id` are both writable by the account owner
+        // via `auth.updateUser()`, so they cannot decide who somebody is or
+        // which Super Agent settles their purchase.
+        //
+        // `phone` and `tier_name` are the two exceptions and are NOT roles -
+        // `user_profiles` has no such column, so they still come from metadata.
+        // They are display/contact data, not authorization.
+        setSuperAgentId(profileSuperAgentId || null);
         setAgentTier(
           user.user_metadata?.tier_name || user.app_metadata?.tier_name || null,
         );
 
-        const normalizedRole = String(
-          user.user_metadata?.role || user.app_metadata?.role || "",
-        ).toLowerCase();
-        setIsSuperAgentUser(
-          normalizedRole === "superagent" || normalizedRole === "super_agent",
-        );
-        const isUserRoleAgent =
-          normalizedRole === "agent" ||
-          normalizedRole === "sub_agent" ||
-          normalizedRole === "superagent" ||
-          normalizedRole === "super_agent" ||
-          Boolean(assignedSuperAgentId);
+        setIsSuperAgentUser(isSuperAgentProfile);
+        // A sub-agent OR a super agent may buy from an agent package list, and
+        // an ownerless sub-agent still gets the General list.
+        const isUserRoleAgent = isAgentProfile || isSuperAgentProfile;
 
         setIsAgent(isUserRoleAgent);
 
@@ -684,18 +689,21 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
 
-        const assignedSuperAgentId =
-          user.user_metadata?.super_agent_id ||
-          user.user_metadata?.superAgentId ||
-          superAgentId ||
-          null;
+        // The owning Super Agent, from the profile. The old chain preferred
+        // `user_metadata.super_agent_id`, which the account owner controls, and
+        // would silently fall back to a locally-held id - so a user could point
+        // their purchases at an arbitrary settlement account.
+        const assignedSuperAgentId = profileSuperAgentId || null;
 
         // Sub-agents buy from the packages their super agent published for the
         // tier they were granted (falling back to the super agent's General prices).
         if (assignedSuperAgentId) {
+          // The owner is passed in from the profile rather than re-read from
+          // auth metadata inside the service - see the note there.
           const agentPackagesResult = await loadSubAgentPackages({
             user,
             network,
+            superAgentId: assignedSuperAgentId,
           });
 
           if (

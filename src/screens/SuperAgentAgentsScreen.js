@@ -13,7 +13,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
+import { profileRole } from "../lib/profileRole";
 import { sanitizeGhanaPhone } from "../lib/ghanaPhone";
 import { useThemedStyles } from "../components/ui";
 import { fonts } from "../components/theme";
@@ -24,22 +25,6 @@ import {
   fetchSuperAgentTiers,
   createSubAgent,
 } from "../services/superAgentService";
-
-const normalizeRole = (user) => {
-  const role = (user?.user_metadata?.role || user?.app_metadata?.role || "")
-    .toString()
-    .trim();
-
-  if (!role) return null;
-
-  const normalized = role.toLowerCase();
-  if (normalized === "admin") return "Admin";
-  if (normalized === "superagent" || normalized === "super_agent")
-    return "SuperAgent";
-  if (normalized === "agent" || normalized === "sub_agent") return "Agent";
-
-  return role;
-};
 
 export default function SuperAgentAgentsScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -57,6 +42,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
     tierName: "",
   });
   const { showError, showSuccess } = useNotification();
+  const { isSuperAgent, profile } = useProfile();
   const { c } = useThemedStyles();
   // Edge-to-edge on Android with no navigator header, so the screen insets
   // itself. iOS already spaces this header, so the inset is Android-only.
@@ -84,7 +70,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         return;
       }
 
-      if (!isSuperAgent(user)) {
+      if (!isSuperAgent) {
         navigation.replace("Home");
         return;
       }
@@ -114,16 +100,17 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
       if (error) throw error;
 
-      const assignedAgents = (data?.users || []).filter((member) => {
-        const role = normalizeRole(member);
-        const assignedSuperAgentId =
-          member.user_metadata?.super_agent_id ||
-          member.user_metadata?.superAgentId ||
-          member.app_metadata?.super_agent_id ||
-          member.app_metadata?.superAgentId ||
-          null;
-        return role === "Agent" && assignedSuperAgentId === superAgentId;
-      });
+      // `role` and `superAgentId` come from `user_profiles`, resolved
+      // server-side and attached to each member by `listUsers`. The previous
+      // filter read `member.user_metadata.super_agent_id`, which the LISTED
+      // account can rewrite at will via `auth.updateUser()` - so a sub-agent
+      // could point that key at a different Super Agent and appear in someone
+      // else's roster.
+      const assignedAgents = (data?.users || []).filter(
+        (member) =>
+          profileRole({ role: member.role }) === "Agent" &&
+          String(member.superAgentId || "") === String(superAgentId),
+      );
 
       setAgents(assignedAgents);
     } catch (error) {
@@ -200,9 +187,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
   const handleCreateSubAgent = async () => {
     if (!currentUser) return;
     const badge = String(
-      currentUser.user_metadata?.super_agent_badge ||
-        currentUser.app_metadata?.super_agent_badge ||
-        "enterprise",
+      currentUser.app_metadata?.super_agent_badge || "enterprise",
     ).toLowerCase();
     if (badge !== "enterprise") {
       showError(
@@ -307,9 +292,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
         keyboardShouldPersistTaps="handled"
       >
         {String(
-          currentUser?.user_metadata?.super_agent_badge ||
-            currentUser?.app_metadata?.super_agent_badge ||
-            "enterprise",
+          currentUser?.app_metadata?.super_agent_badge || "enterprise",
         ).toLowerCase() !== "enterprise" ? (
           <View style={styles.card}>
             <View style={styles.restrictedIcon}>

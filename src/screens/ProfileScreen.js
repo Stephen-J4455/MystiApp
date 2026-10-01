@@ -21,6 +21,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { supabase } from "../lib/supabase";
 import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { useNotification } from "../contexts/NotificationContext";
+import { useProfile } from "../contexts/ProfileContext";
 import { useTheme } from "../contexts/ThemeContext";
 import {
   useThemedStyles,
@@ -70,6 +71,7 @@ export default function ProfileScreen({ navigation }) {
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const { showError, showSuccess } = useNotification();
+  const { isSubAgent: isAgentProfile, profile } = useProfile();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [isAgent, setIsAgent] = useState(false);
   const [showPasswordSection, setShowPasswordSection] = useState(false);
@@ -170,25 +172,21 @@ export default function ProfileScreen({ navigation }) {
     } = await supabase.auth.getUser();
     if (user) {
       setUser(user);
-      setFullName(user.user_metadata?.full_name || "");
-      setEmail(user.email || "");
-      setPhone(user.user_metadata?.phone || "");
+      // Name and phone come from the PROFILE where it has them:
+      // `user_profiles` is RLS-protected, whereas `user_metadata.full_name` and
+      // `.phone` are writable by the account owner via `auth.updateUser()`.
+      // `notifications_enabled` has no profile column and is not a role, so it
+      // still reads metadata.
+      setFullName(profile?.fullName || user.user_metadata?.full_name || "");
+      setEmail(user.email || profile?.email || "");
+      setPhone(profile?.phone || user.user_metadata?.phone || "");
       setNotificationsEnabled(
         user.user_metadata?.notifications_enabled ?? true,
       );
 
-      const normalizedRole = String(
-        user.user_metadata?.role || user.app_metadata?.role || "",
-      ).toLowerCase();
-      const agentStatus =
-        normalizedRole === "agent" ||
-        normalizedRole === "sub_agent" ||
-        Boolean(
-          user.user_metadata?.super_agent_id ||
-          user.user_metadata?.superAgentId ||
-          user.app_metadata?.super_agent_id ||
-          user.app_metadata?.superAgentId,
-        );
+      // A sub-agent is one whose PROFILE says so. The old test also accepted
+      // "has a super_agent_id in metadata", which the owner controls.
+      const agentStatus = isAgentProfile;
       setIsAgent(agentStatus);
 
       if (agentStatus) {

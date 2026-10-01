@@ -11,7 +11,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import {
   isHeldWindowElapsed,
   isReorderableHeldOrder,
@@ -22,6 +22,7 @@ import { ThemedScreen } from "../components/ui";
 
 export default function SuperAgentTransactionsScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
+  const { isSuperAgent } = useProfile();
   const [loading, setLoading] = useState(true);
   const [transactions, setTransactions] = useState([]);
   // Id of the held order being retried, or null. One id rather than a boolean so
@@ -38,7 +39,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
         navigation.replace("Login");
         return;
       }
-      if (!isSuperAgent(user)) {
+      if (!isSuperAgent) {
         navigation.replace("Home");
         return;
       }

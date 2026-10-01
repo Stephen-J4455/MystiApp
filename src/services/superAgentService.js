@@ -83,19 +83,28 @@ const findCatalogPackageForOffer = (catalog, offer) => {
 /**
  * Loads data packages for a sub-agent from their assigned super agent's published offers.
  * Resolves tier pricing precedence (tier-specific prices win; General untiered offers fill the rest).
+ *
+ * `superAgentId` is PASSED IN from `public.user_profiles.super_agent_id`, read by
+ * the caller through `ProfileContext`. It used to be dug out of
+ * `user.user_metadata.super_agent_id` here, which the account owner can rewrite
+ * at will with `auth.updateUser()` - so a sub-agent could point their package
+ * list at any Super Agent's catalogue, and the offers/prices returned here were
+ * resolved against that chosen owner. The server enforces the real owner
+ * (`resolveIdentity` reads the profile), so the client must not nominate one.
+ *
+ * `tier_name` still comes from metadata: it is display/pricing context rather
+ * than an authorization input, and `user_profiles` has no such column.
  */
-export const loadSubAgentPackages = async ({ user, network = null }) => {
+export const loadSubAgentPackages = async ({
+  user,
+  network = null,
+  superAgentId: resolvedSuperAgentId = null,
+}) => {
   if (!user) {
     return { offers: [], agent_tier: null, error: "User is required" };
   }
 
-  const assignedSuperAgentId = String(
-    user.user_metadata?.super_agent_id ||
-      user.user_metadata?.superAgentId ||
-      user.app_metadata?.super_agent_id ||
-      user.app_metadata?.superAgentId ||
-      "",
-  ).trim();
+  const assignedSuperAgentId = String(resolvedSuperAgentId || "").trim();
 
   const agentTier = String(
     user.user_metadata?.tier_name || user.app_metadata?.tier_name || "",

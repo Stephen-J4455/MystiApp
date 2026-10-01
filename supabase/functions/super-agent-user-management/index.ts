@@ -373,16 +373,31 @@ Deno.serve(async (req) => {
       // member's self-writable metadata.
       const { data: agentProfiles } = await supabaseAdmin
         .from("user_profiles")
-        .select("id")
+        .select("id, role, super_agent_id")
         .eq("super_agent_id", superAgentId);
-      const visibleIds = new Set(
-        (agentProfiles || []).map((row) => String(row.id)),
+      const profileById = new Map(
+        (agentProfiles || []).map((row) => [String(row.id), row]),
       );
+      const visibleIds = new Set(profileById.keys());
       const filteredUsers = superAgentId
         ? users.filter((member: any) => visibleIds.has(String(member.id)))
         : users;
 
-      return new Response(JSON.stringify({ users: filteredUsers }), {
+      // Each member carries their AUTHORITATIVE role and owner alongside the
+      // auth record. The client used to re-derive both from
+      // `user_metadata`, which the account owner can rewrite with
+      // `auth.updateUser()` - so the sub-agent list was filtered on a value
+      // the listed user controls. The client now reads these instead.
+      const withProfile = filteredUsers.map((member: any) => {
+        const row: any = profileById.get(String(member.id));
+        return {
+          ...member,
+          role: String(row?.role || ""),
+          superAgentId: String(row?.super_agent_id || "") || null,
+        };
+      });
+
+      return new Response(JSON.stringify({ users: withProfile }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

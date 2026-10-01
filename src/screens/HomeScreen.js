@@ -15,7 +15,7 @@ import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { supabase } from "../lib/supabase";
-import { accountRole } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { useNotification } from "../contexts/NotificationContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
@@ -158,13 +158,33 @@ export default function HomeScreen({ navigation }) {
   // underneath it. Zero on web, where there is no dock.
   const dockPadding = useDockBottomPadding(16);
   const [user, setUser] = useState(null);
-  const [isAgent, setIsAgent] = useState(false);
-  const [isSuperAgent, setIsSuperAgent] = useState(false);
-  // A NORMAL USER must never be shown a wallet. Tracked as its own flag rather
-  // than inferred from `!isSuperAgent`, because a sub-agent is also not a super
-  // agent and they legitimately DO get a wallet - the two cases need opposite
-  // answers from the same-looking question.
-  const [isNormalUser, setIsNormalUser] = useState(false);
+  // Role and ownership come from `public.user_profiles` via `ProfileProvider`.
+  //
+  // These four were LOCAL state resolved from the auth record, and that was the
+  // bug: `user_metadata` is writable by the account owner via
+  // `auth.updateUser()`, and `app_metadata` lives in the ACCESS TOKEN, which
+  // supabase-js caches for up to an hour. So the hero could offer a wallet to an
+  // account the server treats as a normal user, and a demotion could take up to
+  // an hour to remove it. The context reads the same table every edge function
+  // authorizes from and updates live.
+  const {
+    // `isSubAgent`, NOT `isAgent` - the context exposes `isSubAgent`, so
+    // destructuring `isAgent` yielded `undefined`. That is falsy, so EVERY
+    // sub-agent fell through the hero pill to the final `else` and rendered
+    // "Held" instead of "Mirrored" - the exact label this refactor set out to
+    // remove. A wrong property name is a silent `undefined` here, not a crash,
+    // which is why the bundler and babel both passed.
+    isSubAgent: isAgentRole,
+    isSuperAgent: isSuperAgentRole,
+    isNormalUser,
+    profile,
+  } = useProfile();
+  // Local aliases so the ~15 render sites below keep reading naturally. The
+  // distinction from `*Role` above is deliberate: the context value is the
+  // authority, these are just the same boolean under the name the JSX already
+  // used. Nothing writes them.
+  const isAgent = isAgentRole;
+  const isSuperAgent = isSuperAgentRole;
   const [unreadCount, setUnreadCount] = useState(0);
   const [transactions, setTransactions] = useState([]);
   const [loadingTransactions, setLoadingTransactions] = useState(true);
@@ -251,10 +271,13 @@ export default function HomeScreen({ navigation }) {
   const activityEntrance = useEntrance(4);
   const promoEntrance = useEntrance(5);
 
+  // The badge lives in `app_metadata` ONLY - `user_profiles` has no column for
+  // it. `app_metadata` is the service-role-only store, so it cannot be forged
+  // by the account owner; the old `user_metadata`-first read could, via
+  // `auth.updateUser()`, which is how a Pro account could grant itself the
+  // Enterprise badge. See roles-and-badges.md.
   const badgeValue = String(
-    user?.user_metadata?.super_agent_badge ||
-      user?.app_metadata?.super_agent_badge ||
-      "enterprise",
+    user?.app_metadata?.super_agent_badge || "enterprise",
   ).toLowerCase();
   const isProSuperAgent = isSuperAgent && badgeValue === "pro";
 
@@ -456,15 +479,11 @@ export default function HomeScreen({ navigation }) {
             )
             .subscribe();
 
-          // Subscribe to sub-agent orders using the role/assignment, not a wallet.
-          const normalizedRole = String(
-            user.user_metadata?.role || user.app_metadata?.role || "",
-          ).toLowerCase();
-          if (
-            normalizedRole === "agent" ||
-            normalizedRole === "sub_agent" ||
-            user.user_metadata?.super_agent_id
-          ) {
+          // Subscribe to sub-agent orders using the PROFILE role, not a wallet.
+          // `isAgentRole` comes from `public.user_profiles`; the old test read
+          // `user_metadata.role` / `user_metadata.super_agent_id`, both of which
+          // the account owner can rewrite with `auth.updateUser()`.
+          if (isAgentRole) {
             agentOrdersSubscription = supabase
               .channel(uniqueTopic("home_agent_orders_realtime"))
               .on(
@@ -592,7 +611,7 @@ export default function HomeScreen({ navigation }) {
     // resolved - reading a stray row for a normal user and rendering it. The
     // role flags flip together, so listing both means the read is re-attempted
     // with the correct authority once the role is actually known.
-  }, [isSuperAgent, isNormalUser]);
+  }, [isSuperAgentRole, isNormalUser]);
 
   // Auto-scroll ads effect
   useEffect(() => {
@@ -658,54 +677,30 @@ export default function HomeScreen({ navigation }) {
     } = await supabase.auth.getUser();
     setUser(user);
 
-    // `accountRole` is the single role resolver (see lib/superAgent.js). It
-    // folds an ABSENT role into "NormalUser", which is the canonical
-    // representation of a normal user: `setUserRole` deletes both role keys
-    // when demoting rather than writing `normal_user`, and
-    // `handle_new_user()` (20260928_002) leaves a role-less signup as
-    // `normal_user` in the profile.
+    // The role is NOT resolved here. `ProfileProvider` already holds the
+    // authoritative `user_profiles` row and keeps it live over realtime, so
+    // this function used to re-derive the same three flags from the auth
+    // record - which is how the hero could show a wallet to an account the
+    // server considered a normal user, and how a stale token role survived up
+    // to an hour after a demotion.
     //
-    // The local check this replaces only matched the LITERAL strings, so for
-    // the most common normal user - the one carrying no role at all - it set
-    // `isNormalUser` to false, `hasWallet` went true, and the wallet card
-    // rendered the balance. The gate was right and its input was wrong.
-    const role = accountRole(user);
-    setIsSuperAgent(role === "SuperAgent");
-    // Explicit, so the wallet gate can DENY rather than infer. "Not a super
-    // agent" is the wrong test: a sub-agent is also not a super agent, and
-    // they legitimately DO get a wallet.
-    setIsNormalUser(role === "NormalUser");
+    // The only thing still needed from the auth record is the badge, which
+    // `user_profiles` has no column for. It is read from `app_metadata` ONLY:
+    // `user_metadata.super_agent_badge` is writable by the account owner via
+    // `auth.updateUser()`, so the old `user_metadata`-first read let anyone
+    // grant themselves the Enterprise badge.
     setIsEnterpriseSuperAgent(
-      role !== "SuperAgent" ||
+      !isSuperAgentRole ||
         String(
-          user?.app_metadata?.super_agent_badge ||
-            user?.user_metadata?.super_agent_badge ||
-            "enterprise",
+          user?.app_metadata?.super_agent_badge || "enterprise",
         ).toLowerCase() !== "pro",
     );
 
-    // Check if user is a sub-agent using role or assignment metadata.
-    //
-    // `role` is the folded display value ("Agent" for a sub-agent), so this
-    // compares THAT rather than a lowercase copy of the raw metadata. It must
-    // read `role` and not a `normalizedRole` local: the local was removed
-    // when the resolution above moved to `accountRole`, and leaving the
-    // reference behind made every mount throw
-    // `ReferenceError: Property 'normalizedRole' doesn't exist` - caught by
-    // the `catch` below, which then silently forced `isAgent` to false, so
-    // every sub-agent and super agent loaded their transactions and ads as a
-    // NON-agent. The failure looked like missing orders rather than a crash.
     if (user) {
       try {
-        const agentStatus =
-          role === "Agent" ||
-          Boolean(
-            user.user_metadata?.super_agent_id ||
-            user.user_metadata?.superAgentId ||
-            user.app_metadata?.super_agent_id ||
-            user.app_metadata?.superAgentId,
-          );
-        setIsAgent(agentStatus);
+        // A sub-agent is one whose PROFILE says so. The old test also accepted
+        // "has a `super_agent_id` in metadata", which the owner controls.
+        const agentStatus = isAgentRole;
 
         // Fetch independent home data in parallel instead of serializing two
         // network requests before the home content can settle.
@@ -715,12 +710,10 @@ export default function HomeScreen({ navigation }) {
         ]);
       } catch (error) {
         console.error("Error checking agent status:", error);
-        setIsAgent(false);
         // Fetch data even if agent check fails
         await Promise.all([fetchRecentTransactions(false), fetchAds(false)]);
       }
     } else {
-      setIsAgent(false);
       await Promise.all([fetchRecentTransactions(false), fetchAds(false)]);
     }
   };
@@ -734,35 +727,20 @@ export default function HomeScreen({ navigation }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user) {
-        // Same single resolver as `getCurrentUser` - see the note there on why
-        // an absent role must fold to "NormalUser". Both paths must set these
-        // flags, or a refresh silently resets the wallet gate and re-exposes
-        // the hero.
-        const role = accountRole(user);
-        setIsSuperAgent(role === "SuperAgent");
-        setIsNormalUser(role === "NormalUser");
+        // The role flags are NOT re-set here. They come from
+        // `ProfileProvider`, which holds the authoritative `user_profiles` row
+        // and updates it live. The previous version re-derived them from the
+        // auth record on every refresh, which meant a refresh could silently
+        // reset the wallet gate using a stale token role - the exact bug that
+        // let a demoted account keep seeing a balance.
         setIsEnterpriseSuperAgent(
-          role !== "SuperAgent" ||
+          !isSuperAgentRole ||
             String(
-              user?.app_metadata?.super_agent_badge ||
-                user?.user_metadata?.super_agent_badge ||
-                "enterprise",
+              user?.app_metadata?.super_agent_badge || "enterprise",
             ).toLowerCase() !== "pro",
         );
 
-        // A sub-agent is recognised by role OR by having an owner. `role` is
-        // the folded display value here, so the raw key is compared instead of
-        // a lowercase copy of the metadata - the same two literals the old
-        // inline check used.
-        const agentStatus =
-          role === "Agent" ||
-          Boolean(
-            user.user_metadata?.super_agent_id ||
-            user.user_metadata?.superAgentId ||
-            user.app_metadata?.super_agent_id ||
-            user.app_metadata?.superAgentId,
-          );
-        setIsAgent(agentStatus);
+        const agentStatus = isAgentRole;
 
         if (refreshTransactions) {
           fetchRecentTransactions(agentStatus);
@@ -773,7 +751,6 @@ export default function HomeScreen({ navigation }) {
       }
     } catch (error) {
       console.error("Error checking agent status:", error);
-      setIsAgent(false);
       if (refreshTransactions) {
         fetchRecentTransactions(false);
       }
@@ -1276,8 +1253,11 @@ export default function HomeScreen({ navigation }) {
     },
   ];
 
-  const displayName =
-    user?.user_metadata?.full_name || user?.email?.split("@")[0] || "User";
+  // Display name from the PROFILE, which is RLS-protected and populated by
+  // `handle_new_user()`. `user_metadata.full_name` is writable by the account
+  // owner, so a self-written value would have replaced their real name on the
+  // header. Falls back to the email local-part, as before.
+  const displayName = profile?.fullName || user?.email?.split("@")[0] || "User";
 
   const greeting = (() => {
     const hour = new Date().getHours();
@@ -1457,7 +1437,9 @@ export default function HomeScreen({ navigation }) {
                         ? isProSuperAgent
                           ? "Pro"
                           : "Enterprise"
-                        : "Held"
+                        : isAgent
+                          ? "Mirrored"
+                          : "Held"
                       : "Live"}
                   </Text>
                 </View>
@@ -1473,7 +1455,9 @@ export default function HomeScreen({ navigation }) {
                   <Text style={styles.heroFootnote}>
                     {isSuperAgent
                       ? "Operational balance for agent orders"
-                      : "Balance held from a previous Super Agent role"}
+                      : isAgent
+                        ? "Spending power funded by your own top-ups. Not withdrawable."
+                        : "Balance held from a previous Super Agent role"}
                   </Text>
 
                   <View style={styles.heroActions}>

@@ -13,7 +13,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -23,6 +23,8 @@ export default function SuperAgentManagementScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [user, setUser] = useState(null);
   const { showError } = useNotification();
+  // Role from `public.user_profiles` - see the note in ProfileContext.
+  const { isSuperAgent } = useProfile();
   const theme = useTheme();
   const c = theme.c;
   // Edge-to-edge on Android with no navigator header, so the screen insets
@@ -40,9 +42,7 @@ export default function SuperAgentManagementScreen({ navigation }) {
   // times, which is exactly the kind of duplication that lets the Pro and
   // Enterprise branches drift apart.
   const badge = String(
-    user?.user_metadata?.super_agent_badge ||
-      user?.app_metadata?.super_agent_badge ||
-      "enterprise",
+    user?.app_metadata?.super_agent_badge || "enterprise",
   ).toLowerCase();
   const isEnterprise = badge !== "pro";
 
@@ -61,7 +61,7 @@ export default function SuperAgentManagementScreen({ navigation }) {
           return;
         }
 
-        if (!isSuperAgent(currentUser)) {
+        if (!isSuperAgent) {
           navigation.replace("Home");
           return;
         }

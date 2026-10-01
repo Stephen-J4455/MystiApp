@@ -16,6 +16,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useTheme } from "../contexts/ThemeContext";
 import { useNotification } from "../contexts/NotificationContext";
+import { useProfile } from "../contexts/ProfileContext";
 import { getStatusTone, fonts } from "../components/theme";
 import { splitReceiptNumber } from "../lib/receiptNumber";
 import { formatOrderStatusLabel, resolveOrderStatus } from "../lib/orderStatus";
@@ -40,6 +41,7 @@ export default function ReceiptScreen({ navigation, route }) {
   const transaction = route.params?.transaction || null;
   const { c, isDark, statusTone: tones } = useTheme();
   const { showSuccess, showError } = useNotification();
+  const { isSuperAgent: isSuperAgentProfile } = useProfile();
   const s = useMemo(() => buildStyles(c), [c]);
   const [reordering, setReordering] = useState(false);
   // The receipt is reachable from the Home list, History and the sub-agent
@@ -58,15 +60,11 @@ export default function ReceiptScreen({ navigation, route }) {
           data: { user },
         } = await supabase.auth.getUser();
         if (cancelled || !user) return;
-        const role = String(
-          user.user_metadata?.role || user.app_metadata?.role || "",
-        )
-          .trim()
-          .toLowerCase();
+        // Role from `public.user_profiles`, not the auth record.
+        // `user_metadata` is self-writable and `app_metadata` lives in the
+        // access token; neither may decide who is viewing a receipt.
         if (!cancelled) {
-          setIsSuperAgentViewer(
-            role === "superagent" || role === "super_agent",
-          );
+          setIsSuperAgentViewer(isSuperAgentProfile);
         }
       } catch (error) {
         // A failed role read leaves the flag false, so the button stays hidden.

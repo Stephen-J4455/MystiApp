@@ -15,7 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { fonts } from "../components/theme";
@@ -123,6 +123,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   const [confirmDeleteTierId, setConfirmDeleteTierId] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const { showError, showSuccess, showInfo } = useNotification();
+  const { isSuperAgent } = useProfile();
   const theme = useTheme();
   const c = theme.c;
   // Edge-to-edge on Android with no navigator header, so the screen insets
@@ -191,14 +192,12 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           return;
         }
 
-        if (!isSuperAgent(user)) {
+        if (!isSuperAgent) {
           navigation.replace("Home");
           return;
         }
         const badge = String(
-          user.user_metadata?.super_agent_badge ||
-            user.app_metadata?.super_agent_badge ||
-            "enterprise",
+          user.app_metadata?.super_agent_badge || "enterprise",
         ).toLowerCase();
         if (badge !== "enterprise") {
           showError(

@@ -13,7 +13,7 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
@@ -207,6 +207,8 @@ export default function HistoryScreen({ navigation }) {
   // previous one's details.
   const [complaintOrder, setComplaintOrder] = useState(null);
   const { showError, showSuccess } = useNotification();
+  const { isSuperAgent: isSuperAgentProfile, isSubAgent: isAgentProfile } =
+    useProfile();
   const skeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
   useEffect(() => {
@@ -319,18 +321,11 @@ export default function HistoryScreen({ navigation }) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user) {
-        const superAgentStatus = isSuperAgent(user);
-        setIsSuperAgentUser(superAgentStatus);
-        const normalizedRole = String(
-          user.user_metadata?.role || user.app_metadata?.role || "",
-        ).toLowerCase();
-        const agentStatus =
-          normalizedRole === "agent" ||
-          normalizedRole === "sub_agent" ||
-          Boolean(
-            user.user_metadata?.super_agent_id ||
-            user.user_metadata?.superAgentId,
-          );
+        // Role from `public.user_profiles` via the profile context. The old code
+        // read `user_metadata.role` and `user_metadata.super_agent_id`, both
+        // writable by the account owner via `auth.updateUser()`.
+        setIsSuperAgentUser(isSuperAgentProfile);
+        const agentStatus = isAgentProfile;
         setIsAgent(agentStatus);
 
         // Fetch transactions after determining agent status

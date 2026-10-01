@@ -12,7 +12,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
-import { isSuperAgent } from "../lib/superAgent";
+import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import colors from "../components/theme";
 import { ThemedScreen } from "../components/ui";
@@ -31,6 +31,7 @@ const getStatusColor = (status) => {
 
 export default function SuperAgentTopUpHistoryScreen({ navigation }) {
   const { showError } = useNotification();
+  const { isSuperAgent, loading: profileLoading } = useProfile();
   const [topUps, setTopUps] = useState([]);
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -51,7 +52,12 @@ export default function SuperAgentTopUpHistoryScreen({ navigation }) {
           navigation.replace("Login");
           return;
         }
-        if (!isSuperAgent(user)) {
+        // Role comes from `public.user_profiles` via the profile context, never
+        // from the auth record. `user_metadata` is self-writable via
+        // `auth.updateUser()` and `app_metadata` lives in the access token, so
+        // neither is a trustworthy answer to "is this a Super Agent".
+        if (!isSuperAgent || profileLoading) {
+          if (profileLoading) return;
           navigation.replace("Home");
           return;
         }

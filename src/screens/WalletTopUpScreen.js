@@ -402,14 +402,12 @@ export default function WalletTopUpScreen({ navigation }) {
         return;
       }
       setUserEmail(user.email);
-      // business_name lives on auth.users.user_metadata, not on agent_wallet.
-      const metaBusinessName =
-        user?.user_metadata?.business_name ||
-        user?.app_metadata?.business_name ||
-        "";
-      setBusinessName(metaBusinessName);
+      // `app_metadata` ONLY, never `user_metadata`. `admin-users.setUserRole`
+      // mirrors the role into both stores and migration 20260928_001
+      // backfilled the store, so the authoritative value is present here;
+      // `user_metadata` is the self-writable one and must not decide a role.
       const normalizedRole = String(
-        user?.user_metadata?.role || user?.app_metadata?.role || "",
+        user?.app_metadata?.role || "",
       ).toLowerCase();
       const isSuperAgentRole =
         normalizedRole === "superagent" || normalizedRole === "super_agent";
@@ -441,7 +439,7 @@ export default function WalletTopUpScreen({ navigation }) {
       // mirror of an authority that is enforced server-side either way.
       const { data: profile, error: profileError } = await supabase
         .from("user_profiles")
-        .select("role, super_agent_id, full_name")
+        .select("role, super_agent_id, full_name, business_name")
         .eq("id", user.id)
         .maybeSingle();
       if (profileError) {
@@ -451,16 +449,33 @@ export default function WalletTopUpScreen({ navigation }) {
       const profileRole = String(profile?.role || "").toLowerCase();
       const assignedSuperAgentId = profile?.super_agent_id || null;
       const assignedSuperAgentName = profile?.full_name || "";
+      // `business_name` lives on the profile too, and is the ONLY source now
+      // that `user_metadata` is out of this screen. `handle_new_user()` copies
+      // it in from the signup metadata, so this is the same value under RLS
+      // rather than one the account owner can rewrite at will via
+      // `auth.updateUser()`. Empty when the profile read failed, which the
+      // header already tolerates.
+      setBusinessName(String(profile?.business_name || ""));
 
-      // A sub-agent funds their super agent ONLY when the server-authoritative
-      // profile says so. `profileError` fails closed: an unreadable profile
-      // leaves both flags false, so the gate below refuses rather than
-      // guessing a destination for the money.
-      const subAgentFundsSuperAgent =
+      // `sub_agent` on the AUTHORITATIVE profile is what makes this a sub-agent.
+      //
+      // This test deliberately does NOT require `assignedSuperAgentId`. An
+      // ownerless sub-agent is a real account - migration 20260928_003 repairs
+      // only rows with no role in EITHER metadata store, and an admin can
+      // assign a role without picking an owner - and they were previously
+      // classified as a demoted ex-super-agent, which rendered the Pay button
+      // disabled with the label "Top-up unavailable" and no way forward.
+      //
+      // Letting them reach Pay costs nothing when they have no owner:
+      // `verify-wallet-topup` checks `canFundWallet` and returns 403 BEFORE it
+      // touches Paystack, so no payment is ever initiated. They get an honest
+      // "not assigned to a Super Agent" error rather than a permanently dead
+      // button. The owner requirement stays enforced on the server, where it
+      // actually protects the money.
+      const isSubAgentProfile =
         !isSuperAgentRole &&
-        (profileRole === "sub_agent" || profileRole === "subagent") &&
-        Boolean(assignedSuperAgentId) &&
-        assignedSuperAgentId !== user.id;
+        (profileRole === "sub_agent" || profileRole === "subagent");
+      const subAgentFundsSuperAgent = isSubAgentProfile;
 
       if (!isSuperAgentRole) {
         // A NORMAL USER IS REFUSED, and refused FIRST - before the wallet row
@@ -520,7 +535,12 @@ export default function WalletTopUpScreen({ navigation }) {
         if (subAgentFundsSuperAgent) {
           setIsSuperAgentUser(false);
           setFundsSuperAgent(true);
-          setSuperAgentName(assignedSuperAgentName || "your Super Agent");
+          // With no owner there is nobody to name, so the name falls back to a
+          // generic phrase rather than claiming a Super Agent exists. The
+          // confirmation copy below is guarded on `superAgentName`, so leaving
+          // it empty keeps the "credited to <name>'s wallet" line off screen
+          // instead of printing a lie.
+          setSuperAgentName(assignedSuperAgentName || "");
           return;
         }
 
@@ -529,7 +549,13 @@ export default function WalletTopUpScreen({ navigation }) {
         // have no destination. They keep the read-only balance view - which is
         // correct for them precisely BECAUSE they hold a row with no owner to
         // fund, and the check above has already ruled out the sub-agent case.
-        if (retainsWallet(user, wallet)) {
+        // `retainsWallet` takes the account ID, not the auth user - it compares
+        // it against the wallet row's `super_agent_id`. Passing the user object
+        // used to work because the old signature read `user.id`; the parameter
+        // is now the id directly, so passing the object would compare
+        // "[object Object]" and always return false, silently re-enabling the
+        // wallet for every demoted account.
+        if (retainsWallet(user.id, wallet)) {
           setIsSuperAgentUser(false);
           setIsFormerSuperAgent(true);
           return;
@@ -547,31 +573,34 @@ export default function WalletTopUpScreen({ navigation }) {
       // Resolve the super agent's Paystack subaccount so wallet top-ups can be
       // routed to the Super Agent settlement account.
       // The super agent's business name lives on super_agent_paystack.business_name.
-      const superAgentId =
-        user?.user_metadata?.super_agent_id ||
-        user?.app_metadata?.super_agent_id ||
-        null;
-      if (superAgentId) {
-        try {
-          const { data: subaccountRow } = await supabase
-            .from("super_agent_paystack")
-            .select("subaccount_code, is_active, business_name")
-            .eq("super_agent_id", superAgentId)
-            .maybeSingle();
-          if (subaccountRow?.is_active && subaccountRow.subaccount_code) {
-            setSubaccountCode(subaccountRow.subaccount_code);
-            // Prefer the super agent's business name from the subaccount row
-            // so the Paystack page shows who the payment is going to.
-            if (subaccountRow.business_name) {
-              setSuperAgentName(subaccountRow.business_name);
-            }
+      //
+      // A SUPER AGENT has no owner - `admin-users` writes `super_agent_id =
+      // null` for that role and the wallet being funded is their own - so the id
+      // is the user themselves rather than a value read out of metadata. The
+      // previous read of `user_metadata.super_agent_id` was also wrong here
+      // beyond the trust issue: that key is only ever populated for a SUB-AGENT
+      // (migration 20260928_001 mirrors it for super agents, but
+      // `setUserRole` nulls it for them), so a super agent topped themselves up
+      // and silently got no settlement subaccount at all.
+      try {
+        const { data: subaccountRow } = await supabase
+          .from("super_agent_paystack")
+          .select("subaccount_code, is_active, business_name")
+          .eq("super_agent_id", user.id)
+          .maybeSingle();
+        if (subaccountRow?.is_active && subaccountRow.subaccount_code) {
+          setSubaccountCode(subaccountRow.subaccount_code);
+          // Prefer the super agent's business name from the subaccount row so
+          // the Paystack page shows who the payment is going to.
+          if (subaccountRow.business_name) {
+            setSuperAgentName(subaccountRow.business_name);
           }
-        } catch (subaccountError) {
-          console.warn(
-            "Could not resolve super-agent subaccount:",
-            subaccountError,
-          );
         }
+      } catch (subaccountError) {
+        console.warn(
+          "Could not resolve super-agent subaccount:",
+          subaccountError,
+        );
       }
     } catch (error) {
       console.error("Fetch user data err:", error);
@@ -841,8 +870,17 @@ export default function WalletTopUpScreen({ navigation }) {
             </TouchableOpacity>
             {fundsSuperAgent && (
               <Text style={[styles.balanceHint, { marginTop: 10 }]}>
-                The amount you pay is credited to{" "}
-                {superAgentName || "your Super Agent"}'s wallet as their real
+                {superAgentName ? (
+                  <>
+                    The amount you pay is credited to {superAgentName}'s wallet
+                    as their real
+                  </>
+                ) : (
+                  <>
+                    The amount you pay is credited to your Super Agent's wallet
+                    as their real
+                  </>
+                )}
                 money, and raises your available balance by the same figure. The
                 1.95% charge applies to this top-up only — orders placed from
                 your balance are not charged again.

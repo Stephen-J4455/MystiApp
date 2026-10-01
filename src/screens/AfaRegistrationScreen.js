@@ -20,6 +20,7 @@ import { supabase, getPaystackPublicKey } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { useNotification } from "../contexts/NotificationContext";
+import { useProfile } from "../contexts/ProfileContext";
 import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
 
 const escapeJs = (value) =>
@@ -58,6 +59,7 @@ const initialForm = {
 
 export default function AfaRegistrationScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
+  const { isSuperAgent: isSuperAgentProfile } = useProfile();
   const [form, setForm] = useState(initialForm);
   const [settings, setSettings] = useState(null);
   const [registrations, setRegistrations] = useState([]);
@@ -281,11 +283,11 @@ export default function AfaRegistrationScreen({ navigation }) {
   const activeRegistration = registrations.find(
     (item) => item.status === "active",
   );
-  const normalizedRole = String(
-    user?.user_metadata?.role || user?.app_metadata?.role || "",
-  ).toLowerCase();
-  const isSuperAgent =
-    normalizedRole === "superagent" || normalizedRole === "super_agent";
+  // Role from `public.user_profiles` via the profile context. The old read of
+  // `user_metadata.role` is self-assignable, and `app_metadata.role` lives in
+  // the access token - neither may decide whether this account may set a
+  // sub-agent AFA price.
+  const isSuperAgent = isSuperAgentProfile;
 
   // A super agent sets what their OWN sub-agents pay. Routed through the edge
   // function rather than a direct table write so the row is always scoped to
