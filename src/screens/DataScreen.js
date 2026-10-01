@@ -83,6 +83,19 @@ export default function DataScreen({ navigation, route }) {
   // once the agent explicitly confirms the cost breakdown.
   const [walletConfirm, setWalletConfirm] = useState(null);
   const [walletPurchasing, setWalletPurchasing] = useState(false);
+  // Which of a sub-agent's two settlement paths to use. `'direct'` is the
+  // default because it is the only path that works for an ownerless sub-agent,
+  // and it needs no balance to be present.
+  //
+  // Super agents are deliberately NOT included: their wallet is the only way
+  // they can buy (see `continueAgentPurchase`), so offering them a choice would
+  // be offering a second route to a purchase they cannot make by Paystack.
+  const [agentPaymentMethod, setAgentPaymentMethod] = useState("direct");
+  // The sub-agent's OWN mirrored balance, which is the ceiling on what a wallet
+  // purchase may spend. `null` = not loaded, and is deliberately NOT the same
+  // as 0: an unread balance must not be shown as an empty wallet, which would
+  // read as "you cannot afford this" when the truth is "we do not know yet".
+  const [subAgentBalance, setSubAgentBalance] = useState(null);
   const [userEmail, setUserEmail] = useState("");
   const [recipientPhone, setRecipientPhone] = useState("");
   const [userPhone, setUserPhone] = useState("");
@@ -690,6 +703,52 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
+  // The sub-agent's OWN mirrored balance, which is what the payment picker has
+  // to quote and what the edge function treats as their ceiling.
+  //
+  // Read from `super_agent_wallets` on the CALLER's own id, never on
+  // `superAgentId`. The owner row is the real money and is not this account's;
+  // showing it to a sub-agent would present someone else's balance as their
+  // spending power. RLS (`super_agent_id = auth.uid()`) is what makes this row
+  // readable at all - and migration 008 backfills one per sub-agent at balance
+  // 0, so a missing row genuinely means "no mirror", not "not loaded yet".
+  useEffect(() => {
+    let active = true;
+
+    if (!agentChecked || isSuperAgentUser || !isAgent) {
+      setSubAgentBalance(null);
+      return undefined;
+    }
+
+    (async () => {
+      try {
+        const {
+          data: { user },
+          error: userError,
+        } = await supabase.auth.getUser();
+        if (userError || !user || !active) return;
+
+        const { data, error } = await supabase
+          .from("super_agent_wallets")
+          .select("balance")
+          .eq("super_agent_id", user.id)
+          .maybeSingle();
+        if (error) {
+          console.warn("Could not read sub-agent wallet balance:", error);
+          return;
+        }
+        if (!active) return;
+        setSubAgentBalance(Number(data?.balance || 0));
+      } catch (balanceError) {
+        console.warn("Could not read sub-agent wallet balance:", balanceError);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [agentChecked, isAgent, isSuperAgentUser]);
+
   const fetchOffers = async () => {
     try {
       setLoading(true);
@@ -1197,7 +1256,23 @@ export default function DataScreen({ navigation, route }) {
   };
 
   const handleSuperAgentWalletPurchase = async (bundle, phone) => {
+    // WHAT GETS DEBITED IS THE PRICE ON THE CARD, NOT `base_price`.
+    // -------------------------------------------------------
+    // This used to hardcode `bundle.base_price`, which is only correct for a
+    // super agent: their catalog branch sets `price === base_price` with no
+    // markup. A SUB-AGENT buys from their super agent's published offers, where
+    // the card price is `base_price + tier_extra` and `tier_extra` is the super
+    // agent's markup.
+    //
+    // Debiting `base_price` would have charged a "Ghc 25" package 20. The
+    // displayed price becomes a lie, the sub-agent is under-charged by the
+    // markup on every order, and the super agent's margin silently disappears -
+    // with nothing anywhere reporting that it happened.
+    //
+    // Sale price is also the correct figure against the mirror invariant: an
+    // order debits both sides by the amount actually paid for it.
     const baseAmount = Number(bundle.base_price || 0);
+    const tierExtra = Number(bundle.tier_extra || 0);
     // WHY THERE IS NO TRANSACTION FEE HERE
     // -----------------------------------
     // The 1.95% Paystack charge is applied at TOP-UP time, not per order, and
@@ -1215,7 +1290,7 @@ export default function DataScreen({ navigation, route }) {
     // `transaction_fee` is sent as 0, not omitted: the server treats a missing
     // fee as "not configured" and falls back to its own split calculation.
     const transactionFee = 0;
-    const grossAmount = Number(baseAmount.toFixed(2));
+    const grossAmount = Number((baseAmount + tierExtra).toFixed(2));
     const reference = `wallet_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     const functionName = getEdgeFunctionName("verify-payment");
 
@@ -1242,6 +1317,11 @@ export default function DataScreen({ navigation, route }) {
           amount: grossAmount,
           network,
           base_price: baseAmount,
+          // Recorded on the `payment_transactions` row so revenue analytics can
+          // still see the super agent's markup on a wallet-funded order. The
+          // server hardcodes `transaction_fee: 0` for this path regardless of
+          // what arrives here - that is deliberate, see above.
+          tier_extra: tierExtra,
           transaction_fee: transactionFee,
         },
       });
@@ -1330,14 +1410,23 @@ export default function DataScreen({ navigation, route }) {
   // No transaction fee: the 1.95% is charged at top-up time and the wallet is
   // credited net, so re-charging it here would take it twice from the same
   // money. See `handleSuperAgentWalletPurchase`.
+  //
+  // The total includes `tier_extra` because that is what the purchase now
+  // costs - see the long note there. Quoting `base_price` as the total here
+  // would understate the charge by the super agent's markup, which is the same
+  // figure the user sees on the bundle card, so the dialog must agree with it.
   const getWalletPurchaseBreakdown = useCallback(
     (bundle) => {
       const baseAmount = Number(bundle?.base_price || 0);
+      const tierExtra = Number(bundle?.tier_extra || 0);
       const transactionFee = 0;
       return {
         baseAmount,
+        tierExtra,
         transactionFee,
-        grossAmount: Number((baseAmount + transactionFee).toFixed(2)),
+        grossAmount: Number(
+          (baseAmount + tierExtra + transactionFee).toFixed(2),
+        ),
       };
     },
     [paymentChargeSettings],
@@ -1359,34 +1448,43 @@ export default function DataScreen({ navigation, route }) {
       // Read live rather than trusting a cached value: the dialog quotes the
       // post-debit balance, and the server is the authority on whether the
       // order clears. `null` means "not loaded yet".
-      agentBalance: null,
+      agentBalance: isSuperAgentUser ? null : subAgentBalance,
     });
 
     // The balance is a nice-to-have in the dialog, not a gate - the edge
     // function re-checks it authoritatively, so a failure here must not block
     // the agent from confirming.
-    (async () => {
-      try {
-        const { data: auth } = await supabase.auth.getUser();
-        const userId = auth?.user?.id;
-        if (!userId) return;
-        const { data, error } = await supabase
-          .from("super_agent_wallets")
-          .select("balance")
-          .eq("super_agent_id", userId)
-          .maybeSingle();
-        if (error) return;
-        setAgentBalance(Number(data?.balance || 0));
-        setWalletConfirm((prev) =>
-          prev ? { ...prev, agentBalance: Number(data?.balance || 0) } : prev,
-        );
-      } catch (balanceError) {
-        console.warn(
-          "Could not read wallet balance for confirmation:",
-          balanceError,
-        );
-      }
-    })();
+    //
+    // Only a super agent needs a fresh read. For a sub-agent, `superAgentId`
+    // is the owner of the wallet the edge function debits, and this screen
+    // must never show it to them: it is not their money and it is not the
+    // ceiling on what they may spend. Their own mirrored row - the one RLS
+    // lets them read - is the correct figure, and `subAgentBalance` already
+    // holds it.
+    if (isSuperAgentUser) {
+      (async () => {
+        try {
+          const { data: auth } = await supabase.auth.getUser();
+          const userId = auth?.user?.id;
+          if (!userId) return;
+          const { data, error } = await supabase
+            .from("super_agent_wallets")
+            .select("balance")
+            .eq("super_agent_id", userId)
+            .maybeSingle();
+          if (error) return;
+          setAgentBalance(Number(data?.balance || 0));
+          setWalletConfirm((prev) =>
+            prev ? { ...prev, agentBalance: Number(data?.balance || 0) } : prev,
+          );
+        } catch (balanceError) {
+          console.warn(
+            "Could not read wallet balance for confirmation:",
+            balanceError,
+          );
+        }
+      })();
+    }
   };
 
   const confirmWalletPurchase = async () => {
@@ -1421,6 +1519,25 @@ export default function DataScreen({ navigation, route }) {
     if (isSuperAgentUser) {
       // Money leaves the wallet the moment the edge function runs, so confirm
       // the amount, recipient and resulting balance with the agent first.
+      openWalletConfirmation(selectedBundle, cleanPhone);
+      return;
+    }
+
+    // A SUB-AGENT picks their settlement path. `agentPaymentMethod` decides it,
+    // and both branches are already supported end to end:
+    //
+    // - wallet: `verify-payment`'s `wallet_order` branch accepts
+    //   `role === "sub_agent"`, resolves the owner from their assigned super
+    //   agent, checks the sub-agent's mirrored balance as a ceiling, and debits
+    //   both sides of the mirror.
+    // - direct: the Paystack path below, which settles to their super agent's
+    //   subaccount.
+    //
+    // The order matters and must not be collapsed: an ownerless sub-agent has
+    // no wallet at all (the server returns 403 `no_wallet`), so the wallet
+    // branch cannot be reached for them - which is exactly why 'direct' is the
+    // default rather than 'wallet'.
+    if (agentPaymentMethod === "wallet") {
       openWalletConfirmation(selectedBundle, cleanPhone);
       return;
     }
@@ -2181,6 +2298,154 @@ export default function DataScreen({ navigation, route }) {
                     </TouchableOpacity>
                   </View>
 
+                  {/* Settlement path. Sub-agents only - a super agent's
+                      wallet is the sole way they can buy, so there is nothing
+                      to choose between. */}
+                  {!isSuperAgentUser ? (
+                    <View style={s.methodPicker}>
+                      <Text style={s.methodPickerLabel}>
+                        How would you like to pay?
+                      </Text>
+                      <View style={s.methodButtons}>
+                        <TouchableOpacity
+                          style={[
+                            s.methodButton,
+                            agentPaymentMethod === "direct" &&
+                              s.methodButtonActive,
+                          ]}
+                          onPress={() => setAgentPaymentMethod("direct")}
+                          accessibilityRole="radio"
+                          accessibilityState={{
+                            selected: agentPaymentMethod === "direct",
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Ionicons
+                            name="card-outline"
+                            size={18}
+                            color={
+                              agentPaymentMethod === "direct"
+                                ? c.onAccent
+                                : c.textSecondary
+                            }
+                          />
+                          <Text
+                            style={[
+                              s.methodButtonText,
+                              agentPaymentMethod === "direct" &&
+                                s.methodButtonTextActive,
+                            ]}
+                          >
+                            Pay directly
+                          </Text>
+                          <Text
+                            style={[
+                              s.methodButtonHint,
+                              agentPaymentMethod === "direct" &&
+                                s.methodButtonHintActive,
+                            ]}
+                          >
+                            Card or mobile money
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={[
+                            s.methodButton,
+                            agentPaymentMethod === "wallet" &&
+                              s.methodButtonActive,
+                          ]}
+                          onPress={() => setAgentPaymentMethod("wallet")}
+                          accessibilityRole="radio"
+                          accessibilityState={{
+                            selected: agentPaymentMethod === "wallet",
+                          }}
+                          activeOpacity={0.85}
+                        >
+                          <Ionicons
+                            name="wallet-outline"
+                            size={18}
+                            color={
+                              agentPaymentMethod === "wallet"
+                                ? c.onAccent
+                                : c.textSecondary
+                            }
+                          />
+                          <Text
+                            style={[
+                              s.methodButtonText,
+                              agentPaymentMethod === "wallet" &&
+                                s.methodButtonTextActive,
+                            ]}
+                          >
+                            Use wallet
+                          </Text>
+                          {/* The sub-agent's OWN balance. Deliberately not the
+                              super agent's - that is the real money and not
+                              this account's to see or spend. */}
+                          <Text
+                            style={[
+                              s.methodButtonHint,
+                              agentPaymentMethod === "wallet" &&
+                                s.methodButtonHintActive,
+                            ]}
+                          >
+                            {subAgentBalance == null
+                              ? "Balance unavailable"
+                              : `${formatCedi(subAgentBalance)} available`}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      {agentPaymentMethod === "wallet" ? (
+                        <View style={s.methodNote}>
+                          <Ionicons
+                            name="information-circle-outline"
+                            size={15}
+                            color={c.textMuted}
+                            style={{ marginTop: 1 }}
+                          />
+                          <Text style={s.methodNoteText}>
+                            {selectedBundle ? (
+                              <>
+                                This order will be debited{" "}
+                                {formatCedi(
+                                  getWalletPurchaseBreakdown(selectedBundle)
+                                    .grossAmount,
+                                )}{" "}
+                                from your wallet balance. No Paystack charge
+                                applies - it was taken when the wallet was
+                                funded.
+                              </>
+                            ) : null}
+                          </Text>
+                        </View>
+                      ) : null}
+
+                      {agentPaymentMethod === "wallet" &&
+                      subAgentBalance != null &&
+                      Number(
+                        getWalletPurchaseBreakdown(selectedBundle || {})
+                          .grossAmount,
+                      ) > subAgentBalance ? (
+                        <View style={[s.methodNote, s.methodNoteWarn]}>
+                          <Ionicons
+                            name="alert-circle"
+                            size={15}
+                            color={c.amber}
+                            style={{ marginTop: 1 }}
+                          />
+                          <Text
+                            style={[s.methodNoteText, s.methodNoteWarnText]}
+                          >
+                            Your wallet does not hold enough for this package.
+                            Top up to continue.
+                          </Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
+
                   <Text style={s.phoneInputLabel}>Phone Number</Text>
                   <View style={s.phoneInputWrapper}>
                     <Ionicons
@@ -2206,7 +2471,8 @@ export default function DataScreen({ navigation, route }) {
                     onPress={continueAgentPurchase}
                   >
                     <Text style={s.recipientContinueText}>
-                      {isSuperAgentUser
+                      {isSuperAgentUser ||
+                      (!isSuperAgentUser && agentPaymentMethod === "wallet")
                         ? "Review Order"
                         : "Continue to Payment"}
                     </Text>
@@ -2223,7 +2489,16 @@ export default function DataScreen({ navigation, route }) {
           visible={Boolean(walletConfirm)}
           icon="wallet"
           title="Confirm Wallet Purchase"
-          message={`Buy ${walletConfirm.bundle?.name} from your Super Agent wallet for ${walletConfirm.phone}? This is debited from your wallet balance immediately and cannot be undone.`}
+          // WHO the wallet belongs to differs by role, and naming the wrong
+          // one is worse than not naming it at all. A super agent spends their
+          // OWN wallet. A sub-agent spends their MIRRORED balance, which is
+          // funded by the wallet their super agent holds - so "your Super
+          // Agent wallet" was both inaccurate (it is not theirs to spend
+          // arbitrarily) and, per the mirror model, overstates what they can
+          // actually buy.
+          message={`Buy ${walletConfirm.bundle?.name} using ${
+            isSuperAgentUser ? "your wallet" : "your wallet balance"
+          } for ${walletConfirm.phone}? This is debited immediately and cannot be undone.`}
           warning={
             walletConfirm.agentBalance != null &&
             walletConfirm.breakdown.grossAmount > walletConfirm.agentBalance
@@ -2233,10 +2508,25 @@ export default function DataScreen({ navigation, route }) {
           rows={[
             { label: "Package", value: walletConfirm.bundle?.name || "-" },
             { label: "Recipient", value: walletConfirm.phone },
-            {
-              label: "Package price",
-              value: formatCedi(walletConfirm.breakdown.baseAmount),
-            },
+            // Split base and markup only when there IS a markup. A zero row
+            // would imply a fee that does not exist, the same reason there is
+            // no transaction-fee row.
+            ...(walletConfirm.breakdown.tierExtra > 0
+              ? [
+                  {
+                    label: "Base price",
+                    value: formatCedi(walletConfirm.breakdown.baseAmount),
+                  },
+                ]
+              : []),
+            ...(walletConfirm.breakdown.tierExtra > 0
+              ? [
+                  {
+                    label: "Super Agent markup",
+                    value: formatCedi(walletConfirm.breakdown.tierExtra),
+                  },
+                ]
+              : []),
             // The 1.95% Paystack charge is paid at top-up, not here, so no fee
             // row: showing a 0.00 "Transaction fee" would imply a charge that
             // does not exist and hide where the money actually went.
@@ -3170,6 +3460,83 @@ const buildStyles = (c) =>
       color: c.textSecondary,
       letterSpacing: 0.3,
       marginBottom: 7,
+    },
+
+    /* ---------- Payment method picker (sub-agents) ---------- */
+    methodPicker: {
+      marginBottom: 18,
+    },
+    methodPickerLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11.5,
+      color: c.textSecondary,
+      letterSpacing: 0.3,
+      marginBottom: 9,
+    },
+    methodButtons: {
+      flexDirection: "row",
+      gap: 10,
+    },
+    // Column layout (icon over label over hint) rather than the single-row
+    // `purchaseTypeButton`, because each option carries a two-line label plus a
+    // balance hint that would not fit on one line beside an icon.
+    methodButton: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 4,
+      paddingVertical: 14,
+      paddingHorizontal: 8,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    methodButtonActive: {
+      backgroundColor: c.mint,
+      borderColor: c.mint,
+    },
+    methodButtonText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textSecondary,
+      textAlign: "center",
+    },
+    methodButtonTextActive: {
+      color: c.onAccent,
+    },
+    methodButtonHint: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      textAlign: "center",
+    },
+    methodButtonHintActive: {
+      color: c.onAccent,
+      opacity: 0.85,
+    },
+    methodNote: {
+      flexDirection: "row",
+      gap: 9,
+      alignItems: "flex-start",
+      marginTop: 12,
+      padding: 12,
+      borderRadius: 14,
+      backgroundColor: c.surfaceSunken,
+    },
+    methodNoteWarn: {
+      marginTop: 8,
+      backgroundColor: `${c.amber}14`,
+    },
+    methodNoteText: {
+      flex: 1,
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textSecondary,
+      lineHeight: 17,
+    },
+    methodNoteWarnText: {
+      color: c.amber,
     },
     phoneInputWrapper: {
       flexDirection: "row",
