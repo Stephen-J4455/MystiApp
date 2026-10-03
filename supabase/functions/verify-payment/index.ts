@@ -342,6 +342,122 @@ const resolveOrderApiCost = async (
   }
 };
 
+    /**
+     * Resolves the ADMIN-SET base price for a package.
+     *
+     * WHY THIS EXISTS RATHER THAN TRUSTING `base_price` FROM THE CLIENT
+     * ----------------------------------------------------------------
+     * The request body carries `base_price`, but that value is NOT the platform's
+     * price. The client derives it in `superAgentService.js` from the LIVE PROVIDER
+     * CATALOG (Jehuca's price / 100), falling back to the super agent's own tier
+     * price, and then computes `tier_extra` as `max(0, tierPrice - basePrice)`.
+     *
+     * That has two consequences that make the client figure unusable for anything
+     * money-affecting:
+     *
+     *   1. It is attacker-controlled. A sub-agent can POST any `base_price` they
+     *      like, so a server that debits a wallet by it is reading the number off
+     *      the request. `verify-payment` already distrusts client amounts elsewhere
+     *      - it hardcodes `transaction_fee: 0` for wallet orders for exactly this
+     *      reason - and the wallet debit is the largest number on the page.
+     *
+     *   2. It is the wrong number even when honest. The platform's own price lives
+     *      in `package_pricing.base_price`, set by an admin. The catalog price
+     *      drifts with the provider; the admin price is what the platform has
+     *      actually agreed to charge, and what `super_agent_share` and the margin
+     *      reporting are denominated in.
+     *
+     * So this reads the authoritative row and lets the caller fall back only when
+     * no pricing row matches - a missing pricing row must not silently become a
+     * zero-priced data bundle.
+     *
+     * MATCHING IS BY `package_id` FIRST, THEN network+type. `package_pricing` has
+     * a UNIQUE constraint on (network, type) and `package_id` is nullable, so both
+     * are consulted: an offer published against a specific provider package id is
+     * the precise match, and the descriptor pair is the fallback for offers that
+     * predate that column.
+     *
+     * `audience` picks the pricing table, mirroring `resolve_api_cost`:
+     * 'super_agent' reads `package_pricing` (the admin-set price a super agent
+     * pays) and 'normal_user' reads `normal_user_package_pricing`.
+     *
+     * Returns null when nothing matches, so the caller decides the fallback rather
+     * than getting a silent zero.
+     */
+    const resolveAdminBasePrice = async (
+      client: ReturnType<typeof createClient>,
+      {
+        audience,
+        network,
+        type,
+        packageId,
+      }: {
+        audience: "super_agent" | "normal_user";
+        network: string;
+        type: string;
+        packageId?: string | null;
+      },
+    ): Promise<number | null> => {
+      const table =
+        audience === "super_agent"
+          ? "package_pricing"
+          : "normal_user_package_pricing";
+
+      const cleanNetwork = String(network || "")
+        .trim()
+        .toUpperCase();
+      // Normalised to upper case and whitespace-collapsed, because the client sends
+      // the descriptor with or without the size suffix ("MTN 1GB" vs
+      // "MTN - 1GB") and the pricing rows key on `type` exactly as written.
+      const cleanType = String(type || "")
+        .trim()
+        .toUpperCase();
+      const cleanPackageId = String(packageId || "").trim();
+
+      try {
+        // Exact package id first - unambiguous when present.
+        if (cleanPackageId) {
+          const { data, error } = await client
+            .from(table)
+            .select("base_price")
+            .eq("package_id", cleanPackageId)
+            .eq("is_active", true)
+            .maybeSingle();
+          if (error) throw error;
+          const byId = Number(data?.base_price);
+          if (Number.isFinite(byId) && byId >= 0) {
+            return Number(byId.toFixed(2));
+          }
+        }
+
+        // Then the (network, type) pair, which the table's UNIQUE constraint makes
+        // a single row.
+        const { data, error } = await client
+          .from(table)
+          .select("base_price")
+          .eq("network", cleanNetwork)
+          .eq("type", cleanType)
+          .eq("is_active", true)
+          .maybeSingle();
+        if (error) throw error;
+        const byType = Number(data?.base_price);
+        if (Number.isFinite(byType) && byType >= 0) {
+          return Number(byType.toFixed(2));
+        }
+
+        return null;
+      } catch (error) {
+        console.error("[resolve-admin-base-price] lookup failed:", {
+          table,
+          network: cleanNetwork,
+          type: cleanType,
+          packageId: cleanPackageId,
+          error: error instanceof Error ? error.message : error,
+        });
+        return null;
+      }
+    };
+
 Deno.serve(async (req) => {
   // Handle CORS preflight requests
   if (req.method === "OPTIONS") {
@@ -581,6 +697,40 @@ Deno.serve(async (req) => {
         );
       }
 
+            // Resolved once, here, from the request body's own network / type /
+            // package id. The provider fields derived further down are the same
+            // inputs, so there is no second lookup to disagree with this one.
+            const adminBasePriceEarly = await resolveAdminBasePrice(supabaseAdmin, {
+              audience: "super_agent",
+              network: String(network || "").trim().toUpperCase(),
+              type: String(provider_type || package_type || package_name || "")
+                .trim()
+                .toUpperCase(),
+              packageId: String(provider_package_id || offer_id || "").trim(),
+            });
+
+            const saleAmount = Number(walletAmount.toFixed(2));
+            // What leaves the SUPER AGENT's real wallet. Equals the sale price when
+            // the caller is the super agent themselves (one wallet, one price), and
+            // when the admin price could not be resolved.
+            //
+            // `Math.min` guards the degenerate case where the admin price EXCEEDS the
+            // sale price - possible if the super agent published an offer below cost,
+            // or if pricing was changed between the offer being published and this
+            // order. Debiting more than the sub-agent paid would take the super agent's
+            // real money for an order that collected less than it cost, so the sale
+            // price caps it.
+            const superAgentDebitAmount =
+              !isSuperAgent &&
+              adminBasePriceEarly !== null &&
+              adminBasePriceEarly > 0
+                ? Math.min(adminBasePriceEarly, saleAmount)
+                : saleAmount;
+            // What leaves the SUB-AGENT's mirrored wallet. Always the sale price - it
+            // is their ceiling and their quote, and it must not shrink just because
+            // the platform price moved.
+            const subAgentDebitAmount = saleAmount;
+
       // Pre-flight balance check - WHY THIS IS HERE
       // ------------------------------------------
       // Previously the wallet was debited AFTER the `orders` row was inserted,
@@ -624,28 +774,40 @@ Deno.serve(async (req) => {
       }
 
       const availableBalance = Number(walletRow?.balance || 0);
-      if (availableBalance < walletAmount) {
-        console.warn("[verify-payment] Wallet pre-flight rejected order:", {
-          user_id: identity.id,
-          balance: availableBalance,
-          required: walletAmount,
-        });
-        return new Response(
-          JSON.stringify({
-            error: "Insufficient wallet balance",
-            insufficient_balance: true,
-            balance: availableBalance,
-            required: walletAmount,
-            shortfall: Number((walletAmount - availableBalance).toFixed(2)),
-          }),
-          {
-            // 402 Payment Required. Distinct from 400 so the client can tell
-            // "you cannot afford this" from "your request was malformed".
-            status: 402,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
-      }
+            // Checked against `superAgentDebitAmount`, NOT `walletAmount`.
+            //
+            // This is the check that has to move with the split. The super agent's
+            // real balance is drawn down by the admin-set base price only, so testing
+            // it against the sale price would reject an order the agent can perfectly
+            // afford - a sub-agent with a funded mirror buying from a super agent
+            // whose real balance covers the base but not the markup would be turned
+            // away for money that is never actually spent. It would also report a
+            // `shortfall` that over-states what is needed, so the super agent would
+            // top up for a purchase that was already covered.
+            if (availableBalance < superAgentDebitAmount) {
+              console.warn("[verify-payment] Wallet pre-flight rejected order:", {
+                user_id: identity.id,
+                balance: availableBalance,
+                required: superAgentDebitAmount,
+              });
+              return new Response(
+                JSON.stringify({
+                  error: "Insufficient wallet balance",
+                  insufficient_balance: true,
+                  balance: availableBalance,
+                  required: superAgentDebitAmount,
+                  shortfall: Number(
+                    (superAgentDebitAmount - availableBalance).toFixed(2),
+                  ),
+                }),
+                {
+                  // 402 Payment Required. Distinct from 400 so the client can tell
+                  // "you cannot afford this" from "your request was malformed".
+                  status: 402,
+                  headers: { ...corsHeaders, "Content-Type": "application/json" },
+                },
+              );
+            }
 
       // THE MIRROR CHECK - a sub-agent has their OWN balance, and it is a
       // ceiling on what they may spend.
@@ -751,7 +913,21 @@ Deno.serve(async (req) => {
         );
       }
 
-      const orderData = {
+            // The debit split (`superAgentDebitAmount` / `subAgentDebitAmount`) was
+            // resolved BEFORE the balance pre-flight checks, because those checks have
+            // to compare the super agent's real balance against the figure that will
+            // actually leave it. It is not recomputed here - two resolutions of one
+            // price would be two chances to disagree, and the second would run after
+            // the decision to proceed had already been taken on the first.
+            console.log("[verify-payment] Wallet debit split applied:", {
+              user_id: identity.id,
+              is_super_agent_buyer: isSuperAgent,
+              sale_amount: saleAmount,
+              super_agent_debit: superAgentDebitAmount,
+              sub_agent_debit: subAgentDebitAmount,
+            });
+
+            const orderData = {
         user_id: user.id,
         user_name:
           user.user_metadata?.full_name ||
@@ -830,37 +1006,43 @@ Deno.serve(async (req) => {
         );
       }
 
-      // Debit BOTH sides of the mirror by the same amount.
+      // Debit BOTH sides of the mirror, each by ITS OWN amount.
       //
-      // Side 1 is the super agent's REAL money - the balance the platform
-      // actually draws down to fulfil the order. Side 2 is the sub-agent's
-      // spending power, the ceiling that stops one sub-agent consuming money
-      // that was funded for, or is reserved against, another.
-      //
-      // ORDER MATTERS AND IS NOT INTERCHANGEABLE. The sub-agent's mirrored
-      // balance is debited FIRST because it is the tighter constraint and the
-      // one the pre-flight check just validated. If it fails here, nothing has
-      // moved on the real balance and the order is held with the sub-agent's
-      // own shortfall reported - which is actionable. The reverse order would
-      // take the super agent's real money and then discover the sub-agent
-      // could not spend it, turning a clean rejection into a refund.
-      //
-      // REFERENCES MUST DIFFER: `super_agent_wallet_ledger.reference` is
-      // `text NOT NULL UNIQUE` globally. The mirrored entry is suffixed with
-      // the sub-agent's id, so a replay of the same payment reference is
-      // idempotent on both rows rather than double-debiting one.
-      const debitWallet = async (
-        walletId: string,
-        referenceSuffix: string,
-        reason: string,
-      ) => {
-        const result = await supabaseAdmin.rpc("debit_super_agent_wallet", {
-          p_super_agent_id: walletId,
-          p_amount: walletAmount,
-          p_reference: `wallet-order-${reference}${referenceSuffix}`,
-          p_order_id: order.id,
-          p_reason: reason,
-        });
+            // The two figures differ - see the "WHAT EACH SIDE OF THE MIRROR PAYS"
+            // block above. They used to be identical, which meant the super agent's
+            // real balance paid for the markup their own sub-agent was charging.
+            //
+            // Side 1 is the super agent's REAL money - the balance the platform
+            // actually draws down to fulfil the order, at the admin-set base price.
+            // Side 2 is the sub-agent's spending power at the sale price - the
+            // ceiling that stops one sub-agent consuming money that was funded for,
+            // or is reserved against, another.
+            //
+            // ORDER MATTERS AND IS NOT INTERCHANGEABLE. The sub-agent's mirrored
+            // balance is debited FIRST because it is the tighter constraint and the
+            // one the pre-flight check just validated. If it fails here, nothing has
+            // moved on the real balance and the order is held with the sub-agent's
+            // own shortfall reported - which is actionable. The reverse order would
+            // take the super agent's real money and then discover the sub-agent
+            // could not spend it, turning a clean rejection into a refund.
+            //
+            // REFERENCES MUST DIFFER: `super_agent_wallet_ledger.reference` is
+            // `text NOT NULL UNIQUE` globally. The mirrored entry is suffixed with
+            // the sub-agent's id, so a replay of the same payment reference is
+            // idempotent on both rows rather than double-debiting one.
+            const debitWallet = async (
+              walletId: string,
+              referenceSuffix: string,
+              reason: string,
+              debitAmount: number,
+            ) => {
+              const result = await supabaseAdmin.rpc("debit_super_agent_wallet", {
+                p_super_agent_id: walletId,
+                p_amount: debitAmount,
+                p_reference: `wallet-order-${reference}${referenceSuffix}`,
+                p_order_id: order.id,
+                p_reason: reason,
+              });
         const payload = result.data as {
           success?: boolean;
           balance?: number;
@@ -880,7 +1062,8 @@ Deno.serve(async (req) => {
             identity.id,
             `:sub:${identity.id}`,
             "sub_agent_package_purchase",
-          );
+                  subAgentDebitAmount,
+                );
 
       // Fail the ORDER on the sub-agent side, before the real balance moves.
       if (!subAgentDebit.ok) {
@@ -908,30 +1091,36 @@ Deno.serve(async (req) => {
         );
       }
 
-      // Side 1: the real money.
+      // Side 1: the real money, at the ADMIN-SET BASE price - not the sale price.
       const debitResult = await debitWallet(
         resolvedWalletOwnerId,
         "",
         "super_agent_package_purchase",
-      );
-      if (!debitResult.ok) {
-        // The sub-agent's mirrored balance has already been debited, so the
-        // mirror is now UNDER-spent relative to the real balance. That is the
-        // safe direction to be wrong in - the sub-agent has spending power they
-        // cannot use, rather than the platform owing money it does not hold -
-        // but it must be repaired, not left to accumulate. Crediting the mirror
-        // back uses the same idempotent reference, so a retry is safe.
-        const rollback = await supabaseAdmin.rpc("credit_super_agent_wallet", {
-          p_super_agent_id: identity.id,
-          p_amount: walletAmount,
-          p_reference: `wallet-order-${reference}:sub-rollback:${identity.id}`,
-          p_reason: "sub_agent_mirror_rollback",
-          p_metadata: {
-            order_id: order.id,
-            // Why the mirror was given back: the real-balance debit failed.
-            reason: "super_agent_debit_failed",
-          },
-        });
+              superAgentDebitAmount,
+            );
+            if (!debitResult.ok) {
+              // The sub-agent's mirrored balance has already been debited, so the
+              // mirror is now UNDER-spent relative to the real balance. That is the
+              // safe direction to be wrong in - the sub-agent has spending power they
+              // cannot use, rather than the platform owing money it does not hold -
+              // but it must be repaired, not left to accumulate. Crediting the mirror
+              // back uses the same idempotent reference, so a retry is safe.
+              //
+              // Credits `subAgentDebitAmount`, NOT `walletAmount`: the mirror was
+              // debited by its own figure, and a rollback that returned a different
+              // number would leave the sub-agent permanently off by the difference -
+              // minting or burning spending power on a failed purchase.
+              const rollback = await supabaseAdmin.rpc("credit_super_agent_wallet", {
+                p_super_agent_id: identity.id,
+                p_amount: subAgentDebitAmount,
+                p_reference: `wallet-order-${reference}:sub-rollback:${identity.id}`,
+                p_reason: "sub_agent_mirror_rollback",
+                p_metadata: {
+                  order_id: order.id,
+                  // Why the mirror was given back: the real-balance debit failed.
+                  reason: "super_agent_debit_failed",
+                },
+              });
         console.error(
           "[verify-payment] Super Agent debit failed; sub-agent mirror rolled back:",
           { order_id: order.id, debitResult, rollbackError: rollback.error },
@@ -965,18 +1154,33 @@ Deno.serve(async (req) => {
           order_type: "regular",
           payment_reference: reference,
           buyer_type: "super_agent",
-          gross_amount: walletAmount,
-          base_amount: Number(base_price || walletAmount),
-          // Hard zero, not the client-supplied `transaction_fee`.
+                    gross_amount: saleAmount,
+                    // The admin-set base price, resolved server-side - NOT the request's
+                    // `base_price`.
           //
-          // A wallet order has no Paystack charge to settle - the money came
-          // from an internal balance that was topped up once, with any Paystack
-          // charge taken at top-up time. Reading the client field here let a
-          // caller write an arbitrary fee onto their own ledger row, which then
-          // flows into revenue reporting. `credit_super_agent_wallet` already
-          // netted the top-up charge, so this must not be charged twice.
-          transaction_fee: 0,
-          main_account_amount: walletAmount,
+                    // These used to disagree. The wallet is now debited by the admin base
+                    // price, so a ledger row carrying the client-supplied figure would
+                    // describe a different transaction from the one that moved money, and
+                    // margin reporting (gross - base) would be computed off a number the
+                    // sub-agent chose. Falls back to the sale price when no pricing row
+                    // matched, which is the same figure the debits fell back to.
+                    base_amount: superAgentDebitAmount,
+                    // Hard zero, not the client-supplied `transaction_fee`.
+                    //
+                    // A wallet order has no Paystack charge to settle - the money came
+                    // from an internal balance that was topped up once, with any Paystack
+                    // charge taken at top-up time. Reading the client field here let a
+                    // caller write an arbitrary fee onto their own ledger row, which then
+                    // flows into revenue reporting. `credit_super_agent_wallet` already
+                    // netted the top-up charge, so this must not be charged twice.
+                    transaction_fee: 0,
+                    // What the platform actually took: the sale price less the base price
+                    // the wallet was drawn down by. For a super agent buying for
+                    // themselves this is 0, because there is no mirror and no markup -
+                    // they are the platform's customer on that purchase.
+                    main_account_amount: isSuperAgent
+                      ? 0
+                      : Number((saleAmount - superAgentDebitAmount).toFixed(2)),
           settlement_status: "settled",
           status: "success",
           network: orderNetwork,
@@ -1022,11 +1226,20 @@ Deno.serve(async (req) => {
             super_agent_id: resolvedWalletOwnerId,
             balance: debitResult.data?.balance,
           },
-          // Both sides were debited by the same amount, and the 1.95% was NOT
-          // charged on this order. Reported so the client can state the split
-          // without recomputing it.
-          debited_from_both: !isSuperAgent,
-          transaction_fee_charged: 0,
+          // Both sides were debited, each by its OWN amount, and the 1.95% was NOT
+                    // charged on this order. The figures are echoed rather than left for
+                    // the client to derive, because deriving them would mean repeating
+                    // the base-price lookup in JavaScript - where it would be reading the
+                    // client-supplied `base_price` and could land on a different number
+                    // than the one that actually left the wallet.
+                    debited_from_both: !isSuperAgent,
+                    // What each side actually paid. Equal when the caller is the super
+                    // agent (one wallet), and when no admin pricing row matched (the
+                    // fallback charges both the sale price).
+                    super_agent_debited: superAgentDebitAmount,
+                    sub_agent_debited: isSuperAgent ? 0 : subAgentDebitAmount,
+                    sale_amount: saleAmount,
+                    transaction_fee_charged: 0,
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );

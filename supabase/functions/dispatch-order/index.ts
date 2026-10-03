@@ -883,19 +883,41 @@ Deno.serve((req) =>
         );
       }
 
-      const { error: updateError } = await admin
-        .from(table)
-        .update({
-          status: "processing",
-          jehuca_order_id: jehucaOrderId,
-          jehuca_order_status: jehucaOrderStatus,
-          jehuca_response: providerData ?? null,
-          provider_deferred_at: null,
-          provider_deferred_reason: null,
-          provider_dispatch_attempts:
-            Number(order.provider_dispatch_attempts || 0) + 1,
-        })
-        .eq("id", order.id);
+      // The settlement split is only 'settled' once the money has actually been
+            // divided up. For a Sub-Agent order `verify-payment` writes
+            // settlement_status = 'pending' at insert, because at that point Paystack
+            // has charged the customer but the platform has not yet released the
+            // agent's share. A confirmed hand-off to the provider IS that release
+            // point, so this is where it becomes 'settled'.
+            //
+            // This write was missing, which is why the admin Transactions screen
+            // showed every Sub-Agent order as "Pending" forever: it renders
+            // `settlement_status || status`, and 'pending' was a value nothing ever
+            // moved. Only `reorder-held-agent-order` transitioned it, so a reordered
+            // held order settled while a perfectly normal dispatched one did not.
+            //
+            // `orders` has no settlement_status column, so this is agent-only. Guarded
+            // rather than assumed so the regular path cannot throw on a column it does
+            // not have.
+            const settlementPatch =
+              orderType === "agent"
+                ? { settlement_status: "settled" }
+                : {};
+
+            const { error: updateError } = await admin
+              .from(table)
+              .update({
+                status: "processing",
+                ...settlementPatch,
+                jehuca_order_id: jehucaOrderId,
+                jehuca_order_status: jehucaOrderStatus,
+                jehuca_response: providerData ?? null,
+                provider_deferred_at: null,
+                provider_deferred_reason: null,
+                provider_dispatch_attempts:
+                  Number(order.provider_dispatch_attempts || 0) + 1,
+              })
+              .eq("id", order.id);
 
       if (updateError) {
         // The provider already has the order, so record what happened loudly
@@ -917,16 +939,33 @@ Deno.serve((req) =>
 
       // Mirror the provider reference onto the payment record so the customer's
       // transaction history shows the same provider order id.
-      const paymentReference = String(order.payment_reference || "").trim();
-      if (paymentReference) {
-        const { error: txError } = await admin
-          .from("payment_transactions")
-          .update({
-            jehuca_order_id: jehucaOrderId,
-            jehuca_order_status: jehucaOrderStatus,
-            jehuca_response: providerData ?? null,
-          })
-          .eq("payment_reference", paymentReference);
+            //
+            // This is ALSO the write the admin Transactions screen was missing. That
+            // screen lists `payment_transactions` and renders
+            // `settlement_status || status`, and `verify-payment` hardcodes
+            // settlement_status = 'pending' for every Sub-Agent order. Nothing
+            // transitioned it, so the admin saw "Pending" on Sub-Agent orders
+            // permanently - and a manual admin status change could not fix it either,
+            // because the admin edits `agent_orders.status`, a different column on a
+            // different table.
+            //
+            // So the two writers now agree: the order row and its ledger row are both
+            // settled by the same confirmed hand-off.
+            const paymentReference = String(order.payment_reference || "").trim();
+            if (paymentReference) {
+              const { error: txError } = await admin
+                .from("payment_transactions")
+                .update({
+                  jehuca_order_id: jehucaOrderId,
+                  jehuca_order_status: jehucaOrderStatus,
+                  jehuca_response: providerData ?? null,
+                  // Agent-only, for the same reason as above: a normal-user order is
+                  // already written as 'settled' by verify-payment and a wallet order
+                  // as 'settled' too, so re-writing it would be a no-op. Restricting
+                  // the write keeps it a pure bug fix for the broken case.
+                  ...(orderType === "agent" ? { settlement_status: "settled" } : {}),
+                })
+                .eq("payment_reference", paymentReference);
         if (txError) {
           console.warn(
             "[Dispatch] Could not update payment_transactions:",

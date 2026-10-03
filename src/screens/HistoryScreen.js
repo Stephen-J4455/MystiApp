@@ -28,6 +28,7 @@ import {
   isRealStatus,
   resolveOrderStatus,
 } from "../lib/orderStatus";
+import { fetchNamedTopups } from "../lib/superAgentRoster";
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 
@@ -419,6 +420,36 @@ export default function HistoryScreen({ navigation }) {
         }
 
         if (isSuperAgentProfile) {
+          // Wallet top-ups, named.
+          //
+          // "My sub-agents' activity" was orders only, so the one movement that
+          // is unambiguously about MONEY IN was missing from the list a super
+          // agent uses to check money in. A top-up is also the only roster event
+          // with no `agent_orders` row, so it cannot appear through any of the
+          // order branches above.
+          //
+          // Named rows rather than raw ones: `wallet_topups` is keyed on the
+          // payer's uuid, and an unnamed top-up renders as a uuid in the middle
+          // of a financial list.
+          try {
+            const namedTopups = await fetchNamedTopups({
+              superAgentId: user.id,
+            });
+
+            const topupTransactions = namedTopups.map((topup) => ({
+              ...topup,
+              orderType: "topup",
+              source: "wallet_topup",
+            }));
+            allTransactions = [...allTransactions, ...topupTransactions];
+          } catch (topupError) {
+            // Non-fatal by design. A denied `wallet_topups` read returns HTTP
+            // 200 with zero rows rather than an error, so this catch only fires
+            // on a transport failure - but it must not blank the orders already
+            // loaded, which are the primary content of this screen.
+            console.error("Error fetching wallet top-ups:", topupError);
+          }
+
           const { data: assignedOrders, error: assignedError } = await supabase
             .from("agent_orders")
             .select("*")
@@ -665,18 +696,39 @@ export default function HistoryScreen({ navigation }) {
         ) : (
           <View style={s.list}>
             {transactions.map((transaction) => {
+              // A wallet top-up is not an order: it has no network, no package,
+              // no recipient and no settlement split. Without this branch it
+              // would fall through to the order markup below and render "Ghc
+              // 0.00", "Data Bundle" and a breakdown of five zeroes - all of
+              // which read as real values rather than as absent data.
+              const isTopup = transaction.source === "wallet_topup";
               const isSubAgent =
-                isSuperAgentUser && transaction.isSubAgentTransaction;
+                !isTopup &&
+                isSuperAgentUser &&
+                transaction.isSubAgentTransaction;
               // Resolved once and reused for the pill's colour AND its label,
               // so the two can never come from different fields.
               const displayStatus = resolveOrderStatus(transaction);
-              const tone = statusToneOf(displayStatus);
-              const statusLabel = tone.label || getStatusText(displayStatus);
+              // `wallet_topups.status` is Paystack's vocabulary ('pending' |
+              // 'success' | 'failed'), not the order vocabulary the tone map is
+              // keyed on. Left unmapped here so a top-up is never dressed in an
+              // order's wording; it gets its own label further down.
+              const tone = isTopup
+                ? null
+                : statusToneOf(displayStatus);
+              const statusLabel = tone?.label || getStatusText(displayStatus);
               const held = String(transaction.status).toLowerCase() === "held";
+
+              const topupTone = (() => {
+                const key = String(transaction.status || "").toLowerCase();
+                if (key === "success") return tones.completed;
+                if (key === "failed") return tones.failed;
+                return tones.pending;
+              })();
 
               return (
                 <TouchableOpacity
-                  key={`${transaction.orderType}-${transaction.id}`}
+                  key={`${transaction.source || transaction.orderType}-${transaction.id}`}
                   style={s.card}
                   activeOpacity={0.85}
                   onPress={() =>
@@ -687,18 +739,22 @@ export default function HistoryScreen({ navigation }) {
                   <View style={s.cardHeader}>
                     <View style={s.cardHeadText}>
                       <Text style={s.cardTitle} numberOfLines={1}>
-                        {transaction.orderType === "agent"
-                          ? `${
-                              transaction.isSubAgentTransaction
-                                ? "Sub-agent order"
-                                : "Agent service"
-                            } · ${
-                              transaction.isSubAgentTransaction
-                                ? transaction.subAgentBusinessName ||
-                                  "Sub-agent"
-                                : transaction.displayPhone || "Customer"
+                        {isTopup
+                          ? `Wallet top-up · ${
+                              transaction.subAgentName || "Sub-agent"
                             }`
-                          : transaction.offer_title || "Purchase"}
+                          : transaction.orderType === "agent"
+                            ? `${
+                                transaction.isSubAgentTransaction
+                                  ? "Sub-agent order"
+                                  : "Agent service"
+                              } · ${
+                                transaction.isSubAgentTransaction
+                                  ? transaction.subAgentBusinessName ||
+                                    "Sub-agent"
+                                  : transaction.displayPhone || "Customer"
+                              }`
+                            : transaction.offer_title || "Purchase"}
                       </Text>
                       <Text style={s.cardDate}>
                         {formatDate(transaction.created_at)}
@@ -706,33 +762,60 @@ export default function HistoryScreen({ navigation }) {
                     </View>
                     {!isSubAgent ? (
                       <Text style={s.cardAmount}>
-                        {transaction.amount
-                          ? `Ghc ${transaction.amount}`
-                          : "N/A"}
+                        {isTopup
+                          ? `+Ghc ${Number(transaction.amount || 0).toFixed(2)}`
+                          : transaction.amount
+                            ? `Ghc ${transaction.amount}`
+                            : "N/A"}
                       </Text>
                     ) : null}
                   </View>
 
                   <Text style={s.cardDesc} numberOfLines={2}>
-                    {transaction.orderType === "agent"
-                      ? transaction.isSubAgentTransaction
-                        ? `${transaction.network || "Data"} · ${
-                            transaction.recipient_phone ||
-                            "Recipient unavailable"
-                          }`
-                        : `Phone: ${transaction.displayPhone || "N/A"}`
-                      : (transaction.network
-                          ? `${transaction.network.toUpperCase()} - `
-                          : "") +
-                        (transaction.data_amount || "Data Bundle") +
-                        (transaction.displayPhone
-                          ? ` · ${transaction.displayPhone}`
+                    {isTopup
+                      ? `${String(transaction.channel || "Wallet").toUpperCase()} funding`
+                      : transaction.orderType === "agent"
+                        ? transaction.isSubAgentTransaction
+                          ? `${transaction.network || "Data"} · ${
+                              transaction.recipient_phone ||
+                              "Recipient unavailable"
+                            }`
+                          : `Phone: ${transaction.displayPhone || "N/A"}`
+                        : (transaction.network
+                            ? `${transaction.network.toUpperCase()} - `
+                            : "") +
+                          (transaction.data_amount || "Data Bundle") +
+                          (transaction.displayPhone
+                            ? ` · ${transaction.displayPhone}`
                           : "")}
                   </Text>
 
                   {/* Sub-agent orders carry a settlement breakdown instead of a
                       top-level amount, so the status pill moves down here. */}
-                  {isSubAgent ? (
+                  {/* A top-up is money IN and carries no settlement split, so it
+                      gets a compact status pill of its own. `topupTone` is
+                      resolved from `wallet_topups.status` rather than from
+                      `tone`, which is null for these rows. */}
+                  {isTopup ? (
+                    <View style={s.cardFoot}>
+                      <View
+                        style={[s.pill, { backgroundColor: topupTone.bg }]}
+                      >
+                        <Text style={[s.pillText, { color: topupTone.color }]}>
+                          {transaction.status === "success"
+                            ? "Received"
+                            : transaction.status === "failed"
+                              ? "Failed"
+                              : "Pending"}
+                        </Text>
+                      </View>
+                      {transaction.reference ? (
+                        <Text style={s.cardDate} numberOfLines={1}>
+                          {transaction.reference}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : isSubAgent ? (
                     <View style={s.breakdown}>
                       <View style={s.breakdownHead}>
                         <Text style={s.breakdownEyebrow}>
@@ -808,8 +891,15 @@ export default function HistoryScreen({ navigation }) {
 
                   {/* Report a problem. The card itself navigates to the
                       receipt, so the press has to stop here or the sheet opens
-                      and the navigation fires too. */}
-                  {isSuperAgentUser ? (
+                      and the navigation fires too.
+
+                      Excluded for top-ups. A wallet top-up is a Paystack charge
+                      the super agent RECEIVED, not an order they sold; sending
+                      it to support as "Order #<wallet_topups id>" would quote a
+                      reference that does not exist on any order, and the id
+                      space is shared with `agent_orders`, so it could match a
+                      real, unrelated order. */}
+                  {isSuperAgentUser && !isTopup ? (
                     <TouchableOpacity
                       style={s.complaintButton}
                       onPress={(event) => {

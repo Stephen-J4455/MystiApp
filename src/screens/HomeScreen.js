@@ -21,6 +21,7 @@ import { useTheme } from "../contexts/ThemeContext";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { splitReceiptNumber } from "../lib/receiptNumber";
+import { fetchSubAgentActivity } from "../lib/superAgentRoster";
 import {
   canReorderHeldOrders,
   isHeldWindowElapsed,
@@ -96,6 +97,120 @@ const relativeTime = (iso) => {
     day: "numeric",
     month: "short",
   });
+};
+
+// ---------------------------------------------------------------------------
+// Sub-agent activity rows, normalised for the activity card
+// ---------------------------------------------------------------------------
+// The card renders ONE row shape - title, meta, amount, status pill - and the
+// roster feeds it three different tables: `agent_orders` (a purchase),
+// `wallet_topups` (money in) and `super_agent_wallet_ledger` (any wallet
+// movement). Each is mapped onto that shape HERE rather than in the render,
+// because a row that has to be interpreted conditionally while it is being
+// drawn is how "N/A" and a bare "-" start appearing in the amount column.
+//
+// `activityTitle` is "what happened"; `activityMeta` is the supporting detail
+// line. Keeping them distinct is what stops a top-up from rendering as
+// "Data Bundle · Bundle".
+
+/**
+ * A wallet movement's direction. `entry_type` is 'credit' or 'debit'; anything
+ * else is not a movement that can be honestly labelled, so it falls through to
+ * a neutral word rather than being guessed at.
+ */
+const ledgerEntryLabel = (entryType) => {
+  const key = String(entryType || "").trim().toLowerCase();
+  if (key === "credit") return "Wallet top-up";
+  if (key === "debit") return "Wallet debit";
+  return "Wallet movement";
+};
+
+/**
+ * Whether a row's amount ADDS to the wallet rather than spending from it.
+ *
+ * Sign is load-bearing on this card and only here: every row that came before
+ * was a purchase, so a leading "-" was unambiguous. A top-up is money arriving,
+ * and rendering "-Ghc 500.00" for it reads as a charge.
+ */
+const isCreditRow = (row) => {
+  if (row?.source === "sub_agent_topup") return true;
+  if (row?.source === "sub_agent_ledger") {
+    return String(row.entry_type || "").trim().toLowerCase() === "credit";
+  }
+  return false;
+};
+
+/**
+ * Maps a row from `fetchSubAgentActivity` onto the card's shape.
+ *
+ * Only the display fields are set. The row's real columns (`status`, `id`,
+ * `amount`, `offer_title`) are left untouched underneath, because the Receipt
+ * screen, the reorder path and `statusTone` all read those directly and must
+ * not find a rewritten copy.
+ */
+const normalizeActivityRow = (row) => {
+  const source = row?.source;
+  const subAgentName = row?.subAgentName || "Sub-agent";
+  const credit = isCreditRow(row);
+
+  if (source === "sub_agent_topup") {
+    // `fetchSubAgentActivity` resolves `subAgentName` through the roster, so the
+    // real name is available here. "You" is that resolver's output for a
+    // self-funded top-up, and "Wallet top-up by You" reads as a mistake, so the
+    // attribution is dropped entirely for the caller's own funding.
+    const isOwnFunding = !row.isSubAgentTransaction;
+    return {
+      ...row,
+      activityTitle: isOwnFunding
+        ? "Wallet top-up"
+        : `Wallet top-up by ${subAgentName}`,
+      activityMeta: row.channel
+        ? `${String(row.channel).toUpperCase()} · ${subAgentName}`
+        : `Wallet funding · ${subAgentName}`,
+      activityAmount: `${credit ? "+" : "-"}${formatGhc(row.amount)}`,
+      activityActionable: false,
+    };
+  }
+
+  if (source === "sub_agent_ledger") {
+    return {
+      ...row,
+      activityTitle: `${ledgerEntryLabel(row.entry_type)} · ${subAgentName}`,
+      activityMeta: "Wallet movement",
+      activityAmount: `${credit ? "+" : "-"}${formatGhc(row.amount)}`,
+      activityActionable: false,
+    };
+  }
+
+  // A sub-agent order. `agent_orders` carries no `data_amount` column - the
+  // size lives inside `offer_title` - so the network is the useful second line
+  // and the sub-agent's name is what a super agent is actually scanning for.
+  return {
+    ...row,
+    activityTitle: row.offer_title || "Data purchase",
+    activityMeta: [
+      row.network ? String(row.network).toUpperCase() : null,
+      `by ${subAgentName}`,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    activityAmount: row.amount ? `-${formatGhc(row.amount)}` : "N/A",
+    activityActionable: true,
+  };
+};
+
+/**
+ * The receipt number for a row, or null.
+ *
+ * `getReceiptNumber` derives `MYS-<id>` from the row's primary key, which is
+ * correct for `orders` and `agent_orders` and wrong for everything else: a
+ * `wallet_topups` or ledger id rendered under the `MYS-AG-` prefix is a number
+ * support can look up and find nothing. The two new row kinds are therefore
+ * excluded here rather than trusted to `orderType`.
+ */
+const receiptForRow = (row) => {
+  if (!row || row.activityActionable === false) return null;
+  return splitReceiptNumber(row);
 };
 
 // Builds an entrance style: fade + rise, staggered by `index`.
@@ -451,6 +566,7 @@ export default function HomeScreen({ navigation }) {
   useEffect(() => {
     let ordersSubscription = null;
     let agentOrdersSubscription = null;
+    let rosterOrdersSubscription = null;
 
     const setupTransactionsRealtime = async () => {
       try {
@@ -504,6 +620,36 @@ export default function HomeScreen({ navigation }) {
               )
               .subscribe();
           }
+
+          // A super agent watches their ROSTER's orders on a different filter:
+          // `super_agent_id`, not `agent_id`. Without this subscription the
+          // list they see on Home was correct only until they pulled to refresh,
+          // so a sub-agent's purchase made while the screen was open simply
+          // never appeared - the list looked frozen while the business moved.
+          //
+          // `isSuperAgentRole` rather than a wallet read, for the same reason as
+          // above: `ProfileProvider` holds the authoritative `user_profiles`
+          // role. A full re-read is issued instead of patching the single row,
+          // because the merged row carries the payment split and the sub-agent's
+          // name, neither of which is in the realtime payload - splicing the
+          // bare `payload.new` in would drop both.
+          if (isSuperAgentRole) {
+            rosterOrdersSubscription = supabase
+              .channel(uniqueTopic("home_roster_orders_realtime"))
+              .on(
+                "postgres_changes",
+                {
+                  event: "*",
+                  schema: "public",
+                  table: "agent_orders",
+                  filter: `super_agent_id=eq.${user.id}`,
+                },
+                () => {
+                  fetchRecentTransactions(isAgentRole);
+                },
+              )
+              .subscribe();
+          }
         }
       } catch (error) {
         console.error(
@@ -518,6 +664,7 @@ export default function HomeScreen({ navigation }) {
     return () => {
       removeChannelSafe(ordersSubscription);
       removeChannelSafe(agentOrdersSubscription);
+      removeChannelSafe(rosterOrdersSubscription);
     };
   }, []);
 
@@ -879,61 +1026,89 @@ export default function HomeScreen({ navigation }) {
             }),
           }));
 
-          // A super agent's OWN recent activity never contained their sub-agents'
-          // held orders, because both branches above select by `agent_id` or
-          // `user_id` - i.e. orders the super agent placed themselves. Held rows
-          // live on `agent_orders` under `super_agent_id`, so a super agent
-          // whose wallet had run dry saw no sign of the order that needed
-          // reordering anywhere on Home. Pull those in so the reorder affordance
-          // has something to act on.
+          // ===================================================================
+          // A super agent's Home list also carries their ROSTER's activity
+          // ===================================================================
+          // Both branches above select by `agent_id` or `user_id` - i.e. only
+          // what the super agent did THEMSELVES. Their sub-agents' orders, top
+          // ups and wallet movements were invisible on Home entirely, which is
+          // the wrong screen for it: the super agent's whole job is running
+          // that roster, and the Transactions screen (two taps deeper) already
+          // showed it. Home is the screen they open.
           //
-          // Only `held` rows, and only for a super agent: a non-super-agent must
-          // never see rows they cannot reorder (the server 403s them), and this
-          // keeps the Home list to the same five recent entries rather than
-          // growing it with someone else's backlog.
+          // This block previously pulled in ONLY `status = 'held'` orders, on
+          // the reasoning that held rows are the ones needing action. That is a
+          // repair queue, not a business view: a super agent whose sub-agent
+          // bought forty packages successfully saw an almost-empty list,
+          // because none of those forty were held.
+          //
+          // `fetchSubAgentActivity` now merges all four roster sources - orders,
+          // their payment records, top-ups and every wallet movement - and
+          // names each row by its sub-agent. Per-source failures are caught
+          // inside it, so a missing RLS policy degrades one kind of row instead
+          // of blanking the section.
+          //
+          // Gated on `isSuperAgent` alone. The roster policies are keyed on
+          // `user_profiles.super_agent_id`, so a non-super-agent's request
+          // matches nothing; the guard makes that explicit and saves the four
+          // round trips on every normal user's and sub-agent's Home screen.
           if (isSuperAgent) {
-            const heldResult = await supabase
-              .from("agent_orders")
-              .select("*")
-              .eq("super_agent_id", user.id)
-              .eq("status", "held")
-              .order("created_at", { ascending: false })
-              .limit(5);
+            const rosterRows = await fetchSubAgentActivity({
+              superAgentId: user.id,
+              // Over-fetched, then merged and re-capped below. Capping here
+              // would let four sources compete for five slots and let one of
+              // them crowd the others out.
+              limit: 40,
+              onWarning: (message) => {
+                // Surfaced rather than swallowed: these reads fail CLOSED and
+                // SILENTLY, so a missing policy would otherwise be
+                // indistinguishable from "no sub-agent activity".
+                console.warn("[home] roster activity:", message);
+              },
+            });
 
-            if (heldResult.error) {
-              // Non-fatal: the primary list is already loaded, and losing the
-              // held rows must not blank the whole activity section.
-              console.error(
-                "Error fetching held agent orders:",
-                heldResult.error,
-              );
-            } else {
-              const heldRows = (heldResult.data || []).map((transaction) => ({
-                ...transaction,
-                orderType: "agent",
-                isSubAgentTransaction: true,
-                displayName: transaction.recipient_name,
-                displayPhone: transaction.recipient_phone,
-              }));
+            const normalizedRoster = (rosterRows || []).map(normalizeActivityRow);
 
-              // A row can satisfy both filters only in theory, but the
-              // `orderType`-`id` key used in the list would collide if it did,
-              // so de-duplicate before merging rather than trusting that.
-              const seen = new Set(
-                normalizedTransactions.map((item) => `agent-${item.id}`),
-              );
-              const heldOnly = heldRows.filter(
-                (item) => !seen.has(`agent-${item.id}`),
-              );
+            // `id` is unique only WITHIN a table, and this list now spans four
+            // of them, so the bare id is not a safe key - `wallet_topups` id 7
+            // and `agent_orders` id 7 are different events. Keyed on the
+            // `source` marker instead, which is the thing that distinguishes
+            // them.
+            //
+            // The dedupe is defensive rather than load-bearing: `fetchSubAgent-
+            // Activity` emits each order ONCE (it joins `payment_transactions`
+            // onto `agent_orders` rather than emitting both), and its own rows
+            // cannot collide with the super agent's own because those are keyed
+            // on a different column. It is kept because the failure it prevents
+            // is invisible - two identical rows on a five-row card - and because
+            // nothing structurally guarantees the two lists stay disjoint if
+            // this function grows another source.
+            const seen = new Set(
+              normalizedTransactions.map((item) => `own-${item.id}`),
+            );
+            const rosterOnly = normalizedRoster.filter((item) => {
+              const key = `${item.source}-${item.id}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
 
-              normalizedTransactions = [...heldOnly, ...normalizedTransactions]
-                .sort(
-                  (a, b) =>
-                    new Date(b.created_at || 0).getTime() -
-                    new Date(a.created_at || 0).getTime(),
-                )
-                .slice(0, 5);
-            }
+            // ONE list, capped at 5, sorted across both sources.
+            //
+            // The cap is applied AFTER the merge rather than to each query
+            // separately. Two independently-capped lists would each have five
+            // slots and then compete, so the super agent's own fifth item could
+            // displace every sub-agent item, or vice versa - the list would look
+            // like it was randomly ignoring whichever group they cared about.
+            // Merging first means the five most recent events are the five most
+            // recent events, whoever they belong to.
+            normalizedTransactions = [...rosterOnly, ...normalizedTransactions]
+              .sort(
+                (a, b) =>
+                  new Date(b.created_at || 0).getTime() -
+                  new Date(a.created_at || 0).getTime(),
+              )
+              .slice(0, 5);
           }
 
           setTransactions(normalizedTransactions);
@@ -1158,6 +1333,18 @@ export default function HomeScreen({ navigation }) {
       tint: c.amber,
       onPress: () => navigation.navigate("WalletTopUp"),
     },
+    {
+      // The complete record of every credit and debit to the super agent's
+      // wallet, including their sub-agents' mirrored movements. Offered to both
+      // tiers: a Pro super agent has no offers, tiers or agent-management
+      // screens, but their wallet is what every sub-agent purchase debits, and
+      // this is the only place they can reconcile it.
+      key: "ledger",
+      label: "Ledger",
+      icon: "book-outline",
+      tint: c.mint,
+      onPress: () => navigation.navigate("SuperAgentLedger"),
+    },
   ];
 
   const menuItems = [
@@ -1220,9 +1407,23 @@ export default function HomeScreen({ navigation }) {
     // denied" and navigates back, so the entry promised something the screen
     // would not deliver. The screen's own guard stays in place - this is
     // presentation, not authorization.
+    //
+    // The ledger shares the same gate because it shares the same precondition:
+    // there is nothing to reconcile on a wallet that cannot be funded or spent.
+    // Present for every non-normal user, alongside Wallet Top-up, for the same
+    // reason it is in the suite: both tiers of super agent hold real money.
+    // A sub-agent also gets it, because their mirrored balance is a wallet they
+    // spend from and this is the only record of how it moved.
     ...(isNormalUser
       ? []
       : [
+          {
+            key: "ledger",
+            icon: "book-outline",
+            label: "Wallet Ledger",
+            tint: c.mint,
+            onPress: () => navigation.navigate("SuperAgentLedger"),
+          },
           {
             key: "topup",
             icon: "wallet-outline",
@@ -1725,29 +1926,77 @@ export default function HomeScreen({ navigation }) {
               ) : (
                 transactions.map((transaction, index) => {
                   const tone = statusTone(transaction.status, tones);
+
+                  // A row from the roster carries pre-computed display fields
+                  // (`normalizeActivityRow`); a row the super agent placed
+                  // themselves does not, and is described inline as before.
+                  // Both paths end up reading the same four values below, so
+                  // the JSX has no idea which kind of row it is holding.
+                  const isRosterRow = Boolean(transaction.activityAmount != null);
+                  const title = isRosterRow
+                    ? transaction.activityTitle
+                    : transaction.offer_title || "Data purchase";
+                  const meta = isRosterRow
+                    ? transaction.activityMeta
+                    : `${transaction.network
+                        ? `${String(transaction.network).toUpperCase()} · `
+                        : ""}${transaction.data_amount || "Bundle"}`;
+                  const amountText = isRosterRow
+                    ? transaction.activityAmount
+                    : transaction.amount
+                      ? `-${formatGhc(transaction.amount)}`
+                      : "N/A";
                   // Derived from the row id; see src/lib/receiptNumber.js for
-                  // why it is not a stored column.
-                  const receipt = splitReceiptNumber(transaction);
+                  // why it is not a stored column, and `receiptForRow` for
+                  // which rows are allowed to have one at all.
+                  //
+                  // A wallet movement has no status, so `statusTone` returns
+                  // null for it and the row falls back to its timestamp - which
+                  // is why ledger rows are left out of the order status
+                  // vocabulary rather than forced into it.
+                  const receipt = receiptForRow(transaction);
+
                   // Only offered to a super agent (the server 403s everyone
-                  // else) and only inside the 24h window. The row still renders
-                  // as a tap target when the window has closed - hiding the row
-                  // would hide the fact that an order died holding real customer
-                  // money, which is the opposite of what this list is for.
-                  const canReorder = canReorderHeldOrders(isSuperAgent);
+                  // else), only inside the 24h window, and only on rows that
+                  // ARE orders. A wallet top-up or a ledger movement has no
+                  // `agent_orders` row for `reorder-held-agent-order` to find,
+                  // so the button would be a permanent 404. The row still
+                  // renders as a tap target when the window has closed - hiding
+                  // the row would hide the fact that an order died holding real
+                  // customer money, which is the opposite of what this list is
+                  // for.
+                  const canReorder =
+                    canReorderHeldOrders(isSuperAgent) &&
+                    transaction.activityActionable !== false;
                   const showReorder =
                     canReorder && isReorderableHeldOrder(transaction);
                   const reorderElapsed = showReorder
                     ? isHeldWindowElapsed(transaction, Date.now())
                     : false;
                   const reorderBusy = reorderingId === transaction.id;
+
+                  // Non-order rows are not receipts and have nothing to open, so
+                  // the row is not a tap target at all. Rendering it as one
+                  // would navigate to a Receipt that renders "Data Bundle
+                  // Purchase" and Ghc 0.00 for a wallet top-up.
+                  const RowContainer = transaction.activityActionable === false
+                    ? View
+                    : TouchableOpacity;
+
                   return (
-                    <TouchableOpacity
-                      key={transaction.id}
+                    <RowContainer
+                      // `id` is unique only within a table and this list spans
+                      // four, so `wallet_topups` id 7 and `agent_orders` id 7
+                      // would collide and React would drop one of the rows.
+                      key={`${transaction.source || "own"}-${transaction.id}`}
                       style={styles.activityRow}
-                      activeOpacity={0.7}
-                      onPress={() =>
-                        navigation.navigate("Receipt", { transaction })
-                      }
+                      {...(RowContainer === TouchableOpacity
+                        ? {
+                            activeOpacity: 0.7,
+                            onPress: () =>
+                              navigation.navigate("Receipt", { transaction }),
+                          }
+                        : {})}
                     >
                       <View
                         style={[
@@ -1758,13 +2007,10 @@ export default function HomeScreen({ navigation }) {
                       />
                       <View style={styles.activityBody}>
                         <Text style={styles.activityTitle} numberOfLines={1}>
-                          {transaction.offer_title || "Data purchase"}
+                          {title}
                         </Text>
                         <Text style={styles.activityMeta} numberOfLines={1}>
-                          {transaction.network
-                            ? `${String(transaction.network).toUpperCase()} · `
-                            : ""}
-                          {transaction.data_amount || "Bundle"}
+                          {meta}
                         </Text>
                         {receipt ? (
                           <View style={styles.receiptTag}>
@@ -1782,10 +2028,20 @@ export default function HomeScreen({ navigation }) {
                       </View>
 
                       <View style={styles.activityTail}>
-                        <Text style={styles.activityAmount}>
-                          {transaction.amount
-                            ? `-${formatGhc(transaction.amount)}`
-                            : "N/A"}
+                        <Text
+                          style={[
+                            styles.activityAmount,
+                            // Credits read in the accent colour so an arriving
+                            // payment is not mistaken for a charge at a glance.
+                            // Colour is never the ONLY signal - the leading "+"
+                            // above carries the meaning on its own - so this
+                            // stays accessible without it.
+                            transaction.activityAmountIsCredit && {
+                              color: c.mint,
+                            },
+                          ]}
+                        >
+                          {amountText}
                         </Text>
                         {tone ? (
                           <View
@@ -1856,7 +2112,7 @@ export default function HomeScreen({ navigation }) {
                           </TouchableOpacity>
                         ) : null}
                       </View>
-                    </TouchableOpacity>
+                    </RowContainer>
                   );
                 })
               )}

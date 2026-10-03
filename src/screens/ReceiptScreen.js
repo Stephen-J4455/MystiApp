@@ -109,11 +109,20 @@ export default function ReceiptScreen({ navigation, route }) {
   // knew was completed. See lib/orderStatus.js.
   const rawStatus = resolveOrderStatus(transaction);
   const isAgentOrder = transaction?.orderType === "agent";
-  // Same helper the Home card uses, so the number a customer reads on the card
-  // is the one on the receipt.
+  // A wallet top-up reaches this screen from History and from Home. It is not a
+  // purchase: it has no network, no package, no recipient and no delivery
+  // status. The order markup below would render it as "Data Bundle Purchase",
+  // "Ghc 0.00" and a status pill reading "Unknown" - three confident-looking
+  // statements, none of them true. Detected here so the whole receipt takes the
+  // funding branch rather than patching each field individually.
+  const isTopup = transaction?.source === "wallet_topup";
+  // The derived `MYS-<id>` receipt number is keyed on an `orders`/`agent_orders`
+  // primary key. On a `wallet_topups` row it would render that table's id under
+  // the agent prefix - a number support can look up and find nothing - so it is
+  // withheld here rather than trusting `orderType`, which this row also carries.
   const receiptParts = useMemo(
-    () => splitReceiptNumber(transaction),
-    [transaction],
+    () => (isTopup ? null : splitReceiptNumber(transaction)),
+    [isTopup, transaction],
   );
   const tone = useMemo(
     () => getStatusTone(isDark ? "dark" : "light"),
@@ -170,6 +179,25 @@ export default function ReceiptScreen({ navigation, route }) {
 
   const getStatusText = (status) => formatOrderStatusLabel(status);
 
+  // A top-up's own status vocabulary. `wallet_topups.status` is Paystack's
+  // ('pending' | 'success' | 'failed'), and `resolveOrderStatus` returns
+  // 'success', which is not a key in the shared order tone map - so the badge
+  // would render "Unknown" on a top-up that actually succeeded. Mapped to the
+  // order families for COLOUR and given its own wording, so the badge reads
+  // "Received" rather than implying a delivery.
+  const topupStatusKey = String(transaction?.status || "")
+    .trim()
+    .toLowerCase();
+  const topupStatusLabel =
+    topupStatusKey === "success"
+      ? "Received"
+      : topupStatusKey === "failed"
+        ? "Failed"
+        : "Pending";
+  const displayStatusLabel = isTopup
+    ? topupStatusLabel
+    : getStatusText(rawStatus);
+
   return (
     <ThemedScreen style={s.container}>
       <StatusBar
@@ -200,7 +228,11 @@ export default function ReceiptScreen({ navigation, route }) {
             <Ionicons name="receipt" size={40} color={c.mint} />
           </View>
           <Text style={s.receiptTitle}>
-            {isAgentOrder ? "Agent Purchase Receipt" : "Purchase Receipt"}
+            {isTopup
+              ? "Wallet Top-up Receipt"
+              : isAgentOrder
+                ? "Agent Purchase Receipt"
+                : "Purchase Receipt"}
           </Text>
           {isAgentOrder && (
             <View style={s.agentBadge}>
@@ -208,7 +240,13 @@ export default function ReceiptScreen({ navigation, route }) {
               <Text style={s.agentBadgeText}>AGENT</Text>
             </View>
           )}
-          <Text style={s.transactionId}>ID: {transaction.id}</Text>
+          {/* The row id is only meaningful for orders. On a top-up the
+              `wallet_topups` id shares its number space with `agent_orders`, so
+              printing it as "ID: 7" invites the reader to look up an unrelated
+              order; the Paystack reference below is the citable identifier. */}
+          {isTopup ? null : (
+            <Text style={s.transactionId}>ID: {transaction.id}</Text>
+          )}
           {receiptParts ? (
             <View style={s.receiptNumberPill}>
               <Ionicons name="pricetag" size={13} color={c.onAccent} />
@@ -225,10 +263,23 @@ export default function ReceiptScreen({ navigation, route }) {
           <View
             style={[
               s.statusBadge,
-              { backgroundColor: getStatusColor(rawStatus) },
+              {
+                backgroundColor: isTopup
+                  ? // `success` is absent from the order tone map, so the
+                    // completed family is borrowed for colour and the label is
+                    // overridden below. Without this the badge would fall
+                    // through to `c.mint` by accident rather than by decision.
+                    (topupStatusKey === "success"
+                      ? tones.completed
+                      : topupStatusKey === "failed"
+                        ? tones.failed
+                        : tones.pending
+                    )?.color
+                  : getStatusColor(rawStatus),
+              },
             ]}
           >
-            <Text style={s.statusText}>{getStatusText(rawStatus)}</Text>
+            <Text style={s.statusText}>{displayStatusLabel}</Text>
           </View>
         </View>
 
@@ -279,6 +330,92 @@ export default function ReceiptScreen({ navigation, route }) {
           </View>
         ) : null}
 
+        {/* Top-ups get their own block. The order block below would report
+            "Service: Data Bundle Purchase", "Amount: Ghc 0.00" and hide the
+            net/gross split that is the whole reason a top-up exists - so it is
+            replaced wholesale rather than field-by-field. */}
+        {isTopup ? (
+          <View style={s.detailsCard}>
+            <Text style={s.sectionTitle}>Top-up Details</Text>
+
+            <View style={s.detailRow}>
+              <Text style={s.detailLabel}>Funded by</Text>
+              <Text style={s.detailValue}>
+                {transaction.subAgentName || "Sub-agent"}
+              </Text>
+            </View>
+
+            <View style={s.detailRow}>
+              <Text style={s.detailLabel}>Amount credited</Text>
+              <Text style={[s.detailValue, s.amount]}>
+                Ghc {Number(transaction.amount || 0).toFixed(2)}
+              </Text>
+            </View>
+
+            {/*
+              `gross_amount` is what Paystack charged, `amount` is the net the
+              wallet received (migration 20260927_003). Shown only when both
+              exist: a row written before the charge snapshot has no
+              `gross_amount`, and rendering "Ghc 0.00" for it would read as a
+              real zero rather than as absent data. Falling back to `amount`
+              would instead invent a 0% charge rate.
+            */}
+            {transaction.gross_amount != null &&
+            Number(transaction.gross_amount) !== Number(transaction.amount) ? (
+              <>
+                <View style={s.detailRow}>
+                  <Text style={s.detailLabel}>Amount charged</Text>
+                  <Text style={s.detailValue}>
+                    Ghc {Number(transaction.gross_amount).toFixed(2)}
+                  </Text>
+                </View>
+                <View style={s.detailRow}>
+                  <Text style={s.detailLabel}>Platform charge</Text>
+                  <Text style={s.detailValue}>
+                    Ghc{" "}
+                    {(
+                      Number(transaction.gross_amount) -
+                      Number(transaction.amount || 0)
+                    ).toFixed(2)}
+                  </Text>
+                </View>
+              </>
+            ) : null}
+
+            <View style={s.detailRow}>
+              <Text style={s.detailLabel}>Date & Time</Text>
+              <Text style={s.detailValue}>
+                {formatDate(transaction.created_at)}
+              </Text>
+            </View>
+
+            {transaction.reference ? (
+              <View style={s.detailRow}>
+                <Text style={s.detailLabel}>Reference</Text>
+                <Text style={s.detailValue}>{transaction.reference}</Text>
+              </View>
+            ) : null}
+
+            {transaction.paystack_transaction_id ? (
+              <View style={s.detailRow}>
+                <Text style={s.detailLabel}>Payment ID</Text>
+                <Text style={s.detailValue}>
+                  {transaction.paystack_transaction_id}
+                </Text>
+              </View>
+            ) : null}
+
+            {transaction.paid_at ? (
+              <View style={s.detailRow}>
+                <Text style={s.detailLabel}>Paid At</Text>
+                <Text style={s.detailValue}>
+                  {formatDate(transaction.paid_at)}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <>
         {/* Transaction Details */}
         <View style={s.detailsCard}>
           <Text style={s.sectionTitle}>Transaction Details</Text>
@@ -349,38 +486,43 @@ export default function ReceiptScreen({ navigation, route }) {
           )}
         </View>
 
-        {/* Customer Information */}
-        <View style={s.detailsCard}>
-          <Text style={s.sectionTitle}>
-            {isAgentOrder ? "Recipient Information" : "Customer Information"}
-          </Text>
-
-          <View style={s.detailRow}>
-            <Text style={s.detailLabel}>Phone</Text>
-            <Text style={s.detailValue}>
-              {isAgentOrder
-                ? transaction.displayPhone || "N/A"
-                : transaction.phone || "N/A"}
+        {/* Customer / Recipient Information. Skipped entirely for a top-up:
+            there is no recipient, and a "Phone: N/A" block under a funding
+            receipt implies a customer who does not exist. */}
+        {isTopup ? null : (
+          <View style={s.detailsCard}>
+            <Text style={s.sectionTitle}>
+              {isAgentOrder ? "Recipient Information" : "Customer Information"}
             </Text>
+
+            <View style={s.detailRow}>
+              <Text style={s.detailLabel}>Phone</Text>
+              <Text style={s.detailValue}>
+                {isAgentOrder
+                  ? transaction.displayPhone || "N/A"
+                  : transaction.phone || "N/A"}
+              </Text>
+            </View>
+
+            {!isAgentOrder && transaction.user_email && (
+              <View style={s.detailRow}>
+                <Text style={s.detailLabel}>Email</Text>
+                <Text style={s.detailValue}>{transaction.user_email}</Text>
+              </View>
+            )}
+
+            {transaction.country_code && (
+              <View style={s.detailRow}>
+                <Text style={s.detailLabel}>Country</Text>
+                <Text style={s.detailValue}>{transaction.country_code}</Text>
+              </View>
+            )}
           </View>
+        )}
 
-          {!isAgentOrder && transaction.user_email && (
-            <View style={s.detailRow}>
-              <Text style={s.detailLabel}>Email</Text>
-              <Text style={s.detailValue}>{transaction.user_email}</Text>
-            </View>
-          )}
-
-          {transaction.country_code && (
-            <View style={s.detailRow}>
-              <Text style={s.detailLabel}>Country</Text>
-              <Text style={s.detailValue}>{transaction.country_code}</Text>
-            </View>
-          )}
-        </View>
-
-        {/* Payment Information */}
-        {(transaction.bank || transaction.channel) && (
+        {/* Payment Information. The top-up block above already reports the
+            channel, so this would restate it. */}
+        {!isTopup && (transaction.bank || transaction.channel) && (
           <View style={s.detailsCard}>
             <Text style={s.sectionTitle}>Payment Information</Text>
 
@@ -418,6 +560,8 @@ export default function ReceiptScreen({ navigation, route }) {
             For support, contact our customer service
           </Text>
         </View>
+        </>
+        )}
       </ScrollView>
     </ThemedScreen>
   );

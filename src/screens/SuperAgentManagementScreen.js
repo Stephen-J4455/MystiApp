@@ -186,6 +186,24 @@ export default function SuperAgentManagementScreen({ navigation }) {
           <Text style={styles.actionText}>Held Agent Orders</Text>
         </TouchableOpacity>
 
+        {/*
+          The ledger is offered to every super agent, Enterprise or Pro, and sits
+          next to Transactions rather than inside the `isEnterprise` group.
+
+          A Pro super agent has no offers, tiers or agent-management screen, but
+          they still hold real money: their wallet is what every sub-agent
+          purchase debits. The ledger is the only complete record of that money,
+          and gating it behind Enterprise would hide a financial statement from
+          the tier that most needs to reconcile against shortfalls.
+        */}
+        <TouchableOpacity
+          style={styles.actionButton}
+          onPress={() => navigation.navigate("SuperAgentLedger")}
+        >
+          <Ionicons name="book" size={20} color={c.onAccent} />
+          <Text style={styles.actionText}>Wallet Ledger</Text>
+        </TouchableOpacity>
+
         <TouchableOpacity
           style={styles.actionButton}
           onPress={() => navigation.navigate("SuperAgentAnalytics")}

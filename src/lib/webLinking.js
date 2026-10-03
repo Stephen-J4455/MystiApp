@@ -48,6 +48,7 @@ const APP_ROUTES = [
   "SuperAgentPaystack",
   "SuperAgentAnalytics",
   "SuperAgentHeldOrders",
+  "SuperAgentLedger",
   "Receipt",
   "History",
   "WalletTopUp",

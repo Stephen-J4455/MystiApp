@@ -51,6 +51,7 @@ import SuperAgentTierManagementScreen from "./src/screens/SuperAgentTierManageme
 import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
 import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
 import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
+import SuperAgentLedgerScreen from "./src/screens/SuperAgentLedgerScreen";
 import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
 import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
 import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
@@ -641,6 +642,10 @@ export default function App() {
                         <Stack.Screen
                           name="SuperAgentHeldOrders"
                           component={SuperAgentHeldOrdersScreen}
+                        />
+                        <Stack.Screen
+                          name="SuperAgentLedger"
+                          component={SuperAgentLedgerScreen}
                         />
                         <Stack.Screen
                           name="Receipt"
