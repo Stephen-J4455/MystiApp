@@ -38,12 +38,15 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/splash-icon.png",
+          "image": "./assets/mystiwan.png",
           "resizeMode": "contain",
           "backgroundColor": "#04100F",
           "imageWidth": 300,
           "dark": {
             "backgroundColor": "#04100F"
+          },
+          "light": {
+            "backgroundColor": "#ffffff"
           },
           "android": {
             "imageWidth": 300,
