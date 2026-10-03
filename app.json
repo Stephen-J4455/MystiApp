@@ -34,7 +34,27 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#04100F",
+          "imageWidth": 300,
+          "dark": {
+            "backgroundColor": "#04100F"
+          },
+          "android": {
+            "imageWidth": 300,
+            "resizeMode": "contain"
+          },
+          "ios": {
+            "imageWidth": 320,
+            "resizeMode": "contain"
+          }
+        }
+      ]
     ],
     "scheme": "mystiwanebusiness",
     "web": {
