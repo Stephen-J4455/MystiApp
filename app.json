@@ -18,7 +18,11 @@
       "icon": "./assets/mystiwan.png",
       "package": "com.stephenj2.mystiwanebusiness",
       "googleServicesFile": "./google-services.json",
-      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "WAKE_LOCK"]
+      "permissions": ["RECEIVE_BOOT_COMPLETED", "VIBRATE", "WAKE_LOCK"],
+      "adaptiveIcon": {
+        "backgroundColor": "#04100F",
+        "foregroundImage": "./assets/adaptive-icon-foreground.png"
+      }
     },
     "plugins": [
       [
@@ -38,22 +42,17 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/mystiwan.png",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 220,
           "resizeMode": "contain",
-          "backgroundColor": "#04100F",
-          "imageWidth": 300,
+          "backgroundColor": "#FFFFFF",
           "dark": {
             "backgroundColor": "#04100F"
           },
-          "light": {
-            "backgroundColor": "#ffffff"
-          },
           "android": {
-            "imageWidth": 300,
             "resizeMode": "contain"
           },
           "ios": {
-            "imageWidth": 320,
             "resizeMode": "contain"
           }
         }
