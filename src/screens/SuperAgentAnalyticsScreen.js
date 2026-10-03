@@ -22,13 +22,42 @@ import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 const money = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 const count = (value) => Number(value || 0).toLocaleString();
 
+// WHAT THESE FIGURES MEAN
+// -----------------------
+// A Sub-Agent order is paid as `gross = base + markup + fee`:
+//
+//   base   - the price the ADMIN set for your tier. Revenue for the platform,
+//            a COST to you: you resold this data to your sub-agent.
+//   markup - YOUR margin on top of it. This is what you actually earn.
+//   fee    - the platform transaction charge. The platform's.
+//
+// So `gross` is NOT your profit - it is mostly money you passed straight
+// through. Showing the gross (or base + markup) as "earnings" overstated the
+// business by the entire cost of the data, which is why the old figure here
+// never matched what was in the wallet. The headline below is the markup only.
+//
+// Every tile is labelled by WHO RECEIVES THE MONEY, and the breakdown panel
+// shows the arithmetic, so no figure has to be taken on trust.
 const EMPTY_ANALYTICS = {
-  earnings: { today: 0, week: 0, month: 0, year: 0, all_time: 0 },
+  earnings: {
+    today: 0,
+    week: 0,
+    month: 0,
+    year: 0,
+    all_time: 0,
+    profit_today: 0,
+    profit_week: 0,
+    profit_month: 0,
+    profit_year: 0,
+    profit_all_time: 0,
+  },
   sub_agent_sales: {
     transaction_count: 0,
     gross_sales: 0,
     base_cost: 0,
+    markup_profit: 0,
     markup_earnings: 0,
+    provider_cost: 0,
     platform_fees: 0,
     super_agent_revenue: 0,
     active_sub_agents: 0,
@@ -58,6 +87,17 @@ const EMPTY_ANALYTICS = {
   daily_trend: [],
 };
 
+// Plots the Super Agent's PROFIT (their markup), not the pass-through total.
+// `row.profit` is added by migration 20261003_004; `row.earnings` remains the
+// fallback so the chart still renders against a database that predates it.
+const chartValue = (row) => {
+  const profit = Number(row?.profit);
+  if (Number.isFinite(profit)) return profit;
+  const markup = Number(row?.markup_earnings);
+  if (Number.isFinite(markup)) return markup;
+  return Number(row?.earnings || 0);
+};
+
 const TrendChart = ({ data }) => {
   const theme = useTheme();
   const styles = useAnalyticsStyles(theme.c);
@@ -69,11 +109,11 @@ const TrendChart = ({ data }) => {
       const date = new Date();
       date.setDate(date.getDate() - (13 - index));
       const key = date.toISOString().slice(0, 10);
-      return byDay.get(key) || { day: key, earnings: 0 };
+      return byDay.get(key) || { day: key, earnings: 0, profit: 0 };
     });
   }, [data]);
   const maximum = Math.max(
-    ...normalized.map((row) => Number(row.earnings || 0)),
+    ...normalized.map((row) => chartValue(row)),
     1,
   );
 
@@ -81,7 +121,7 @@ const TrendChart = ({ data }) => {
     <ThemedScreen style={styles.chart}>
       <View style={styles.chartBars}>
         {normalized.map((row, index) => {
-          const value = Number(row.earnings || 0);
+          const value = chartValue(row);
           return (
             <View key={row.day} style={styles.barColumn}>
               <View style={styles.barTrack}>
@@ -109,6 +149,46 @@ const TrendChart = ({ data }) => {
       </View>
     </ThemedScreen>
   );
+};
+
+// One line of the money-flow panel. `strong` marks the rows that are the
+// point of the panel (what came in, what was kept) so they read louder than
+// the context rows around them.
+const FlowRow = ({ icon, label, value, hint, tone, strong }) => {
+  const theme = useTheme();
+  const styles = useAnalyticsStyles(theme.c);
+  const accent = tone || theme.c.textPrimary;
+  return (
+    <View style={styles.flowRow}>
+      <View
+        style={[
+          styles.flowIcon,
+          { backgroundColor: `${accent}1F` },
+        ]}
+      >
+        <Ionicons name={icon} size={18} color={accent} />
+      </View>
+      <View style={styles.flowCopy}>
+        <Text style={styles.flowLabel}>{label}</Text>
+        <Text style={styles.flowHint}>{hint}</Text>
+      </View>
+      <Text
+        style={[
+          styles.flowValue,
+          strong && styles.flowValueStrong,
+          { color: accent },
+        ]}
+      >
+        {value}
+      </Text>
+    </View>
+  );
+};
+
+const FlowDivider = () => {
+  const theme = useTheme();
+  const styles = useAnalyticsStyles(theme.c);
+  return <View style={[styles.divider, styles.flowDivider]} />;
 };
 
 const MetricCard = ({ icon, label, value, detail, tone }) => {
@@ -199,9 +279,51 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
   const totalTransactions =
     Number(subAgentSales.transaction_count || 0) +
     Number(ownPurchases.transaction_count || 0);
-  const totalCollected =
-    Number(subAgentSales.gross_sales || 0) +
-    Number(ownPurchases.wallet_spend || 0);
+
+    // PROFIT, not gross. This is the number the whole screen is built around:
+    // the super agent's markup on their sub-agents' sales.
+    //
+    // `markup_profit` is added by migration 20261003_004. The fallbacks walk
+    // back through the older field names and finally derive the markup from
+    // `super_agent_revenue - base_cost`, so the headline is still correct on a
+    // database that has not had the migration applied yet - it degrades to a
+    // number rather than to a silent zero.
+    const profitAllTime = (() => {
+      const candidates = [
+        subAgentSales.markup_profit,
+        subAgentSales.markup_earnings,
+        earnings.profit_all_time,
+      ];
+      for (const candidate of candidates) {
+        const parsed = Number(candidate);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      const revenue = Number(subAgentSales.super_agent_revenue);
+      const base = Number(subAgentSales.base_cost);
+      return Number.isFinite(revenue) && Number.isFinite(base)
+        ? revenue - base
+        : 0;
+    })();
+
+    const profitPeriod = (key, fallbackKey) => {
+      const direct = Number(earnings[`profit_${key}`]);
+      if (Number.isFinite(direct)) return direct;
+      const legacy = Number(earnings[fallbackKey]);
+      return Number.isFinite(legacy) ? legacy : 0;
+    };
+
+    // The three components of a sub-agent order, each labelled by recipient.
+    // These are what make the arithmetic visible instead of implied.
+    const salesVolume = Number(subAgentSales.gross_sales || 0);
+    const dataCost = Number(subAgentSales.base_cost || 0);
+    const markupEarned = profitAllTime;
+    const ownSpend = Number(ownPurchases.wallet_spend || 0);
+
+    // What the super agent collected from sub-agents, and what they paid out to
+    // resell it. Neither is profit; showing both next to the markup is what makes
+    // the difference legible.
+    const collectedFromAgents = salesVolume;
+    const resellCost = dataCost;
 
   return (
     <ThemedScreen style={styles.safeArea}>
@@ -247,27 +369,27 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
         >
           <View style={styles.heroCard}>
             <View style={styles.heroTopline}>
-              <View>
-                <Text style={styles.heroLabel}>
-                  All-time Super Agent earnings
-                </Text>
-                <Text style={styles.heroValue}>{money(earnings.all_time)}</Text>
-              </View>
-              <View style={styles.heroIcon}>
-                <Ionicons name="trending-up" size={26} color={c.heroText} />
-              </View>
-            </View>
-            <Text style={styles.heroDescription}>
-              Base data cost plus markup from active sub-agent sales. Cancelled
-              and failed orders are excluded.
+                        <View style={styles.heroCopy}>
+                          <Text style={styles.heroLabel}>Your profit, all time</Text>
+                          <Text style={styles.heroValue}>{money(profitAllTime)}</Text>
+                        </View>
+                        <View style={styles.heroIcon}>
+                          <Ionicons name="trending-up" size={26} color={c.heroText} />
+                        </View>
+                      </View>
+                      <Text style={styles.heroDescription}>
+                        Your markup on sub-agent sales - the money you keep. The{" "}
+                        {money(collectedFromAgents)} your sub-agents paid you includes{" "}
+                        {money(resellCost)} you paid the platform to resell, so it is
+                        volume, not profit.
             </Text>
           </View>
 
           <View style={styles.sectionHeader}>
             <View>
-              <Text style={styles.sectionTitle}>Earnings pace</Text>
+                        <Text style={styles.sectionTitle}>Profit pace</Text>
               <Text style={styles.sectionSubtitle}>
-                Base cost plus markup earnings
+                          Your markup, by period
               </Text>
             </View>
             <Ionicons name="analytics" size={22} color={c.mint} />
@@ -276,30 +398,30 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             <MetricCard
               icon="sunny-outline"
               label="Today"
-              value={money(earnings.today)}
+                          value={money(profitPeriod("today", "today"))}
             />
             <MetricCard
               icon="calendar-outline"
               label="This week"
-              value={money(earnings.week)}
+                          value={money(profitPeriod("week", "week"))}
             />
             <MetricCard
               icon="calendar-number-outline"
               label="This month"
-              value={money(earnings.month)}
+                          value={money(profitPeriod("month", "month"))}
             />
             <MetricCard
               icon="trophy-outline"
               label="This year"
-              value={money(earnings.year)}
+                          value={money(profitPeriod("year", "year"))}
             />
           </View>
 
           <View style={styles.sectionHeader}>
             <View>
-              <Text style={styles.sectionTitle}>14-day earnings trend</Text>
+                          <Text style={styles.sectionTitle}>14-day profit trend</Text>
               <Text style={styles.sectionSubtitle}>
-                Daily Super Agent earnings
+                            Your markup, day by day
               </Text>
             </View>
             <View style={styles.livePill}>
@@ -361,34 +483,80 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             </View>
           </View>
 
-          <View style={styles.breakdownGrid}>
-            <View style={styles.breakdownCard}>
-              <Text style={styles.breakdownLabel}>Total sub-agent sales</Text>
-              <Text style={styles.breakdownValue}>
-                {money(subAgentSales.gross_sales)}
+          <View style={styles.sectionHeader}>
+                      <View>
+                        <Text style={styles.sectionTitle}>Where the money goes</Text>
+                        <Text style={styles.sectionSubtitle}>
+                          Every payment a sub-agent makes, split by recipient
               </Text>
-              <Text style={styles.breakdownHint}>Gross customer payments</Text>
-            </View>
-            <View style={styles.breakdownCard}>
-              <Text style={styles.breakdownLabel}>Total markup earnings</Text>
-              <Text style={[styles.breakdownValue, { color: c.sky }]}>
-                {money(subAgentSales.markup_earnings)}
-              </Text>
-              <Text style={styles.breakdownHint}>Your realized margin</Text>
-            </View>
-            <View style={styles.breakdownCard}>
-              <Text style={styles.breakdownLabel}>Your package spend</Text>
-              <Text style={styles.breakdownValue}>
-                {money(ownPurchases.wallet_spend)}
-              </Text>
-              <Text style={styles.breakdownHint}>Data Screen purchases</Text>
-            </View>
-            <View style={styles.breakdownCard}>
-              <Text style={styles.breakdownLabel}>Total business value</Text>
-              <Text style={styles.breakdownValue}>{money(totalCollected)}</Text>
-              <Text style={styles.breakdownHint}>Sales + own purchases</Text>
-            </View>
-          </View>
+                      </View>
+                    </View>
+                    <View style={styles.flowCard}>
+                      <FlowRow
+                        icon="cash-outline"
+                        label="Paid by your sub-agents"
+                        value={money(salesVolume)}
+                        hint="Gross collected from sub-agent sales"
+                        tone={c.textPrimary}
+                        strong
+                      />
+                      <FlowDivider />
+                      <FlowRow
+                        icon="pricetag-outline"
+                        label="You paid the platform"
+                        value={`- ${money(resellCost)}`}
+                        hint="Platform price for the data you resold"
+                        tone={c.rose}
+                      />
+                      <FlowDivider />
+                      <FlowRow
+                        icon="wallet-outline"
+                        label="Your profit (markup)"
+                        value={money(markupEarned)}
+                        hint="What you actually earned"
+                        tone={c.mint}
+                        strong
+                      />
+                      <FlowDivider />
+                      <FlowRow
+                        icon="card-outline"
+                        label="Platform fee included"
+                        value={money(subAgentSales.platform_fees)}
+                        hint="Collected by the platform, not by you"
+                        tone={c.amber}
+                      />
+                    </View>
+
+                    <View style={styles.breakdownGrid}>
+                      <View style={styles.breakdownCard}>
+                        <Text style={styles.breakdownLabel}>Sub-agent sales</Text>
+                        <Text style={styles.breakdownValue}>
+                          {money(salesVolume)}
+                        </Text>
+                        <Text style={styles.breakdownHint}>Volume through you</Text>
+                      </View>
+                      <View style={styles.breakdownCard}>
+                        <Text style={styles.breakdownLabel}>Your profit</Text>
+                        <Text style={[styles.breakdownValue, { color: c.sky }]}>
+                          {money(markupEarned)}
+                        </Text>
+                        <Text style={styles.breakdownHint}>Markup you keep</Text>
+                      </View>
+                      <View style={styles.breakdownCard}>
+                        <Text style={styles.breakdownLabel}>Your package spend</Text>
+                        <Text style={styles.breakdownValue}>
+                          {money(ownSpend)}
+                        </Text>
+                        <Text style={styles.breakdownHint}>Data Screen purchases</Text>
+                      </View>
+                      <View style={styles.breakdownCard}>
+                        <Text style={styles.breakdownLabel}>Active sub-agents</Text>
+                        <Text style={styles.breakdownValue}>
+                          {count(subAgentSales.active_sub_agents)}
+                        </Text>
+                        <Text style={styles.breakdownHint}>Selling for you</Text>
+                      </View>
+                    </View>
 
           <View style={styles.sectionHeader}>
             <View>
@@ -491,7 +659,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             <View>
               <Text style={styles.sectionTitle}>Top sub-agents</Text>
               <Text style={styles.sectionSubtitle}>
-                By realized markup earnings
+                              By profit you earned on their sales
               </Text>
             </View>
           </View>
@@ -514,7 +682,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                   <Text style={styles.agentEarningsValue}>
                     {money(agent.markup_earnings)}
                   </Text>
-                  <Text style={styles.agentEarningsLabel}>markup</Text>
+                                  <Text style={styles.agentEarningsLabel}>your profit</Text>
                 </View>
               </View>
             ))
@@ -529,9 +697,10 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           )}
 
           <Text style={styles.footnote}>
-            Analytics use immutable payment snapshots and exclude cancelled or
-            failed orders from active earnings.
-          </Text>
+                      Cancelled and failed orders are excluded from every figure. Profit
+                      is your markup only - it does not include the{" "}
+                      {money(resellCost)} you paid the platform to resell the data.
+                    </Text>
         </ScrollView>
       )}
     </ThemedScreen>
@@ -569,6 +738,7 @@ const useAnalyticsStyles = (c, topInset = 0) => {
       justifyContent: "space-between",
       alignItems: "center",
     },
+        heroCopy: { flex: 1 },
     heroLabel: {
       fontFamily: fonts.body,
       fontSize: 13,
@@ -710,6 +880,24 @@ const useAnalyticsStyles = (c, topInset = 0) => {
       marginTop: 6,
     },
     breakdownHint: { ...base.rowSubtitle, fontSize: 9, marginTop: 4 },
+
+    // Money-flow panel. Each row is one recipient of a sub-agent payment, so
+    // the split is read top to bottom rather than inferred from a total.
+    flowCard: { ...base.card, padding: 16, borderRadius: 20 },
+    flowRow: { flexDirection: "row", alignItems: "center" },
+    flowIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    flowCopy: { flex: 1, marginLeft: 10 },
+    flowLabel: { ...base.rowTitle, fontSize: 13 },
+    flowHint: { ...base.rowSubtitle, fontSize: 10, marginTop: 2 },
+    flowValue: { ...base.rowSubtitle, fontSize: 13, fontWeight: "800" },
+    flowValueStrong: { ...base.rowTitle, fontSize: 15 },
+    flowDivider: { marginVertical: 12 },
 
     operationsCard: { ...base.card, padding: 15, borderRadius: 20, gap: 14 },
     operationRow: { flexDirection: "row", alignItems: "center" },
