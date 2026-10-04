@@ -26,15 +26,22 @@ const count = (value) => Number(value || 0).toLocaleString();
 // -----------------------
 // A Sub-Agent order is paid as `gross = base + markup + fee`:
 //
-//   base   - the price the ADMIN set for your tier. Revenue for the platform,
-//            a COST to you: you resold this data to your sub-agent.
+//   base   - the ADMIN-SET TIER PRICE for the package. Revenue for the
+//            platform, a COST to you: you resold this data to your sub-agent.
 //   markup - YOUR margin on top of it. This is what you actually earn.
 //   fee    - the platform transaction charge. The platform's.
 //
 // So `gross` is NOT your profit - it is mostly money you passed straight
 // through. Showing the gross (or base + markup) as "earnings" overstated the
 // business by the entire cost of the data, which is why the old figure here
-// never matched what was in the wallet. The headline below is the markup only.
+// never matched what was in the wallet.
+//
+// PROFIT IS DERIVED FROM `base`, NOT FROM THE RECORDED MARKUP (migration
+// 20261004_004). `agent_markup` is what the CLIENT claimed at checkout, and
+// `verify-payment` writes it as 0 whenever its arithmetic check on the client's
+// four numbers fails - so summing it reported a figure nobody had agreed to.
+// The server now computes `gross - base - fee`, which equals the markup on a
+// validated order and yields an honest zero when the split was never verified.
 //
 // Every tile is labelled by WHO RECEIVES THE MONEY, and the breakdown panel
 // shows the arithmetic, so no figure has to be taken on trust.
@@ -57,6 +64,11 @@ const EMPTY_ANALYTICS = {
     base_cost: 0,
     markup_profit: 0,
     markup_earnings: 0,
+    // What the client claimed at checkout, kept for audit by migration
+    // 20261004_004. Never summed as profit - `markup_profit` is derived from
+    // the admin base price. A large gap between the two means the checkout
+    // split was never validated.
+    markup_recorded: 0,
     provider_cost: 0,
     platform_fees: 0,
     super_agent_revenue: 0,
@@ -91,10 +103,18 @@ const EMPTY_ANALYTICS = {
 // `row.profit` is added by migration 20261003_004; `row.earnings` remains the
 // fallback so the chart still renders against a database that predates it.
 const chartValue = (row) => {
-  const profit = Number(row?.profit);
-  if (Number.isFinite(profit)) return profit;
-  const markup = Number(row?.markup_earnings);
-  if (Number.isFinite(markup)) return markup;
+  // `Number(null)` is `0`, so a missing `profit` key would otherwise win
+  // this chain and plot a real-looking flat zero against the derived
+  // `markup_earnings` underneath it. `undefined` is the only absent value
+  // that fails the finite test, which is why the check is on presence.
+  if (row?.profit !== null && row?.profit !== undefined) {
+    const profit = Number(row.profit);
+    if (Number.isFinite(profit)) return profit;
+  }
+  if (row?.markup_earnings !== null && row?.markup_earnings !== undefined) {
+    const markup = Number(row.markup_earnings);
+    if (Number.isFinite(markup)) return markup;
+  }
   return Number(row?.earnings || 0);
 };
 
@@ -274,52 +294,78 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
     analytics.sub_agent_sales || EMPTY_ANALYTICS.sub_agent_sales;
   const ownPurchases =
     analytics.super_agent_purchases || EMPTY_ANALYTICS.super_agent_purchases;
-  const wallet = analytics.wallets || EMPTY_ANALYTICS.wallets;
-  const afa = analytics.afa || EMPTY_ANALYTICS.afa;
-  const totalTransactions =
-    Number(subAgentSales.transaction_count || 0) +
-    Number(ownPurchases.transaction_count || 0);
+    // `wallet` and `afa` are deliberately NOT destructured. The operational card
+    // they fed was removed as duplicate surface - the super agent's wallet
+    // balance and AFA collections live on the Wallet and Admin surfaces, and
+    // repeating them here under an "Operational analytics" heading was a third
+    // place the same numbers appeared.
 
     // PROFIT, not gross. This is the number the whole screen is built around:
     // the super agent's markup on their sub-agents' sales.
     //
-    // `markup_profit` is added by migration 20261003_004. The fallbacks walk
-    // back through the older field names and finally derive the markup from
+    // `markup_profit` is added by migration 20261003_004 and DERIVED FROM THE
+    // ADMIN BASE PRICE by 20261004_004, so it is the tier markup rather than
+    // whatever the client claimed. The fallbacks walk back through the older
+    // field names and finally derive the markup from
     // `super_agent_revenue - base_cost`, so the headline is still correct on a
-    // database that has not had the migration applied yet - it degrades to a
+    // database that has not had the migrations applied yet - it degrades to a
     // number rather than to a silent zero.
-    const profitAllTime = (() => {
-      const candidates = [
-        subAgentSales.markup_profit,
-        subAgentSales.markup_earnings,
-        earnings.profit_all_time,
-      ];
-      for (const candidate of candidates) {
-        const parsed = Number(candidate);
-        if (Number.isFinite(parsed)) return parsed;
-      }
-      const revenue = Number(subAgentSales.super_agent_revenue);
-      const base = Number(subAgentSales.base_cost);
-      return Number.isFinite(revenue) && Number.isFinite(base)
-        ? revenue - base
-        : 0;
-    })();
+    // A candidate is only usable if it is a real number AND not the zero that
+        // `EMPTY_ANALYTICS` substitutes for a missing key.
+        //
+        // `Number(null)` and `Number("")` are both `0` and both pass
+        // `Number.isFinite`, so the previous test accepted the placeholder and
+        // returned it on the FIRST candidate - meaning the final
+        // `super_agent_revenue - base_cost` fallback below was unreachable, and a
+        // database without migration 20261004_004 rendered a confident "Ghc 0.00"
+        // instead of the number it was written to derive.
+        const usableProfit = (value) => {
+          if (value === null || value === undefined || value === "") return null;
+          const parsed = Number(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        };
 
-    const profitPeriod = (key, fallbackKey) => {
-      const direct = Number(earnings[`profit_${key}`]);
-      if (Number.isFinite(direct)) return direct;
-      const legacy = Number(earnings[fallbackKey]);
-      return Number.isFinite(legacy) ? legacy : 0;
-    };
+        const profitAllTime = (() => {
+          const candidates = [
+            subAgentSales.markup_profit,
+            subAgentSales.markup_earnings,
+            earnings.profit_all_time,
+          ];
+          for (const candidate of candidates) {
+            const parsed = usableProfit(candidate);
+            if (parsed !== null) return parsed;
+          }
+          const revenue = usableProfit(subAgentSales.super_agent_revenue);
+          const base = usableProfit(subAgentSales.base_cost);
+          return revenue !== null && base !== null ? revenue - base : 0;
+        })();
+
+        // Period profit. The derived `profit_<period>` key is the ONLY correct
+        // source here, and there is deliberately no fallback to `earnings.<period>`.
+        //
+        // `earnings.today` is `SUM(super_agent_amount)` = base + markup, which is
+        // money the super agent collected rather than earned. 20261003_004 kept
+        // those keys unchanged specifically so the admin app's renders would not
+        // shift, so they are still present after the migration and are STILL the
+        // wrong figure for this screen.
+        //
+        // Falling back to them made "Profit pace" display pass-through revenue as
+        // profit - the same conflation 20261003_004 and 20261004_004 exist to
+        // remove, reintroduced one level up on the client. A missing derived key
+        // now renders 0, which is visibly wrong and therefore worth reporting,
+        // rather than silently showing a larger plausible-looking number.
+        const profitPeriod = (key) => {
+          const direct = usableProfit(earnings[`profit_${key}`]);
+          return direct !== null ? direct : 0;
+        };
 
     // The three components of a sub-agent order, each labelled by recipient.
     // These are what make the arithmetic visible instead of implied.
     const salesVolume = Number(subAgentSales.gross_sales || 0);
     const dataCost = Number(subAgentSales.base_cost || 0);
     const markupEarned = profitAllTime;
-    const ownSpend = Number(ownPurchases.wallet_spend || 0);
 
-    // What the super agent collected from sub-agents, and what they paid out to
+        // What the super agent collected from sub-agents, and what they paid out to
     // resell it. Neither is profit; showing both next to the markup is what makes
     // the difference legible.
     const collectedFromAgents = salesVolume;
@@ -380,8 +426,8 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                       <Text style={styles.heroDescription}>
                         Your markup on sub-agent sales - the money you keep. The{" "}
                         {money(collectedFromAgents)} your sub-agents paid you includes{" "}
-                        {money(resellCost)} you paid the platform to resell, so it is
-                        volume, not profit.
+                        {money(resellCost)} you paid the platform at the admin-set
+                        tier price to resell, so it is volume, not profit.
             </Text>
           </View>
 
@@ -398,22 +444,22 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
             <MetricCard
               icon="sunny-outline"
               label="Today"
-                          value={money(profitPeriod("today", "today"))}
+                                      value={money(profitPeriod("today"))}
             />
             <MetricCard
               icon="calendar-outline"
               label="This week"
-                          value={money(profitPeriod("week", "week"))}
+                                      value={money(profitPeriod("week"))}
             />
             <MetricCard
               icon="calendar-number-outline"
               label="This month"
-                          value={money(profitPeriod("month", "month"))}
+                                      value={money(profitPeriod("month"))}
             />
             <MetricCard
               icon="trophy-outline"
               label="This year"
-                          value={money(profitPeriod("year", "year"))}
+                                      value={money(profitPeriod("year"))}
             />
           </View>
 
@@ -431,56 +477,6 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           </View>
           <View style={styles.panel}>
             <TrendChart data={analytics.daily_trend} />
-          </View>
-
-          <Text style={styles.sectionTitle}>Business totals</Text>
-          <View style={styles.totalCard}>
-            <View style={styles.totalRow}>
-              <View style={styles.totalIcon}>
-                <Ionicons name="git-network-outline" size={22} color={c.mint} />
-              </View>
-              <View style={styles.totalCopy}>
-                <Text style={styles.totalLabel}>Sub-agent transactions</Text>
-                <Text style={styles.totalHint}>
-                  {count(subAgentSales.active_sub_agents)} active sub-agents
-                </Text>
-              </View>
-              <Text style={styles.totalValue}>
-                {count(subAgentSales.transaction_count)}
-              </Text>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.totalRow}>
-              <View style={styles.totalIcon}>
-                <Ionicons
-                  name="phone-portrait-outline"
-                  size={22}
-                  color={c.sky}
-                />
-              </View>
-              <View style={styles.totalCopy}>
-                <Text style={styles.totalLabel}>
-                  Your Data Screen purchases
-                </Text>
-                <Text style={styles.totalHint}>Wallet-funded packages</Text>
-              </View>
-              <Text style={styles.totalValue}>
-                {count(ownPurchases.transaction_count)}
-              </Text>
-            </View>
-            <View style={styles.divider} />
-            <View style={styles.totalRow}>
-              <View style={styles.totalIcon}>
-                <Ionicons name="layers-outline" size={22} color={c.amber} />
-              </View>
-              <View style={styles.totalCopy}>
-                <Text style={styles.totalLabel}>All data transactions</Text>
-                <Text style={styles.totalHint}>
-                  Sub-agent and Super Agent purchases
-                </Text>
-              </View>
-              <Text style={styles.totalValue}>{count(totalTransactions)}</Text>
-            </View>
           </View>
 
           <View style={styles.sectionHeader}>
@@ -505,7 +501,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                         icon="pricetag-outline"
                         label="You paid the platform"
                         value={`- ${money(resellCost)}`}
-                        hint="Platform price for the data you resold"
+                        hint="Admin-set tier price for the data you resold"
                         tone={c.rose}
                       />
                       <FlowDivider />
@@ -527,111 +523,13 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                       />
                     </View>
 
-                    <View style={styles.breakdownGrid}>
-                      <View style={styles.breakdownCard}>
-                        <Text style={styles.breakdownLabel}>Sub-agent sales</Text>
-                        <Text style={styles.breakdownValue}>
-                          {money(salesVolume)}
-                        </Text>
-                        <Text style={styles.breakdownHint}>Volume through you</Text>
-                      </View>
-                      <View style={styles.breakdownCard}>
-                        <Text style={styles.breakdownLabel}>Your profit</Text>
-                        <Text style={[styles.breakdownValue, { color: c.sky }]}>
-                          {money(markupEarned)}
-                        </Text>
-                        <Text style={styles.breakdownHint}>Markup you keep</Text>
-                      </View>
-                      <View style={styles.breakdownCard}>
-                        <Text style={styles.breakdownLabel}>Your package spend</Text>
-                        <Text style={styles.breakdownValue}>
-                          {money(ownSpend)}
-                        </Text>
-                        <Text style={styles.breakdownHint}>Data Screen purchases</Text>
-                      </View>
-                      <View style={styles.breakdownCard}>
-                        <Text style={styles.breakdownLabel}>Active sub-agents</Text>
-                        <Text style={styles.breakdownValue}>
-                          {count(subAgentSales.active_sub_agents)}
-                        </Text>
-                        <Text style={styles.breakdownHint}>Selling for you</Text>
-                      </View>
-                    </View>
-
-          <View style={styles.sectionHeader}>
-            <View>
-              <Text style={styles.sectionTitle}>Operational analytics</Text>
-              <Text style={styles.sectionSubtitle}>
-                Wallet, fees, and order health
-              </Text>
-            </View>
-          </View>
-          <View style={styles.operationsCard}>
-            <View style={styles.operationRow}>
-              <View style={styles.operationIcon}>
-                <Ionicons name="wallet-outline" size={20} color={c.mint} />
-              </View>
-              <View style={styles.operationCopy}>
-                <Text style={styles.operationLabel}>Super Agent wallet</Text>
-                <Text style={styles.operationHint}>
-                  Operational balance, not sub-agent revenue
-                </Text>
-              </View>
-              <Text style={styles.operationValue}>
-                {money(wallet.current_balance)}
-              </Text>
-            </View>
-            <View style={styles.operationRow}>
-              <View style={styles.operationIcon}>
-                <Ionicons name="cash-outline" size={20} color={c.sky} />
-              </View>
-              <View style={styles.operationCopy}>
-                <Text style={styles.operationLabel}>Wallet funding</Text>
-                <Text style={styles.operationHint}>
-                  Successful top-ups, all time
-                </Text>
-              </View>
-              <Text style={styles.operationValue}>
-                {money(wallet.net_wallet_funding)}
-              </Text>
-            </View>
-            <View style={styles.operationRow}>
-              <View style={styles.operationIcon}>
-                <Ionicons name="card-outline" size={20} color={c.amber} />
-              </View>
-              <View style={styles.operationCopy}>
-                <Text style={styles.operationLabel}>
-                  Platform transaction fees
-                </Text>
-                <Text style={styles.operationHint}>
-                  Collected from sub-agent sales
-                </Text>
-              </View>
-              <Text style={styles.operationValue}>
-                {money(subAgentSales.platform_fees)}
-              </Text>
-            </View>
-            <View style={styles.operationRow}>
-              <View style={styles.operationIcon}>
-                <Ionicons
-                  name="shield-checkmark-outline"
-                  size={20}
-                  color={c.mintDim}
-                />
-              </View>
-              <View style={styles.operationCopy}>
-                <Text style={styles.operationLabel}>AFA collected</Text>
-                <Text style={styles.operationHint}>
-                  {count(afa.transaction_count)} registrations
-                </Text>
-              </View>
-              <Text style={styles.operationValue}>
-                {money(afa.net_collected)}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.healthRow}>
+                    <View style={styles.healthRow}>
+                          <View style={styles.healthCard}>
+                            <Text style={styles.healthValue}>
+                              {count(subAgentSales.active_sub_agents)}
+                            </Text>
+                            <Text style={styles.healthLabel}>Active sub-agents</Text>
+                          </View>
             <View
               style={[styles.healthCard, { backgroundColor: `${c.amber}14` }]}
             >
@@ -698,8 +596,9 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
 
           <Text style={styles.footnote}>
                       Cancelled and failed orders are excluded from every figure. Profit
-                      is your markup only - it does not include the{" "}
-                      {money(resellCost)} you paid the platform to resell the data.
+                      is your markup only, worked out as what your sub-agents paid
+                      minus the {money(resellCost)} admin-set tier price you paid the
+                      platform for the data - it does not include that cost.
                     </Text>
         </ScrollView>
       )}
@@ -847,39 +746,7 @@ const useAnalyticsStyles = (c, topInset = 0) => {
       marginTop: 5,
     },
 
-    totalCard: { ...base.card, padding: 16, borderRadius: 20 },
-    totalRow: { flexDirection: "row", alignItems: "center" },
-    totalIcon: {
-      ...base.rowIcon,
-      borderRadius: 14,
-      backgroundColor: c.surfaceHover,
-    },
-    totalCopy: { flex: 1, marginLeft: 11 },
-    totalLabel: { ...base.rowTitle },
-    totalHint: { ...base.rowSubtitle },
-    totalValue: { fontFamily: fonts.bodyBold, fontSize: 20, color: c.mint },
     divider: { ...base.divider, marginVertical: 13 },
-
-    breakdownGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-    breakdownCard: {
-      ...base.card,
-      width: "48%",
-      padding: 15,
-      borderRadius: 18,
-    },
-    breakdownLabel: {
-      ...base.rowSubtitle,
-      fontFamily: fonts.bodySemi,
-      fontSize: 11,
-      marginTop: 0,
-    },
-    breakdownValue: {
-      fontFamily: fonts.bodyBold,
-      fontSize: 17,
-      color: c.mint,
-      marginTop: 6,
-    },
-    breakdownHint: { ...base.rowSubtitle, fontSize: 9, marginTop: 4 },
 
     // Money-flow panel. Each row is one recipient of a sub-agent payment, so
     // the split is read top to bottom rather than inferred from a total.
@@ -898,21 +765,6 @@ const useAnalyticsStyles = (c, topInset = 0) => {
     flowValue: { ...base.rowSubtitle, fontSize: 13, fontWeight: "800" },
     flowValueStrong: { ...base.rowTitle, fontSize: 15 },
     flowDivider: { marginVertical: 12 },
-
-    operationsCard: { ...base.card, padding: 15, borderRadius: 20, gap: 14 },
-    operationRow: { flexDirection: "row", alignItems: "center" },
-    operationIcon: {
-      width: 38,
-      height: 38,
-      borderRadius: 13,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: c.surfaceHover,
-    },
-    operationCopy: { flex: 1, marginLeft: 10 },
-    operationLabel: { ...base.rowTitle, fontSize: 13 },
-    operationHint: { ...base.rowSubtitle, fontSize: 10, marginTop: 2 },
-    operationValue: { ...base.rowValue, color: c.textPrimary },
 
     healthRow: { flexDirection: "row", gap: 10 },
     healthCard: { flex: 1, padding: 15, borderRadius: 18 },

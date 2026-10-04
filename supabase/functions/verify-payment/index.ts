@@ -203,25 +203,51 @@ const resolveIdentity = async (clients: SupabaseClients): Promise<Identity> => {
 
   const profileMissing = !profile;
 
-  // Fallback for accounts created before the on_auth_user_created trigger, or
-  // whose profile row was never created. `app_metadata` only.
-  const roleFromAppMetadata = normalizeRole(user.app_metadata?.role);
-  const role =
-    normalizeRole(profile?.role) ??
-    roleFromAppMetadata ??
-    // Fail closed. `sub_agent` is the trigger's default and the least
-    // privileged role, so an unknown user can only ever act on themselves.
-    "sub_agent";
+  // Fail closed. `sub_agent` is the trigger's default and the least privileged
+  // role, so an unknown user can only ever act on themselves.
+  //
+  // THE PROFILE IS AUTHORITATIVE EVEN WHEN IT SAYS "NOTHING"
+  // -------------------------------------------------------
+  // `app_metadata` is consulted ONLY when there is no profile row at all.
+  //
+  // The previous chain used `??` on `profile?.role`, which conflates "the
+  // profile does not exist" with "the profile exists and its value is NULL".
+  // Those are completely different facts, and treating them the same is what
+  // let a demoted account keep its old identity:
+  //
+  //   admin demotes Enterprise Super Agent -> Sub Agent,
+  //   assigning no owner (a legitimate state - migration 20260928_003 exists
+  //   precisely because an admin can set a role without picking an owner).
+  //
+  //   user_profiles.super_agent_id is then NULL. `??` read that as "no value,
+  //   consult the next source" and fell through to
+  //   `app_metadata.super_agent_id` - which `admin-users.setUserRole` never
+  //   clears, so it still held the id from before the promotion.
+  //
+  //   The order was then stamped and debited against the WRONG super agent's
+  //   wallet, and the buyer resolved as a Super Agent rather than the Sub Agent
+  //   they now are.
+  //
+  // A NULL in an EXISTING profile row is an answer, not a gap. It is honoured,
+  // and the metadata fallback is reserved for a genuinely absent row.
+  const role = profile
+    ? (normalizeRole(profile.role) ?? "sub_agent")
+    : (normalizeRole(user.app_metadata?.role) ?? "sub_agent");
 
-  // Ownership likewise comes from the profile. `user_metadata.super_agent_id`
-  // is user-writable, so reading it would let a sub-agent re-point themselves
-  // at another super agent and have their purchase debited from that wallet.
-  const superAgentId =
-    (profile?.super_agent_id as string | null | undefined) ??
-    (typeof user.app_metadata?.super_agent_id === "string"
+  // Ownership likewise comes from the profile, and the same NULL-is-an-answer
+  // rule applies. `user_metadata.super_agent_id` is user-writable, so reading it
+  // would let a sub-agent re-point themselves at another super agent and have
+  // their purchase debited from that wallet.
+  //
+  // An ownerless sub agent resolving to null is the CORRECT outcome, and it is
+  // what the wallet branch below acts on: `resolvedWalletOwnerId` is null, and
+  // it returns 403 "You are not assigned to a Super Agent" rather than silently
+  // spending from a stale owner's wallet.
+  const superAgentId = profile
+    ? ((profile.super_agent_id as string | null | undefined) ?? null)
+    : typeof user.app_metadata?.super_agent_id === "string"
       ? user.app_metadata.super_agent_id
-      : null) ??
-    null;
+      : null;
 
   return {
     id: user.id,
@@ -955,7 +981,16 @@ Deno.serve(async (req) => {
         payment_reference: reference,
         is_self: recipientPhone === (user.user_metadata?.phone || ""),
         data_amount: orderTitle,
-        buyer_type: "super_agent",
+        // The BUYER's role, not the money's source. A sub-agent's wallet
+        // purchase is debited from their super agent's wallet, which is why
+        // this used to be hardcoded to 'super_agent' - but the money's origin
+        // is not the buyer's identity, and they are different questions.
+        //
+        // `cancel_admin_order_refund` keys on this value to decide WHETHER a
+        // wallet refund is due, and `orderOrigin.js` in the admin app reads it
+        // to label the row. Hardcoding it rendered every sub-agent wallet
+        // purchase as "Super Agent Order".
+        buyer_type: isSuperAgent ? "super_agent" : "sub_agent",
         // Deliberately null: the local offer FK must not be given an unrelated
         // provider package id. The provider identity lives in the three
         // provider_* columns instead.
@@ -1153,7 +1188,22 @@ Deno.serve(async (req) => {
           order_id: order.id,
           order_type: "regular",
           payment_reference: reference,
-          buyer_type: "super_agent",
+          // The BUYER's role, not the money's source. A sub-agent's wallet
+          // purchase is debited from their super agent's wallet, which is why
+          // this used to be hardcoded to 'super_agent' - but the money's origin
+          // is not the buyer's identity, and the two are different questions.
+          //
+          // `cancel_admin_order_refund` keys on this value to decide WHETHER a
+          // wallet refund is due, and `orderOrigin.js` in the admin app reads
+          // it to label the row. Hardcoding it made every sub-agent wallet
+          // purchase render as "Super Agent Order", which is exactly the
+          // mislabelling this change removes.
+          //
+          // The refund path is unaffected: that function credits whichever
+          // `super_agent_id` the LEDGER row carries, per side, so a
+          // 'sub_agent' buyer still has both their mirror and their super
+          // agent's real wallet returned to them.
+          buyer_type: isSuperAgent ? "super_agent" : "sub_agent",
                     gross_amount: saleAmount,
                     // The admin-set base price, resolved server-side - NOT the request's
                     // `base_price`.

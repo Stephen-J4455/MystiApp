@@ -169,25 +169,50 @@ const resolveIdentity = async (clients: SupabaseClients): Promise<Identity> => {
 
   const profileMissing = !profile;
 
-  // Fallback for accounts created before the on_auth_user_created trigger, or
-  // whose profile row was never created. `app_metadata` only.
-  const roleFromAppMetadata = normalizeRole(user.app_metadata?.role);
-  const role =
-    normalizeRole(profile?.role) ??
-    roleFromAppMetadata ??
-    // Fail closed. `sub_agent` is the trigger's default and the least
-    // privileged role, so an unknown user can only ever act on themselves.
-    "sub_agent";
+  // Fail closed. `sub_agent` is the trigger's default and the least privileged
+  // role, so an unknown user can only ever act on themselves.
+  //
+  // A NULL IN AN EXISTING PROFILE IS AN ANSWER, NOT A GAP
+  // ---------------------------------------------------
+  // `app_metadata` is consulted ONLY when there is NO profile row at all.
+  //
+  // The previous chain used `??` on `profile?.role`, which conflates "the
+  // profile does not exist" with "the profile exists and this value is NULL".
+  // Those are different facts, and conflating them is what let a demoted
+  // account keep its old identity:
+  //
+  //   admin demotes Enterprise Super Agent -> Sub Agent, assigning no owner
+  //   (a legitimate state - migration 20260928_003 exists precisely because an
+  //   admin can set a role without picking an owner).
+  //
+  //   `user_profiles.super_agent_id` is then NULL. `??` read that as "no value,
+  //   try the next source" and fell through to `app_metadata.super_agent_id`,
+  //   which `admin-users.setUserRole` never clears - so it still held the id
+  //   from before the promotion.
+  //
+  //   The purchase was then debited against the WRONG super agent's wallet and
+  //   the buyer resolved as a Super Agent rather than the Sub Agent they are.
+  //
+  // A NULL in a row that EXISTS is authoritative and is honoured. The metadata
+  // fallback is reserved for a genuinely absent row, where `profileMissing` is
+  // already flagged for the console warning below.
+  const role = profile
+    ? (normalizeRole(profile.role) ?? "sub_agent")
+    : (normalizeRole(user.app_metadata?.role) ?? "sub_agent");
 
-  // Ownership likewise comes from the profile. `user_metadata.super_agent_id`
-  // is user-writable, so reading it would let a sub-agent re-point themselves
-  // at another super agent and have their purchase debited from that wallet.
-  const superAgentId =
-    (profile?.super_agent_id as string | null | undefined) ??
-    (typeof user.app_metadata?.super_agent_id === "string"
+  // Ownership comes from the profile, and the same rule applies.
+  // `user_metadata.super_agent_id` is user-writable, so reading it would let a
+  // sub-agent re-point themselves at another super agent and have their
+  // purchase debited from that wallet.
+  //
+  // An ownerless sub agent resolving to null is CORRECT, and it is what callers
+  // act on: `verify-payment`'s wallet branch returns 403 "You are not assigned
+  // to a Super Agent" rather than spending from a stale owner's wallet.
+  const superAgentId = profile
+    ? ((profile.super_agent_id as string | null | undefined) ?? null)
+    : typeof user.app_metadata?.super_agent_id === "string"
       ? user.app_metadata.super_agent_id
-      : null) ??
-    null;
+      : null;
 
   return {
     id: user.id,
@@ -226,6 +251,58 @@ const ROLE_DISPLAY: Record<string, string> = {
   super_agent: "SuperAgent",
   sub_agent: "Agent",
   normal_user: "Normal User",
+};
+
+/**
+ * Every auth user, across all pages.
+ *
+ * `auth.admin.listUsers()` returns ONE PAGE. Called with no arguments it
+ * applies the server default of 50 users and silently drops the rest, so a
+ * roster built by intersecting the profile ids against that single page loses
+ * every sub-agent who is not in the first 50 accounts in the project.
+ *
+ * That failure is invisible: it is not an error, just a short list. It would
+ * read as "sub-agents disappearing" once the project passes 50 users, and it
+ * would hit every screen that renders a roster - the agents page, the
+ * transactions screen and the per-agent analytics ranking - because they all
+ * read through this one action.
+ *
+ * Paging advances until a page comes back SHORT, so a server that clamps a
+ * page terminates the loop instead of spinning. `listUsers` paginates by a
+ * monotonic cursor rather than an offset, so there is no row-skipping hazard
+ * between pages the way an offset walk would have.
+ *
+ * A hard page cap exists purely as a runaway guard, and exceeding it THROWS
+ * rather than returning a truncated roster - a short list is the exact failure
+ * this replaces, so silently returning one would reintroduce it.
+ *
+ * The client is passed in rather than closing over the handler's
+ * `supabaseAdmin`: that binding is declared INSIDE the request handler, so a
+ * module-level helper cannot reach it. Creating a second service-role client
+ * here would work but would duplicate the env lookup for no benefit.
+ */
+const listAllAuthUsers = async (client: any): Promise<any[]> => {
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 200;
+  const collected: any[] = [];
+
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const { data, error } = await client.auth.admin.listUsers({
+      page,
+      perPage: PAGE_SIZE,
+    });
+    if (error) throw error;
+
+    const users = data?.users || [];
+    collected.push(...users);
+
+    // An empty page and a short page both mean "this was the last one".
+    if (users.length === 0 || users.length < PAGE_SIZE) return collected;
+  }
+
+  throw new Error(
+    `listUsers exceeded ${MAX_PAGES} pages of ${PAGE_SIZE}; refusing to return a truncated roster`,
+  );
 };
 
 const isMissingDatabaseObject = (error: any) => {
@@ -361,15 +438,11 @@ Deno.serve(async (req) => {
           },
         );
       }
-      const { data: usersData, error: listError } =
-        await supabaseAdmin.auth.admin.listUsers();
-
-      if (listError) {
-        throw listError;
-      }
-
-      const users = usersData?.users || [];
-      // Sub-agent membership comes from `user_profiles`, not from each
+      // Every page, not just the first. See `listAllAuthUsers`: intersecting
+            // the profile ids against a single 50-user page drops sub-agents
+            // silently once the project passes 50 accounts.
+            const users = await listAllAuthUsers(supabaseAdmin);
+            // Sub-agent membership comes from `user_profiles`, not from each
       // member's self-writable metadata.
       const { data: agentProfiles } = await supabaseAdmin
         .from("user_profiles")
@@ -631,9 +704,122 @@ Deno.serve(async (req) => {
         throw createError;
       }
 
+      const newAgentId = createdUser.user.id;
+
+      // ------------------------------------------------------------------------
+      // THE AUTHORITATIVE PROFILE ROW
+      // ------------------------------------------------------------------------
+      // This branch used to stop at `auth.admin.createUser`. Everything it wrote
+      // landed in `user_metadata`, which is SELF-WRITABLE and which nothing
+      // authorizes from - `resolveIdentity` reads `public.user_profiles`, and
+      // `listUsers` (the roster this very screen renders) filters
+      // `.eq("super_agent_id", superAgentId)` on that SAME table.
+      //
+      // `handle_new_user()` fires on the auth INSERT and does create a profile
+      // row, but it can only seed what is in the two metadata stores, and it
+      // inserts just `id, role, email, full_name, business_name`. Critically it
+      // never writes `super_agent_id`, and nothing else here did either. So the
+      // new account got:
+      //
+      //   role             -> 'sub_agent'  (readable from metadata, so it looked OK)
+      //   super_agent_id   -> NULL
+      //
+      // and that single NULL is both reported symptoms:
+      //
+      //   1. The sub agent does not appear on the roster. `listUsers` selects
+      //      `.eq("super_agent_id", superAgentId)`; a NULL owner matches no
+      //      row, so the freshly created agent is filtered out of the list the
+      //      super agent is looking at.
+      //   2. They resolve as an ownerless sub agent. `verify-wallet-topup`
+      //      refuses a `sub_agent` with no `super_agent_id` with 403 BEFORE it
+      //      reaches Paystack ("You are not assigned to a Super Agent"), and
+      //      `verify-payment` debits by `p_super_agent_id => user.id`, so every
+      //      order they place fails its wallet check and lands as `held`
+      //      instead of settling. That is the "appears as held" report.
+      //
+      // So the owner - not the role - is what was actually missing. Both are
+      // written explicitly here anyway: role is stated rather than inherited
+      // from a string the trigger has to parse, and `super_agent_id` is the
+      // column nothing else can supply.
+      //
+      // This is an UPSERT, not an insert, so it is correct whether or not the
+      // trigger fired, and it repairs the row rather than tripping over it.
+      const { error: profileError } = await supabaseAdmin
+        .from("user_profiles")
+        .upsert(
+          {
+            id: newAgentId,
+            role: "sub_agent",
+            super_agent_id: user.id,
+            email,
+            full_name: fullName,
+            business_name: businessName,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "id" },
+        )
+        .select("id, role, super_agent_id")
+        .single();
+
+      if (profileError) {
+        // Loud rather than swallowed. The auth account exists, but an ownerless
+        // profile is exactly the broken state this branch just fixed, and
+        // returning 200 here would tell the super agent it worked.
+        console.error(
+          "[createSubAgent] user_profiles upsert FAILED - role and ownership are out of sync:",
+          profileError.message,
+        );
+        return new Response(
+          JSON.stringify({
+            error:
+              "The sub-agent account was created but its role and assignment could not be saved. Authorization is out of sync - retry or contact support.",
+            details: { profileError: profileError.message },
+          }),
+          {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
+
+      // ------------------------------------------------------------------------
+      // The sub-agent's own mirror wallet row
+      // ------------------------------------------------------------------------
+      // Migrations 008/012 give every sub agent a `super_agent_wallets` row:
+      // their MIRRORED spending power. Only the admin path seeded it
+      // (`setUserRole`), so a super-agent-created sub agent had NO row at all.
+      // The Pay button then resolves no wallet and the top-up cannot proceed -
+      // the same dead end the profile NULL above caused, one step further down.
+      //
+      // Balance is NOT invented. It starts at 0 and only ever moves from a real
+      // top-up mirrored in (verify-wallet-topup credits both sides). Seeded from
+      // the super agent's balance it would mint spending power nobody paid for.
+      //
+      // INSERT, not upsert: an upsert would zero a real balance if this ever
+      // re-ran. 23505 means the row already exists, which is fine.
+      const { error: walletError } = await supabaseAdmin
+        .from("super_agent_wallets")
+        .insert({ super_agent_id: newAgentId, balance: 0 })
+        .select("super_agent_id")
+        .maybeSingle();
+
+      if (walletError && walletError.code !== "23505") {
+        // Non-fatal, and deliberately so. The account and its role/ownership
+        // are committed; failing the whole request would leave the super agent
+        // believing nothing was created when a real, loginable sub agent
+        // exists. Report it and let the admin initialise the wallet separately.
+        console.error(
+          "[createSubAgent] mirror wallet row could not be created for the new sub-agent:",
+          { userId: newAgentId, walletError },
+        );
+      }
+
       return new Response(
         JSON.stringify({
           user: createdUser.user,
+          // Echoed back so the client renders the AUTHORITATIVE role rather
+          // than re-deriving it from the metadata it just sent.
+          profile: { id: newAgentId, role: "sub_agent", superAgentId: user.id },
         }),
         {
           status: 200,

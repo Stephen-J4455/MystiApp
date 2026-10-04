@@ -121,15 +121,25 @@ const resolveIdentity = async (
     ? ((profile.full_name as string | null | undefined) ?? null)
     : null;
 
-  const role =
-    profileRole ?? normalizeRole(user.app_metadata?.role) ?? "sub_agent";
+  // A NULL IN AN EXISTING PROFILE IS AN ANSWER, NOT A GAP.
+  //
+  // `app_metadata` is consulted ONLY when there is NO profile row at all.
+  // The previous `??` chain read a NULL `super_agent_id` on an EXISTING row as
+  // "no value, try the next source" and fell through to
+  // `app_metadata.super_agent_id`, which `admin-users.setUserRole` never
+  // clears - so a demoted Super Agent kept the id from before the promotion
+  // and their purchases still resolved against the old owner.
+  //
+  // A NULL in a row that EXISTS is authoritative and is honoured.
+  const role = profile
+    ? (profileRole ?? "sub_agent")
+    : (normalizeRole(user.app_metadata?.role) ?? "sub_agent");
 
-  const superAgentId =
-    profileSuperAgentId ??
-    (typeof user.app_metadata?.super_agent_id === "string"
+  const superAgentId = profile
+    ? profileSuperAgentId
+    : typeof user.app_metadata?.super_agent_id === "string"
       ? user.app_metadata.super_agent_id
-      : null) ??
-    null;
+      : null;
 
   return {
     id: user.id,

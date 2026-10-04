@@ -18,6 +18,7 @@ import {
   reorderHeldOrder,
 } from "../lib/heldOrderReorder";
 import {
+  fetchNamedTopups,
   fetchSubAgentBalances,
   fetchSubAgentOrders,
   fetchSubAgentPayments,
@@ -198,16 +199,35 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // policy on one table cannot blank the other two. That is deliberate:
           // these reads return `[]` on denial (HTTP 200, no error), which is the
           // silent-zero trap - one broken leg must not read as "no activity".
-          const [ordersResult, paymentsResult, balancesResult] =
+          const [ordersResult, paymentsResult, balancesResult, topupsResult] =
             await Promise.all([
               fetchSubAgentOrders({ superAgentId: user.id, limit: 100 }),
               fetchSubAgentPayments({ superAgentId: user.id, limit: 100 }),
               fetchSubAgentBalances({ superAgentId: user.id }),
-            ]);
+                        // Top-ups are fetched here for the first time. The screen previously
+                        // read `wallet_topups` only on its OWN tab, filtered by
+                        // `agent_id = user.id` - which is the super agent funding their own
+                        // wallet. A sub-agent funding the same wallet writes a row whose
+                        // payer is the SUB-AGENT and whose `wallet_owner_id` is the super
+                        // agent, so that query matched none of it. The roster tab
+                        // therefore showed orders and wallet movements but no top-ups at
+                        // all, which is why "top-ups work, orders and top-ups don't" read
+                        // as one symptom on two screens.
+                        fetchNamedTopups({ superAgentId: user.id, limit: 100 }).catch(
+                          (error) => {
+                            // Per-source, not fatal: a denied read of `wallet_topups`
+                            // returns `[]` rather than an error, and one missing leg must
+                            // not blank the orders and ledger beside it.
+                            console.error("Failed to load wallet top-ups:", error);
+                            return [];
+                          },
+                        ),
+                      ]);
 
-          const agentOrders = ordersResult || [];
-          const agentPayments = paymentsResult || [];
-          const roster = balancesResult || [];
+                    const agentOrders = ordersResult || [];
+                    const agentPayments = paymentsResult || [];
+                    const roster = balancesResult || [];
+                    const namedTopups = topupsResult || [];
 
           setSubAgents(roster);
 
@@ -284,6 +304,34 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
             statusColor: colors.info,
           }));
 
+          // Top-ups rendered onto the roster timeline. NOT deduplicated against
+          // the ledger rows: a sub-agent's top-up produces a top-up row AND the
+          // mirror leg on the super agent's wallet ledger, and they are two real
+          // facts about the same money - the money that arrived, and the mirror
+          // movement it created. Collapsing them would lose one of the two, the
+          // same reason orders and their payment rows are joined rather than
+          // emitted twice.
+          // Only the rows a SUB-AGENT funded. `fetchNamedTopups` matches on
+          // `wallet_owner_id`, which is the super agent for BOTH shapes, so it
+          // returns the super agent's own funding too - and that already appears
+          // on the "My activity" tab, which reads the same table. Without this
+          // filter one top-up shows on both tabs of the same screen. Compared as
+          // strings because the payer arrives from Postgres as a uuid and the
+          // caller comes from the auth session.
+          const rosterTopupRows = namedTopups
+            .filter((topup) => topup.isSubAgentTransaction)
+            .map((topup) => ({
+            ...topup,
+            source: "sub_agent_topup",
+            amountDisplay: "Ghc " + Number(topup.amount || 0).toFixed(2),
+            statusColor:
+              topup.status === "success"
+                ? colors.success
+                : topup.status === "pending"
+                  ? colors.warning
+                  : colors.danger,
+          }));
+
           // Two lists, not one merged list plus a filter in the render. A single
           // list with a `scope ===` test inside `map()` still builds every row of
           // the other tab's markup and relies on a conditional to hide it, which
@@ -296,7 +344,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // agents did"; they are distinguished by `source` in the card body
           // rather than by which tab they sit in.
           setRosterTransactions(
-            [...rosterRows, ...ledgerRows].sort(
+                      [...rosterRows, ...rosterTopupRows, ...ledgerRows].sort(
               (x, y) => new Date(y.created_at) - new Date(x.created_at),
             ),
           );
@@ -503,19 +551,22 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                         const typeLabel =
                           tx.source === "wallet_topup"
                             ? "Wallet Top-up"
-                            : tx.source === "sub_agent_order"
-                              ? "Sub-agent Order"
-                              : tx.source === "sub_agent_ledger"
-                                ? "Wallet Movement"
-                                : "Data Purchase";
-                        const icon =
-                          tx.source === "wallet_topup"
-                            ? "wallet"
-                            : tx.source === "sub_agent_order"
-                              ? "cart-outline"
-                              : tx.source === "sub_agent_ledger"
-                                ? "swap-horizontal-outline"
-                                : "phone-portrait";
+                                                    : tx.source === "sub_agent_topup"
+                                                      ? `Top-up${tx.subAgentName ? ` · ${tx.subAgentName}` : ""}`
+                                                      : tx.source === "sub_agent_order"
+                                                      ? "Sub-agent Order"
+                                                      : tx.source === "sub_agent_ledger"
+                                                        ? "Wallet Movement"
+                                                        : "Data Purchase";
+                                                const icon =
+                                                  tx.source === "wallet_topup" ||
+                                                  tx.source === "sub_agent_topup"
+                                                    ? "wallet"
+                                                    : tx.source === "sub_agent_order"
+                                                      ? "cart-outline"
+                                                      : tx.source === "sub_agent_ledger"
+                                                        ? "swap-horizontal-outline"
+                                                        : "phone-portrait";
 
               return (
                 <View key={i} style={styles.txCard}>

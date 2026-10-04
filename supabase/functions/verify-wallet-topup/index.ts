@@ -204,25 +204,50 @@ const resolveIdentity = async (clients: SupabaseClients): Promise<Identity> => {
 
   const profileMissing = !profile;
 
-  // Fallback for accounts created before the on_auth_user_created trigger, or
-  // whose profile row was never created. `app_metadata` only.
-  const roleFromAppMetadata = normalizeRole(user.app_metadata?.role);
-  const role =
-    normalizeRole(profile?.role) ??
-    roleFromAppMetadata ??
-    // Fail closed. `sub_agent` is the trigger's default and the least
-    // privileged role, so an unknown user can only ever act on themselves.
-    "sub_agent";
+  // Fail closed. `sub_agent` is the trigger's default and the least privileged
+  // role, so an unknown user can only ever act on themselves.
+  //
+  // A NULL IN AN EXISTING PROFILE IS AN ANSWER, NOT A GAP
+  // ---------------------------------------------------
+  // `app_metadata` is consulted ONLY when there is NO profile row at all.
+  //
+  // The previous chain used `??` on `profile?.role`, which conflates "the
+  // profile does not exist" with "the profile exists and this value is NULL".
+  // Those are different facts, and conflating them is what let a demoted
+  // account keep its old identity:
+  //
+  //   admin demotes Enterprise Super Agent -> Sub Agent, assigning no owner
+  //   (a legitimate state - migration 20260928_003 exists precisely because an
+  //   admin can set a role without picking an owner).
+  //
+  //   `user_profiles.super_agent_id` is then NULL. `??` read that as "no value,
+  //   try the next source" and fell through to `app_metadata.super_agent_id`,
+  //   which `admin-users.setUserRole` never clears - so it still held the id
+  //   from before the promotion.
+  //
+  //   The purchase was then debited against the WRONG super agent's wallet and
+  //   the buyer resolved as a Super Agent rather than the Sub Agent they are.
+  //
+  // A NULL in a row that EXISTS is authoritative and is honoured. The metadata
+  // fallback is reserved for a genuinely absent row, where `profileMissing` is
+  // already flagged for the console warning below.
+  const role = profile
+    ? (normalizeRole(profile.role) ?? "sub_agent")
+    : (normalizeRole(user.app_metadata?.role) ?? "sub_agent");
 
-  // Ownership likewise comes from the profile. `user_metadata.super_agent_id`
-  // is user-writable, so reading it would let a sub-agent re-point themselves
-  // at another super agent and have their purchase debited from that wallet.
-  const superAgentId =
-    (profile?.super_agent_id as string | null | undefined) ??
-    (typeof user.app_metadata?.super_agent_id === "string"
+  // Ownership comes from the profile, and the same rule applies.
+  // `user_metadata.super_agent_id` is user-writable, so reading it would let a
+  // sub-agent re-point themselves at another super agent and have their
+  // purchase debited from that wallet.
+  //
+  // An ownerless sub agent resolving to null is CORRECT, and it is what callers
+  // act on: `verify-payment`'s wallet branch returns 403 "You are not assigned
+  // to a Super Agent" rather than spending from a stale owner's wallet.
+  const superAgentId = profile
+    ? ((profile.super_agent_id as string | null | undefined) ?? null)
+    : typeof user.app_metadata?.super_agent_id === "string"
       ? user.app_metadata.super_agent_id
-      : null) ??
-    null;
+      : null;
 
   return {
     id: user.id,
