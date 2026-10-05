@@ -191,29 +191,65 @@ export const fetchSubAgentPayments = async ({ superAgentId, limit } = {}) => {
  *
  * Requires `super_agent_wallets_read_by_super_agent` from 20261003_002.
  */
-export const fetchSubAgentBalances = async ({ superAgentId } = {}) => {
-  const userId = superAgentId || (await getCurrentUserId());
-  if (!userId) return [];
+const SUB_AGENT_ROLES = new Set(["sub_agent", "subagent"]);
 
-  // The roster, from the AUTHORITATIVE store. `user_profiles.super_agent_id`
-  // is admin-written; `user_metadata.super_agent_id` is writable by the listed
-  // account itself via `auth.updateUser()`, which is how a sub-agent could
-  // otherwise appear in a different agent's roster.
+/**
+ * The super agent's roster of sub-agents, from the AUTHORITATIVE store.
+ *
+ * `user_profiles.super_agent_id` is admin-written;
+ * `user_metadata.super_agent_id` is writable by the listed account itself via
+ * `auth.updateUser()`, which is how a sub-agent could otherwise appear in a
+ * different agent's roster.
+ *
+ * Shared by `fetchSubAgentBalances` and `fetchSubAgentRosterMembers` so the
+  * roster a super agent SEES and the roster we COUNT can never drift apart -
+  * they used to be two separate queries, and an analytics tile that disagreed
+  * with the agents screen looked like a bug in one of them.
+ */
+const fetchSubAgentRoster = async (superAgentId) => {
   const { data: members, error: memberError } = await supabase
     .from("user_profiles")
     .select("id, full_name, business_name, role")
-    .eq("super_agent_id", userId);
+    .eq("super_agent_id", superAgentId);
   if (memberError) throw memberError;
 
-  const subAgents = (members || []).filter((member) => {
+  return (members || []).filter((member) => {
     const role = String(member.role || "")
       .trim()
       .toLowerCase();
     // A member with no role is not a sub-agent. Migration 20260928_003
     // repaired rows that a bad signup trigger had stamped 'sub_agent' onto
     // ordinary customers, so the role cannot be assumed from membership.
-    return role === "sub_agent" || role === "subagent";
+    return SUB_AGENT_ROLES.has(role);
   });
+};
+
+/**
+ * The super agent's sub-agents, for screens that LIST them or COUNT them.
+ *
+ * This is the roster every super-agent surface must agree on. The analytics
+ * screen's "Active sub-agents" tile and its sub-agents list used to read
+ * `active_sub_agents` and `sub_agents` from `get_business_analytics`, which
+ * only cover sub-agents that have TRANSACTED - so a super agent who had
+ * onboarded twenty sub-agents and made one sale saw "1" and a single row while
+ * their own agents screen listed twenty people. `get_business_analytics` is
+ * still the source of the per-agent MONEY, so callers merge the two.
+ *
+ * Returns `[]` when nobody is signed in so a caller renders an empty list
+ * rather than crashing, matching `fetchSubAgentBalances`.
+ */
+export const fetchSubAgentRosterMembers = async ({ superAgentId } = {}) => {
+  const userId = superAgentId || (await getCurrentUserId());
+  if (!userId) return [];
+
+  return fetchSubAgentRoster(userId);
+};
+
+export const fetchSubAgentBalances = async ({ superAgentId } = {}) => {
+  const userId = superAgentId || (await getCurrentUserId());
+  if (!userId) return [];
+
+  const subAgents = await fetchSubAgentRoster(userId);
 
   if (subAgents.length === 0) return [];
 

@@ -18,6 +18,7 @@ import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
+import { fetchSubAgentRosterMembers } from "../lib/superAgentRoster";
 
 const money = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 const count = (value) => Number(value || 0).toLocaleString();
@@ -245,6 +246,11 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
   // card is never stranded underneath. Web returns just `extra`.
   const dockBottomPadding = useDockBottomPadding(24);
   const [analytics, setAnalytics] = useState(EMPTY_ANALYTICS);
+    // The roster, read separately from the RPC. The RPC's `sub_agents` and
+    // `active_sub_agents` only cover sub-agents who have TRANSACTED, so they omit
+    // everyone a super agent has onboarded but who has not bought yet - which made
+    // this page disagree with the agents screen. See `fetchSubAgentRosterMembers`.
+    const [roster, setRoster] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -268,9 +274,19 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
           return;
         }
 
-        const { data, error } = await supabase.rpc("get_business_analytics");
-        if (error) throw error;
-        setAnalytics({ ...EMPTY_ANALYTICS, ...(data || {}) });
+        const [{ data, error }, members] = await Promise.all([
+                  supabase.rpc("get_business_analytics"),
+                  // Deliberately not fatal: the money figures still render from the RPC
+                  // if this roster read is denied by RLS, so a permission problem here
+                          // degrades the tile and the list rather than the whole screen.
+                          fetchSubAgentRosterMembers().catch((rosterError) => {
+                            console.error("Error loading sub-agent roster:", rosterError);
+                            return [];
+                  }),
+                ]);
+                if (error) throw error;
+                        setRoster(Array.isArray(members) ? members : []);
+                setAnalytics({ ...EMPTY_ANALYTICS, ...(data || {}) });
       } catch (error) {
         console.error("Error loading Super Agent analytics:", error);
         showError(
@@ -370,6 +386,61 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
     // the difference legible.
     const collectedFromAgents = salesVolume;
     const resellCost = dataCost;
+
+        // The sub-agents to LIST, merged from two sources that answer different
+        // questions:
+        //
+        //   - `roster` is every sub-agent this super agent has, from
+        //     `user_profiles.super_agent_id`. It is the roster the agents screen
+        //     shows, so the two pages cannot disagree about who exists.
+        //   - `analytics.sub_agents` is the RPC's per-agent SALES breakdown, keyed
+        //     by `agent_id`. It only covers sub-agents who have transacted.
+        //
+        // Union, not either source alone. A super agent who has onboarded twenty
+        // sub-agents and had one sale saw a single row here and "1" on the tile
+        // above, while their own agents screen listed twenty people.
+        //
+        // Sorted by profit descending so the section still answers "who earns me the
+        // most", with zero-profit sub-agents (never sold) after those who have.
+        const salesByAgentId = new Map(
+          (analytics.sub_agents || [])
+            .filter((agent) => agent?.agent_id)
+            .map((agent) => [agent.agent_id, agent]),
+        );
+
+        const topSubAgents = (() => {
+          // Falls back to the RPC's own rows when the roster read was denied, so the
+          // section still shows whoever has sales rather than going empty.
+          const base = roster.length
+            ? roster
+            : (analytics.sub_agents || []).map((agent) => ({
+                id: agent.agent_id,
+                full_name: agent.name,
+              }));
+
+          return base
+            .map((member) => {
+              const sales = salesByAgentId.get(member.id) || {};
+              return {
+                agent_id: member.id,
+                name:
+                  member.full_name ||
+                  member.business_name ||
+                  sales.name ||
+                  "Sub-agent",
+                transaction_count: sales.transaction_count || 0,
+                gross_sales: sales.gross_sales || 0,
+                markup_earnings: sales.markup_earnings || 0,
+                // Lets the UI distinguish "no sales yet" from "sold nothing at a
+                // profit", and both from an agent hidden by a failed roster read.
+                has_sales: Boolean(sales.agent_id),
+              };
+            })
+            .sort(
+              (a, b) =>
+                Number(b.markup_earnings || 0) - Number(a.markup_earnings || 0),
+            );
+        })();
 
   return (
     <ThemedScreen style={styles.safeArea}>
@@ -501,7 +572,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                         icon="pricetag-outline"
                         label="You paid the platform"
                         value={`- ${money(resellCost)}`}
-                        hint="Admin-set tier price for the data you resold"
+                                                hint="Admin-set tier price only — provider/API cost is not deducted"
                         tone={c.rose}
                       />
                       <FlowDivider />
@@ -509,7 +580,7 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                         icon="wallet-outline"
                         label="Your profit (markup)"
                         value={money(markupEarned)}
-                        hint="What you actually earned"
+                                                hint="Sale minus admin-set base price — API cost excluded"
                         tone={c.mint}
                         strong
                       />
@@ -526,9 +597,11 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                     <View style={styles.healthRow}>
                           <View style={styles.healthCard}>
                             <Text style={styles.healthValue}>
-                              {count(subAgentSales.active_sub_agents)}
-                            </Text>
-                            <Text style={styles.healthLabel}>Active sub-agents</Text>
+                                                          {count(
+                                                            roster.length || subAgentSales.active_sub_agents,
+                                                          )}
+                                                        </Text>
+                                                        <Text style={styles.healthLabel}>Active sub-agents</Text>
                           </View>
             <View
               style={[styles.healthCard, { backgroundColor: `${c.amber}14` }]}
@@ -555,14 +628,16 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
 
           <View style={styles.sectionHeader}>
             <View>
-              <Text style={styles.sectionTitle}>Top sub-agents</Text>
+              <Text style={styles.sectionTitle}>Your sub-agents</Text>
               <Text style={styles.sectionSubtitle}>
-                              By profit you earned on their sales
-              </Text>
+                                            {topSubAgents.length
+                                              ? "All your sub-agents, ranked by the profit you earn on their sales"
+                                              : "Ranked by the profit you earn on their sales"}
+                            </Text>
             </View>
           </View>
-          {analytics.sub_agents?.length ? (
-            analytics.sub_agents.slice(0, 8).map((agent, index) => (
+          {topSubAgents.length ? (
+                      topSubAgents.map((agent, index) => (
               <View key={agent.agent_id || index} style={styles.agentRow}>
                 <View style={styles.rank}>
                   <Text style={styles.rankText}>{index + 1}</Text>
@@ -572,34 +647,37 @@ export default function SuperAgentAnalyticsScreen({ navigation }) {
                     {agent.name || "Sub-agent"}
                   </Text>
                   <Text style={styles.agentMeta}>
-                    {count(agent.transaction_count)} transactions ·{" "}
-                    {money(agent.gross_sales)} sales
-                  </Text>
-                </View>
-                <View style={styles.agentEarnings}>
-                  <Text style={styles.agentEarningsValue}>
-                    {money(agent.markup_earnings)}
-                  </Text>
-                                  <Text style={styles.agentEarningsLabel}>your profit</Text>
-                </View>
-              </View>
-            ))
-          ) : (
-            <View style={styles.emptyCard}>
-              <Ionicons name="people-outline" size={42} color={c.textMuted} />
-              <Text style={styles.emptyTitle}>No sub-agent sales yet</Text>
-              <Text style={styles.emptyText}>
-                Assigned sub-agent transactions will populate this breakdown.
-              </Text>
-            </View>
-          )}
+                              {agent.has_sales
+                                ? `${count(agent.transaction_count)} transactions · ${money(agent.gross_sales)} sales`
+                                : "No sales yet"}
+                            </Text>
+                          </View>
+                          <View style={styles.agentEarnings}>
+                            <Text style={styles.agentEarningsValue}>
+                              {money(agent.markup_earnings)}
+                            </Text>
+                                            <Text style={styles.agentEarningsLabel}>your profit</Text>
+                          </View>
+                        </View>
+                      ))
+                    ) : (
+                      <View style={styles.emptyCard}>
+                        <Ionicons name="people-outline" size={42} color={c.textMuted} />
+                        <Text style={styles.emptyTitle}>No sub-agents yet</Text>
+                        <Text style={styles.emptyText}>
+                          Assigned sub-agents will appear here, ranked by the profit you
+                          earn on their sales.
+                        </Text>
+                      </View>
+                    )}
 
           <Text style={styles.footnote}>
                       Cancelled and failed orders are excluded from every figure. Profit
-                      is your markup only, worked out as what your sub-agents paid
-                      minus the {money(resellCost)} admin-set tier price you paid the
-                      platform for the data - it does not include that cost.
-                    </Text>
+                                is your markup only: what your sub-agents paid, minus the{" "}
+                                {money(resellCost)} admin-set tier price you paid the platform
+                                for the data. The provider/API cost of the data is the
+                                platform's expense and is NOT deducted from your profit.
+                              </Text>
         </ScrollView>
       )}
     </ThemedScreen>
