@@ -177,6 +177,55 @@ export const fetchSubAgentPayments = async ({ superAgentId, limit } = {}) => {
 };
 
 /**
+ * The sub-agents' WALLET-funded orders.
+ *
+ * WHY THIS EXISTS ALONGSIDE `fetchSubAgentOrders`
+ * ----------------------------------------------
+ * A sub-agent has two ways to buy, and `verify-payment` writes them to two
+ * DIFFERENT tables:
+ *
+ *   paid by Paystack -> `agent_orders`   (fetchSubAgentOrders)
+ *   paid from wallet -> `orders`         (this function)
+ *
+ * `fetchSubAgentOrders` alone therefore showed a super agent only the
+ * Paystack half of their sub-agents' business. Someone whose agents fund
+ * purchases from mirrored wallet balances - which is the primary agent flow -
+ * saw an essentially empty orders list while the LEDGER page, keyed on the
+ * wallet holder rather than the order, showed every movement. The two screens
+ * disagreed because they were reading different tables, not because one was
+ * filtering.
+ *
+ * `orders.super_agent_id` was added by migration 20261005_001 and is stamped by
+ * `verify-payment` on the wallet path. Before it, a wallet order was
+ * unattributable: `orders` had no ownership column, so there was nothing to
+ * filter on and no way to prove whose purchase a row was. The read returned
+ * HTTP 200 with zero rows - a denied read and a genuine no-orders answer are
+ * indistinguishable on the client, which is what made this so hard to see.
+ *
+ * Requires RLS permitting a super agent to read their sub-agents' rows in
+ * `orders`. Check the `orders` policies before assuming this returns data: a
+ * missing policy fails the same silent, errorless way.
+ */
+export const fetchSubAgentWalletOrders = async ({
+  superAgentId,
+  limit,
+} = {}) => {
+  const userId = superAgentId || (await getCurrentUserId());
+  if (!userId) return [];
+
+  const rows = await walkAll((from, to) =>
+    supabase
+      .from("orders")
+      .select("*", { count: "exact" })
+      .eq("super_agent_id", userId)
+      .order("created_at", { ascending: false })
+      .range(from, to),
+  );
+
+  return Number.isFinite(limit) && limit > 0 ? rows.slice(0, limit) : rows;
+};
+
+/**
  * The sub-agents' mirrored wallet balances, keyed by sub-agent id.
  *
  * Resolved in two steps because the data is not addressable directly:

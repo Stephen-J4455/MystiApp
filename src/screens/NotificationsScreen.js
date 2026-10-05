@@ -263,8 +263,14 @@ export default function NotificationsScreen({ navigation }) {
         <View style={s.header}>
           <TouchableOpacity
             style={s.backButton}
-            onPress={() => navigation.goBack()}
-            activeOpacity={0.7}
+            // Same cold-entry case as ProfileScreen: on web the route can be
+                        // loaded directly, leaving nothing behind to go back to.
+                        onPress={() =>
+                          navigation.canGoBack()
+                            ? navigation.goBack()
+                            : navigation.navigate("Home")
+                        }
+                        activeOpacity={0.7}
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Go back"

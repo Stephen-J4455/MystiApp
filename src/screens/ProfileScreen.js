@@ -490,8 +490,15 @@ export default function ProfileScreen({ navigation }) {
         <View style={s.header}>
           <TouchableOpacity
             style={s.backButton}
-            onPress={() => navigation.goBack()}
-            activeOpacity={0.7}
+            // On web the route can be entered cold via the URL (deep link,
+                        // reload, bookmark), in which case Profile is the only entry in
+                        // the stack and goBack has nowhere to go. Fall back to Home.
+                        onPress={() =>
+                          navigation.canGoBack()
+                            ? navigation.goBack()
+                            : navigation.navigate("Home")
+                        }
+                        activeOpacity={0.7}
             hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Go back"

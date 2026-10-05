@@ -21,7 +21,8 @@ import {
   fetchNamedTopups,
   fetchSubAgentBalances,
   fetchSubAgentOrders,
-  fetchSubAgentPayments,
+    fetchSubAgentWalletOrders,
+    fetchSubAgentPayments,
   fetchWalletLedger,
   SUPER_AGENT_WRITABLE_STATUSES,
   updateSubAgentOrderStatus,
@@ -199,10 +200,27 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // policy on one table cannot blank the other two. That is deliberate:
           // these reads return `[]` on denial (HTTP 200, no error), which is the
           // silent-zero trap - one broken leg must not read as "no activity".
-          const [ordersResult, paymentsResult, balancesResult, topupsResult] =
+          const [ordersResult, walletOrdersResult, paymentsResult, balancesResult, topupsResult] =
             await Promise.all([
               fetchSubAgentOrders({ superAgentId: user.id, limit: 100 }),
-              fetchSubAgentPayments({ superAgentId: user.id, limit: 100 }),
+                            // Wallet-funded orders, which live in `orders` rather than
+                            // `agent_orders`. Omitting this was why a super agent whose
+                            // sub-agents buy from wallet balances saw an empty order list
+                            // while the ledger page - keyed on the wallet holder, not the
+                            // order - showed every movement. The two screens were reading
+                            // different tables, so they disagreed without either being wrong
+                            // on its own terms.
+                            fetchSubAgentWalletOrders({
+                              superAgentId: user.id,
+                              limit: 100,
+                            }).catch((error) => {
+                              // Per-source, not fatal. A denied read returns `[]` rather than
+                              // an error, and this leg must never blank the Paystack orders
+                              // beside it.
+                              console.error("Failed to load sub-agent wallet orders:", error);
+                              return [];
+                            }),
+                            fetchSubAgentPayments({ superAgentId: user.id, limit: 100 }),
               fetchSubAgentBalances({ superAgentId: user.id }),
                         // Top-ups are fetched here for the first time. The screen previously
                         // read `wallet_topups` only on its OWN tab, filtered by
@@ -225,7 +243,12 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                       ]);
 
                     const agentOrders = ordersResult || [];
-                    const agentPayments = paymentsResult || [];
+                                        // `orders` rows carry `user_id` for the buyer where
+                                        // `agent_orders` carries `agent_id`, so both are read here
+                                        // rather than assuming a shared column name - the two
+                                        // tables were never the same shape.
+                                        const agentWalletOrders = walletOrdersResult || [];
+                                        const agentPayments = paymentsResult || [];
                     const roster = balancesResult || [];
                     const namedTopups = topupsResult || [];
 
@@ -234,11 +257,28 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // A payment row carries the settlement split; the order row carries the
           // live delivery status. Merging them gives one card with both, which is
           // what a super agent is actually reconciling against their own wallet.
-          const paymentsByOrderId = new Map(
-            agentPayments
-              .filter((payment) => payment?.order_id != null)
-              .map((payment) => [payment.order_id, payment]),
-          );
+                    //
+                    // KEYED BY (order_type, order_id), NOT by order_id alone.
+                    // `orders` and `agent_orders` have INDEPENDENT id sequences - the admin
+                    // OrderManagementScreen calls this out explicitly - so order #7 in one
+                    // table has nothing to do with order #7 in the other. `payment_
+                    // transactions.order_type` ('agent' | 'regular') is what says which
+                    // table the row belongs to, and it is the only thing that can. Joining
+                    // on the bare id would let a wallet order silently inherit a
+                    // completely different order's fee and shares.
+                    //
+                    // The filter also keeps a malformed row (no `order_type`) from being
+                    // indexed under `undefined`, where it could collide with anything.
+                    const paymentKey = (payment) =>
+                      payment?.order_id == null || !payment?.order_type
+                        ? null
+                        : `${payment.order_type}:${payment.order_id}`;
+
+                    const paymentsByOrder = new Map(
+                      agentPayments
+                        .filter((payment) => paymentKey(payment) !== null)
+                        .map((payment) => [paymentKey(payment), payment]),
+                    );
 
           const nameForAgent = new Map(roster.map((m) => [m.id, m.name]));
 
@@ -246,7 +286,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // test accepts the row: it rejects `orderType: "regular"`, and absence
           // means agent_orders.
           const rosterRows = agentOrders.map((order) => {
-            const payment = paymentsByOrderId.get(order.id);
+                      const payment = paymentsByOrder.get(`agent:${order.id}`);
             return {
               ...order,
               ...(payment
@@ -304,6 +344,55 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
             statusColor: colors.info,
           }));
 
+          // Wallet-funded orders, mapped onto the SAME shape as `agent_orders` rows so
+          // one card renders both without a second set of styles. Their columns
+          // differ and are renamed deliberately:
+          //
+          //   orders.user_id          -> agent_id   (who placed it)
+          //   orders.phone           -> recipient_phone
+          //   orders.amount          -> amount     (same meaning, same name)
+          //
+          // `orderType: "regular"` is load-bearing: the shared
+          // `isReorderableHeldOrder` test REJECTS that value, and that rejection
+          // is correct here. The retry action and the status picker both act on
+          // `agent_orders` via `super-agent-order-status`, which would fail on
+          // an `orders` id. Tagging these rows "agent" would offer a super
+          // agent two controls that are guaranteed to error.
+          //
+          // `source` is distinct so the card can label them honestly: these are
+          // wallet purchases, not Paystack agent orders, and the money came from
+          // a mirrored balance rather than a charge.
+          const rosterWalletRows = agentWalletOrders.map((order) => {
+                      const payment = paymentsByOrder.get(`regular:${order.id}`);
+            return {
+              ...order,
+              agent_id: order.user_id,
+              recipient_phone: order.phone,
+              ...(payment
+                ? {
+                    transaction_fee: payment.transaction_fee,
+                    super_agent_amount: payment.super_agent_amount,
+                    agent_net: payment.agent_net,
+                    main_account_amount: payment.main_account_amount,
+                    settlement_status: payment.settlement_status,
+                    gross_amount: payment.gross_amount,
+                    status: order.status || payment.status,
+                  }
+                : {}),
+              orderType: "regular",
+              source: "sub_agent_wallet_order",
+              subAgentId: order.user_id,
+              subAgentName: nameForAgent.get(order.user_id) || "Sub-agent",
+              amountDisplay: "Ghc " + Number(order.amount || 0).toFixed(2),
+              statusColor:
+                order.status === "delivered" || order.status === "completed"
+                  ? colors.success
+                  : order.status === "pending" || order.status === "held"
+                    ? colors.warning
+                    : colors.info,
+            };
+          });
+
           // Top-ups rendered onto the roster timeline. NOT deduplicated against
           // the ledger rows: a sub-agent's top-up produces a top-up row AND the
           // mirror leg on the super agent's wallet ledger, and they are two real
@@ -344,7 +433,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
           // agents did"; they are distinguished by `source` in the card body
           // rather than by which tab they sit in.
           setRosterTransactions(
-                      [...rosterRows, ...rosterTopupRows, ...ledgerRows].sort(
+                      [...rosterRows, ...rosterWalletRows, ...rosterTopupRows, ...ledgerRows].sort(
               (x, y) => new Date(y.created_at) - new Date(x.created_at),
             ),
           );
@@ -555,14 +644,16 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                                                       ? `Top-up${tx.subAgentName ? ` · ${tx.subAgentName}` : ""}`
                                                       : tx.source === "sub_agent_order"
                                                       ? "Sub-agent Order"
-                                                      : tx.source === "sub_agent_ledger"
+                                                                                                            : tx.source === "sub_agent_wallet_order"
+                                                                                                              ? `Wallet Purchase${tx.subAgentName ? ` · ${tx.subAgentName}` : ""}`
+                                                                                                            : tx.source === "sub_agent_ledger"
                                                         ? "Wallet Movement"
                                                         : "Data Purchase";
                                                 const icon =
                                                   tx.source === "wallet_topup" ||
                                                   tx.source === "sub_agent_topup"
                                                     ? "wallet"
-                                                    : tx.source === "sub_agent_order"
+                                                    : tx.source === "sub_agent_order" || tx.source === "sub_agent_wallet_order"
                                                       ? "cart-outline"
                                                       : tx.source === "sub_agent_ledger"
                                                         ? "swap-horizontal-outline"
@@ -666,14 +757,15 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                         )}
                       </>
                     )}
-                    {tx.source === "sub_agent_order" && (
-                      <>
-                        <View style={styles.txInfoRow}>
-                          <Text style={styles.txInfoLabel}>Sub-agent</Text>
-                          <Text style={styles.txInfoValue}>
-                            {tx.subAgentName}
-                          </Text>
-                        </View>
+                    {(tx.source === "sub_agent_order" ||
+                                          tx.source === "sub_agent_wallet_order") && (
+                                          <>
+                                            <View style={styles.txInfoRow}>
+                                              <Text style={styles.txInfoLabel}>Sub-agent</Text>
+                                              <Text style={styles.txInfoValue}>
+                                                {tx.subAgentName}
+                                              </Text>
+                                            </View>
                         <View style={styles.txInfoRow}>
                           <Text style={styles.txInfoLabel}>Recipient</Text>
                           <Text style={styles.txInfoValue}>
@@ -709,12 +801,22 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                         ) : null}
                         {tx.transaction_fee != null ? (
                           <View style={styles.txInfoRow}>
-                            <Text style={styles.txInfoLabel}>Paystack fee</Text>
-                            <Text style={styles.txInfoValue}>
-                              Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
-                            </Text>
-                          </View>
-                        ) : null}
+                                                    {/* A wallet purchase has NO Paystack charge - the
+                                                        money came from a mirrored balance topped up
+                                                        separately, and `verify-payment` hardcodes this
+                                                        to 0 for that reason. Labelling it "fee" would
+                                                        show a misleading "Ghc 0.00" against every
+                                                        wallet order. */}
+                                                    <Text style={styles.txInfoLabel}>
+                                                      {tx.source === "sub_agent_wallet_order"
+                                                        ? "Wallet charge"
+                                                        : "Paystack fee"}
+                                                    </Text>
+                                                    <Text style={styles.txInfoValue}>
+                                                      Ghc {Number(tx.transaction_fee || 0).toFixed(2)}
+                                                    </Text>
+                                                  </View>
+                                                ) : null}
                         {tx.payment_reference ? (
                           <View style={styles.txInfoRow}>
                             <Text style={styles.txInfoLabel}>Reference</Text>
@@ -733,7 +835,18 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                             refunding are NOT here because they release wallet
                             money, and the super agent is the party that money
                             would come back to. Support handles those. */}
-                        {statusEditingId === tx.id ? (
+                        {/* Status control. Restricted to `sub_agent_order` -
+                            Paystack agent orders in `agent_orders`. Wallet
+                            orders are shown above but deliberately get NO
+                            controls: both actions here call into
+                            `agent_orders` (`isReorderableHeldOrder` and
+                            `super-agent-order-status`), so offering them on an
+                            `orders` id would hand a super agent two buttons
+                            that are guaranteed to fail. Their lifecycle is
+                            driven by `dispatch-order` like any other wallet
+                            order, not by the super agent. */}
+                        {tx.source === "sub_agent_order" &&
+                          (statusEditingId === tx.id ? (
                           <View style={styles.statusPicker}>
                             {SUPER_AGENT_WRITABLE_STATUSES.map((option) => {
                               const isCurrent =
@@ -783,7 +896,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                               Update status
                             </Text>
                           </TouchableOpacity>
-                        )}
+                                                      ))}
                       </>
                     )}
 

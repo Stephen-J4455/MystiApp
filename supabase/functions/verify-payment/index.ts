@@ -991,7 +991,35 @@ Deno.serve(async (req) => {
         // to label the row. Hardcoding it rendered every sub-agent wallet
         // purchase as "Super Agent Order".
         buyer_type: isSuperAgent ? "super_agent" : "sub_agent",
-        // Deliberately null: the local offer FK must not be given an unrelated
+                // Ownership, for a SUPER AGENT'S benefit.
+                //
+                // This column is the ONLY way a wallet order can be attributed to an
+                // agent at all. A wallet purchase writes to `orders` - the customer
+                // table - because the money came from a mirrored balance rather than
+                // from a Paystack charge, and `orders` has no other ownership key.
+                // Without it a sub agent's wallet purchase is invisible to their super
+                // agent's Transactions screen, which reads `agent_orders`.
+                //
+                // The asymmetry with the Paystack branch is deliberate and load-bearing:
+                // that branch writes to `agent_orders`, which already carries
+                // `super_agent_id`, so it needs no equivalent. This one does, and the
+                // two branches must not disagree about who the owner is - hence
+                // `identity.superAgentId`, the same AUTHORITATIVE value stamped on the
+                // Paystack path, and not `user.user_metadata`.
+                //
+                // NULL for a super agent's own wallet purchase: nobody is above them, so
+                // there is no owner to record, and leaving it NULL is what keeps the
+                // column honest rather than self-referential.
+                //
+                // `resolvedWalletOwnerId`, NOT the later `resolvedSuperAgentId` used by
+                // the Paystack branch: that const is declared ~480 lines below this
+                // scope and is in its temporal dead zone here, so referencing it would
+                // throw a `ReferenceError` on every wallet purchase. This is the same
+                // value for a sub agent (`identity.superAgentId`, derived from the
+                // AUTHORITATIVE `user_profiles` row), and the two branches cannot
+                // disagree about the owner.
+                super_agent_id: isSuperAgent ? null : resolvedWalletOwnerId,
+                // Deliberately null: the local offer FK must not be given an unrelated
         // provider package id. The provider identity lives in the three
         // provider_* columns instead.
         offer_id: null,
@@ -1204,7 +1232,20 @@ Deno.serve(async (req) => {
           // 'sub_agent' buyer still has both their mirror and their super
           // agent's real wallet returned to them.
           buyer_type: isSuperAgent ? "super_agent" : "sub_agent",
-                    gross_amount: saleAmount,
+                    // The wallet path's counterpart to `orders.super_agent_id` on the line
+                    // above, and needed for the same reason: without it this payment record
+                    // is unattributable, so `fetchSubAgentPayments` cannot return it and the
+                    // settlement split (fee, shares) is lost even though the row exists.
+                    //
+                    // Set for BOTH branches rather than only sub-agents, because this table's
+                    // `super_agent_id` has always meant "the super agent this payment
+                    // settles through" - which for a super agent's own purchase is
+                    // themselves. That matches the Paystack branch's treatment at line
+                    // 1890 and keeps one meaning per table. The `orders` column differs
+                    // deliberately, because `orders` has no settlement of its own and NULL
+                    // there means "top of the hierarchy".
+                    super_agent_id: resolvedWalletOwnerId,
+                              gross_amount: saleAmount,
                     // The admin-set base price, resolved server-side - NOT the request's
                     // `base_price`.
           //
