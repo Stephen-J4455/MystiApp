@@ -52,6 +52,7 @@ import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
 import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
 import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
 import SuperAgentLedgerScreen from "./src/screens/SuperAgentLedgerScreen";
+import SuperAgentTransactionsScreen from "./src/screens/SuperAgentTransactionsScreen";
 import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
 import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
 import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
@@ -642,6 +643,31 @@ export default function App() {
                         <Stack.Screen
                           name="SuperAgentHeldOrders"
                           component={SuperAgentHeldOrdersScreen}
+                        />
+                        {/* The super agent's operational console, reached from the
+                            "Transactions" button on SuperAgentManagementScreen.
+
+                            Registered here for the first time. The button has always
+                            called `navigate("SuperAgentTransactions")`, but no
+                            `Stack.Screen` declared that name - so tapping it
+                            navigated to a route that did not exist. On a stack
+                            navigator that silently does nothing rather than
+                            throwing, so it read as "the button is broken" with no
+                            error anywhere to explain it.
+
+                            It is NOT a duplicate of History. That screen is the
+                            read-only orders list; this one adds the two things a
+                            super agent needs and Orders cannot give them: the
+                            per-sub-agent mirrored balance strip, and the inline
+                            reorder / lifecycle-status controls that act through
+                            `super-agent-order-status`. See the header on the
+                            screen for why it once showed ONLY held orders - a
+                            repair queue rather than a business view - and why the
+                            roster scope is now the default.
+                        */}
+                        <Stack.Screen
+                          name="SuperAgentTransactions"
+                          component={SuperAgentTransactionsScreen}
                         />
                         <Stack.Screen
                           name="SuperAgentLedger"

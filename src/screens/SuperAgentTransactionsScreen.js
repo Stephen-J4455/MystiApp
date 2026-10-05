@@ -33,7 +33,7 @@ import { ThemedScreen } from "../components/ui";
 /**
  * What the screen is showing.
  *
- * "mine"  - the super agent's own money and their own purchases. Unchanged.
+  * "mine"  - the super agent's own money and their own purchases.
  * "roster" - everything their sub-agents did: orders, payment records,
  *            wallet actions and current balances.
  *
@@ -43,7 +43,23 @@ import { ThemedScreen } from "../components/ui";
  * wallet debit failed, retry this" - it is a repair queue, not a business
  * view. So a super agent whose sub-agent bought forty packages successfully
  * saw an almost-empty ledger, because none of those forty were held.
- */
+  *
+  * THE ORDER OF THIS ARRAY IS THE ORDER OF THE TOGGLE, and the tabs are rendered
+  * from it directly - so putting "mine" first made the super agent's OWN
+  * activity the default view of a screen called "Transactions".
+  *
+  * That default was wrong for what this screen is for. A super agent opens it to
+  * answer "what are my agents doing with my money", and the answer is the roster:
+  * the orders they placed, the payments behind them, their wallet movements and
+  * their mirrored balances. Their own top-ups are a handful of rows they placed
+  * once, and showing those first meant a screen whose primary content was the
+  * one question the roster tab already answered better - and whose header count
+  * read as "nothing has happened" for an agent actively trading all day.
+  *
+  * "roster" is now the default, so the list opens on the sub-agents' activity.
+  * "mine" remains reachable as the second tab and is unchanged otherwise; a
+  * super agent who wants only their own movements still has it one tap away.
+  */
 const SCOPES = [
   { key: "mine", label: "My activity" },
   { key: "roster", label: "My sub-agents" },
@@ -87,7 +103,10 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
   const { isSuperAgent } = useProfile();
   const [loading, setLoading] = useState(true);
-    const [scope, setScope] = useState("mine");
+    // Opens on "roster", not "mine". See the note on SCOPES for why the sub-agents'
+  // activity is the primary question this screen answers. "mine" is still one tap
+  // away via the toggle.
+  const [scope, setScope] = useState("roster");
     // Two lists, chosen by the scope toggle below. See the note where they are
     // populated for why they are not one list plus a render-time filter.
     const [ownTransactions, setOwnTransactions] = useState([]);
