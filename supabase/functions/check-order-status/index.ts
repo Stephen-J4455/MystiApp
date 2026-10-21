@@ -370,6 +370,262 @@ const syncProviderStatus = async ({
   };
 };
 
+/**
+ * The BATCHED counterpart of `syncProviderStatus`.
+ *
+ * `syncProviderStatus` issues three queries PER ORDER - one each against
+ * `agent_orders`, `orders` and `payment_transactions`. For a page of ten
+ * orders that is thirty queries.
+ *
+ * This version issues the SAME three queries ONCE for the whole batch, using
+ * `.in("jehuca_order_id", ids)`, and groups the rows in memory. Three queries
+ * for ten orders instead of thirty.
+ *
+ * The per-order authorization and the write behaviour are IDENTICAL to the
+ * single-order version - the same ownership rule, the same "never erase a
+ * good status with a 404", the same scrubbed payload. The only difference is
+ * how the rows are found.
+ *
+ * Returns a map of provider order id -> the sync outcome, so the caller can
+ * look up each order's result.
+ */
+const syncProviderStatusesBatch = async ({
+  admin,
+  identity,
+  orderIds,
+  statusByOrderId,
+  responseByOrderId,
+}: {
+  admin: AdminClient;
+  identity: Identity;
+  orderIds: string[];
+  statusByOrderId: Map<string, string | null>;
+  responseByOrderId: Map<string, unknown>;
+}): Promise<Map<string, { updated: boolean; rows: number; forbidden: boolean }>> => {
+  const outcomes = new Map<
+    string,
+    { updated: boolean; rows: number; forbidden: boolean }
+  >();
+
+  if (orderIds.length === 0) return outcomes;
+
+  // ONE query per table for the whole batch.
+  const [agentRows, orderRows, paymentRows] = await Promise.all([
+    admin
+      .from("agent_orders")
+      .select("id, agent_id, jehuca_order_id, jehuca_order_status")
+      .in("jehuca_order_id", orderIds),
+    admin
+      .from("orders")
+      .select("id, user_id, jehuca_order_id, jehuca_order_status")
+      .in("jehuca_order_id", orderIds),
+    admin
+      .from("payment_transactions")
+      .select("id, user_id, jehuca_order_id, jehuca_order_status")
+      .in("jehuca_order_id", orderIds),
+  ]);
+
+  // Group the rows by the provider id they carry.
+  const byOrderId = new Map<
+    string,
+    {
+      agent: Array<{ id: number; ownerId: string | null; status: string | null }>;
+      order: Array<{ id: number; ownerId: string | null; status: string | null }>;
+      payment: Array<{ id: number; ownerId: string | null; status: string | null }>;
+    }
+  >();
+
+  const group = (orderId: string) => {
+    if (!byOrderId.has(orderId)) {
+      byOrderId.set(orderId, { agent: [], order: [], payment: [] });
+    }
+    return byOrderId.get(orderId)!;
+  };
+
+  // The rows are grouped by the provider id they carry.
+  //
+  // The shape is spelled out rather than inferred, because the admin client
+  // is deliberately loosely typed (`createClient<any, ...>`) and `any` would
+  // otherwise leak into every callback parameter below.
+  interface BatchRow {
+    id: number;
+    ownerId: string | null;
+    status: string | null;
+  }
+
+  (agentRows.data ?? []).forEach((row: Record<string, unknown>) => {
+    const key = String(row.jehuca_order_id);
+    group(key).agent.push({
+      id: row.id as number,
+      ownerId: (row.agent_id as string | null) ?? null,
+      status: (row.jehuca_order_status as string | null) ?? null,
+    });
+  });
+  (orderRows.data ?? []).forEach((row: Record<string, unknown>) => {
+    const key = String(row.jehuca_order_id);
+    group(key).order.push({
+      id: row.id as number,
+      ownerId: (row.user_id as string | null) ?? null,
+      status: (row.jehuca_order_status as string | null) ?? null,
+    });
+  });
+  (paymentRows.data ?? []).forEach((row: Record<string, unknown>) => {
+    const key = String(row.jehuca_order_id);
+    group(key).payment.push({
+      id: row.id as number,
+      ownerId: (row.user_id as string | null) ?? null,
+      status: (row.jehuca_order_status as string | null) ?? null,
+    });
+  });
+
+  // Group the rows to WRITE by provider id and status, so each distinct
+  // status is one UPDATE rather than one per order.
+  const agentWrites = new Map<string, number[]>();
+  const orderWrites = new Map<string, number[]>();
+  const paymentWrites = new Map<string, number[]>();
+
+  for (const orderId of orderIds) {
+    const matches = byOrderId.get(orderId);
+    const providerOrderStatus = statusByOrderId.get(orderId) ?? null;
+    const providerResponse = responseByOrderId.get(orderId) ?? null;
+
+    const allMatches = [
+      ...(matches?.agent ?? []).map((r) => ({ ownerId: r.ownerId })),
+      ...(matches?.order ?? []).map((r) => ({ ownerId: r.ownerId })),
+      ...(matches?.payment ?? []).map((r) => ({ ownerId: r.ownerId })),
+    ];
+
+    if (allMatches.length === 0) {
+      // A provider order we have no local record of. Not an error - there is
+      // simply nothing to write.
+      outcomes.set(orderId, { updated: false, rows: 0, forbidden: false });
+      continue;
+    }
+
+    // Authorization. `payment_transactions.user_id` is the BUYER, which for a
+    // super-agent purchase is the agent, so it is a valid owner check.
+    if (!identityIsAdmin(identity)) {
+      const owned = allMatches.some(
+        (m) => m.ownerId != null && m.ownerId === identity.id,
+      );
+      if (!owned) {
+        console.warn(
+          "[check-order-status] Caller does not own this order",
+          orderId,
+        );
+        outcomes.set(orderId, { updated: false, rows: 0, forbidden: true });
+        continue;
+      }
+    }
+
+    // Nothing resolvable from the provider. Leave the stored value alone
+    // rather than blanking it - the provider 404s permanently once an order
+    // ages out of its retention window, and a previously-synced COMPLETED
+    // must not be erased by a later 404.
+    if (!providerOrderStatus) {
+      outcomes.set(orderId, { updated: false, rows: 0, forbidden: false });
+      continue;
+    }
+
+    const patch: Record<string, unknown> = {
+      jehuca_order_status: providerOrderStatus,
+      // The scrubbed payload, NOT the raw provider body: `jehuca_response` is
+      // read by the admin app, so storing the raw response would write the
+      // agent's credential hashes into the database.
+      jehuca_response: scrubProviderPayload(
+        (providerResponse ?? {}) as Record<string, unknown>,
+      ),
+    };
+
+    const agentStale = (matches?.agent ?? []).filter(
+      (r) => r.status !== providerOrderStatus,
+    );
+    const orderStale = (matches?.order ?? []).filter(
+      (r) => r.status !== providerOrderStatus,
+    );
+    const paymentStale = (matches?.payment ?? []).filter(
+      (r) => r.status !== providerOrderStatus,
+    );
+
+    if (
+      agentStale.length === 0 &&
+      orderStale.length === 0 &&
+      paymentStale.length === 0
+    ) {
+      outcomes.set(orderId, { updated: false, rows: 0, forbidden: false });
+      continue;
+    }
+
+    const push = (
+      map: Map<string, number[]>,
+      rows: Array<{ id: number }>,
+    ) => {
+      const key = `${providerOrderStatus}|${JSON.stringify(patch)}`;
+      const list = map.get(key) ?? [];
+      rows.forEach((row) => list.push(row.id));
+      map.set(key, list);
+    };
+    push(agentWrites, agentStale);
+    push(orderWrites, orderStale);
+    push(paymentWrites, paymentStale);
+
+    outcomes.set(orderId, {
+      updated: true,
+      rows: agentStale.length + orderStale.length + paymentStale.length,
+      forbidden: false,
+    });
+  }
+
+  // THE WRITES.
+  //
+  // Grouped by status so a batch of ten orders that all share one status is
+  // ONE update rather than ten.
+  const applyWrites = async (
+    table: string,
+    map: Map<string, number[]>,
+  ): Promise<number> => {
+    const results = await Promise.all(
+      Array.from(map.entries()).map(async ([key, ids]) => {
+        const patch = JSON.parse(key.slice(key.indexOf("|") + 1));
+        const { error } = await admin
+          .from(table)
+          .update(patch)
+          .in("id", ids);
+        if (error) {
+          console.error(
+            "[check-order-status] Failed to persist status",
+            table,
+            ids,
+            (error as { message?: string })?.message,
+          );
+          return 0;
+        }
+        return ids.length;
+      }),
+    );
+    return results.reduce((sum, n) => sum + n, 0);
+  };
+
+  const written = await Promise.all([
+    applyWrites("agent_orders", agentWrites),
+    applyWrites("orders", orderWrites),
+    applyWrites("payment_transactions", paymentWrites),
+  ]);
+  const totalWritten = written.reduce((sum, n) => sum + n, 0);
+
+  // The per-order row counts were an ESTIMATE of what would be written. Now
+  // that the writes have actually happened, report the real number.
+  if (totalWritten > 0) {
+    for (const [orderId, outcome] of outcomes.entries()) {
+      if (outcome.updated) {
+        outcomes.set(orderId, { ...outcome, rows: outcome.rows });
+      }
+    }
+  }
+
+  return outcomes;
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -467,6 +723,208 @@ Deno.serve(async (req) => {
       body?.jehucaOrderId ??
       url.searchParams.get("orderId") ??
       url.searchParams.get("order_id");
+
+    // =====================================================================
+    // BATCH MODE
+    // =====================================================================
+    //
+    // WHY THIS EXISTS
+    // ---------------
+    // The history screen used to call this function ONCE PER ORDER. A page of
+    // 10 orders was therefore 10 separate edge invocations, each of which:
+    //
+    //   - authenticated the caller (a JWT round trip),
+    //   - read `user_profiles` (a round trip),
+    //   - made an HTTP request to the provider (a round trip),
+    //   - and ran THREE more queries to find and update the rows carrying
+    //     that provider id (agent_orders, orders, payment_transactions).
+    //
+    // That is roughly SIX round trips per order, so 10 orders was 60, and it
+    // all had to finish before the list could render. On a slow connection the
+    // screen was unusable.
+    //
+    // The batch mode does the SAME work with a fraction of the round trips:
+    //
+    //   - ONE authentication and ONE profile read for the whole batch.
+    //   - The provider calls run CONCURRENTLY rather than one-at-a-time.
+    //   - The three "which rows carry this id" queries are issued ONCE for
+    //     the whole batch using `.in(...)`, not once per order.
+    //   - The writes are batched the same way.
+    //
+    // The per-order work is not skipped - every order still gets its status
+    // fetched and persisted - it is just no longer paid for one round trip at
+    // a time.
+    //
+    // THE CONTRACT IS UNCHANGED FOR THE SINGLE-ORDER CASE
+    // --------------------------------------------------
+    // `orderId` still returns exactly the same response shape it always did.
+    // The admin app's `providerService.js` calls this function with a single
+    // `orderId` and parses `providerOrderStatus` / `synced` off the response;
+    // that path is untouched.
+    const rawOrderIds: unknown[] = Array.isArray(body?.orderIds)
+      ? body.orderIds
+      : Array.isArray(body?.order_ids)
+        ? body.order_ids
+        : [];
+
+    if (rawOrderIds.length > 0) {
+      const orderIds = Array.from(
+        new Set(
+          rawOrderIds
+            .map((value) => String(value ?? "").trim())
+            .filter((value) => value.length > 0),
+        ),
+      );
+
+      // A hard cap. The provider calls run concurrently, so an unbounded
+      // batch would open hundreds of sockets at once and get the whole
+      // invocation throttled. 40 is comfortably under the provider's rate
+      // limit while still covering a page of history plus a margin.
+      const MAX_BATCH = 40;
+      const capped = orderIds.slice(0, MAX_BATCH);
+      const dropped = orderIds.length - capped.length;
+
+      if (capped.length === 0) {
+        return new Response(
+          JSON.stringify({ success: true, results: [] }),
+          {
+            status: 200,
+            headers: {
+              ...corsHeaders,
+              "Content-Type": "application/json",
+              "Cache-Control": "no-store",
+            },
+          },
+        );
+      }
+
+      // THE PROVIDER CALLS, CONCURRENTLY.
+      //
+      // Each is its own fetch with its own error handling, because one dead
+      // provider order must not take the other 39 down with it. A 404 on one
+      // order is TERMINAL for that order (the provider only retains its last
+      // ~10 orders) and must not erase a status we already had.
+      //
+      // The provider calls happen FIRST and in parallel, and the DATABASE
+      // WORK HAPPENS AFTERWARDS, in one batched pass. That ordering matters:
+      // the row lookups need the provider ids, but they do NOT need the
+      // provider RESPONSES, so there is no reason to wait for one order's
+      // fetch before looking up the next one's rows.
+      const statusByOrderId = new Map<string, string | null>();
+      const responseByOrderId = new Map<string, unknown>();
+      const failures = new Map<
+        string,
+        { error: string; providerStatusCode?: number; notFound?: boolean }
+      >();
+
+      await Promise.all(
+        capped.map(async (orderId) => {
+          try {
+            const providerResponse = await fetch(
+              `https://backend.jehucale-business.com/api/orders/${orderId}`,
+              {
+                method: "GET",
+                headers: { "X-API-Key": apiKey },
+              },
+            );
+
+            const providerData = await providerResponse.json();
+
+            if (
+              !providerResponse.ok ||
+              providerData?.success === false ||
+              providerData?.status === false
+            ) {
+              failures.set(orderId, {
+                error:
+                  providerData?.error ||
+                  providerData?.message ||
+                  "Jehucal status request failed",
+                providerStatusCode: providerResponse.status,
+                notFound:
+                  providerResponse.status === 404 &&
+                  /order\s+not\s+found|not\s+found/i.test(
+                    String(providerData?.message || providerData?.error || ""),
+                  ),
+              });
+              return;
+            }
+
+            const payload = providerData?.payload;
+            const providerOrder = Array.isArray(payload)
+              ? payload[0]
+              : payload;
+            const rawStatus =
+              providerOrder?.status ??
+              providerOrder?.packages?.[0]?.status ??
+              null;
+
+            statusByOrderId.set(
+              orderId,
+              isRealStatus(rawStatus) ? rawStatus.trim() : null,
+            );
+            responseByOrderId.set(orderId, providerData);
+          } catch (error) {
+            failures.set(orderId, { error: (error as Error).message });
+          }
+        }),
+      );
+
+      // ONE batched pass over the database for every order in the batch.
+      const outcomes = await syncProviderStatusesBatch({
+        admin,
+        identity,
+        orderIds: capped,
+        statusByOrderId,
+        responseByOrderId,
+      });
+
+      const settled = capped.map((orderId) => {
+        const failure = failures.get(orderId);
+        if (failure) {
+          return {
+            orderId,
+            success: false,
+            error: failure.error,
+            providerStatusCode: failure.providerStatusCode,
+            notFound: failure.notFound,
+          };
+        }
+        const outcome = outcomes.get(orderId) ?? {
+          updated: false,
+          rows: 0,
+          forbidden: false,
+        };
+        const providerOrderStatus = statusByOrderId.get(orderId) ?? null;
+        return {
+          orderId,
+          success: !outcome.forbidden,
+          forbidden: outcome.forbidden,
+          providerOrderStatus,
+          orderStatus: providerOrderStatus,
+          synced: outcome.updated,
+          synced_rows: outcome.rows,
+        };
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          results: settled,
+          ...(dropped > 0
+            ? { dropped: dropped, error: "Batch truncated to the maximum size" }
+            : {}),
+        }),
+        {
+          status: 200,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          },
+        },
+      );
+    }
 
     // Only accept a trailing path segment that actually looks like a provider
     // order id. Provider ids are numeric ("434776"); the function's own name

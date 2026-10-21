@@ -386,12 +386,61 @@ Deno.serve(async (req) => {
         ownAgentPricing = data || null;
       }
 
+      // THE SPENDING POWER THE CALLER HAS.
+      //
+      // Two different balances, because two different wallets are involved:
+      //
+      //   super agent  - their OWN real wallet. This is the money the platform
+      //                  will actually draw down.
+      //   sub agent    - their MIRRORED balance, which is a CEILING on what
+      //                  they may spend rather than a second pot of money. It
+      //                  is the number they can act on, and it is the one the
+      //                  client needs in order to tell them they cannot afford
+      //                  the registration BEFORE they try.
+      //
+      // A sub agent with no assigned super agent has no wallet at all, so
+      // there is nothing to read and nothing to offer.
+      let walletBalance: number | null = null;
+      let walletOwnerId: string | null = null;
+      if (callerIsSuperAgent) {
+        walletOwnerId = user.id;
+      } else if (identity.role === "sub_agent" && identity.superAgentId) {
+        walletOwnerId = identity.id;
+      }
+      if (walletOwnerId) {
+        const { data: walletRow, error: walletError } = await admin
+          .from("super_agent_wallets")
+          .select("balance")
+          .eq("super_agent_id", walletOwnerId)
+          .maybeSingle();
+        // A missing wallet row is not an error: it means "never funded", which
+        // is a balance of zero. A READ error, though, must not be reported as
+        // zero - that would tell the user they have no money when in fact we
+        // simply could not find out.
+        if (walletError) {
+          console.error(
+            "[afa-registration] Could not read wallet balance:",
+            walletError,
+          );
+        } else {
+          walletBalance = Number(walletRow?.balance ?? 0);
+        }
+      }
+
+      // Whether this caller can pay from a wallet at all. A sub agent with no
+      // super agent cannot - there is no wallet to spend from.
+      const canPayFromWallet =
+        callerIsSuperAgent ||
+        (identity.role === "sub_agent" && Boolean(identity.superAgentId));
+
       return json({
         settings,
         registrations: registrations || [],
         quotedFee: pricing?.[0]?.base_price ?? null,
         priceSource: pricing?.[0]?.price_source ?? "platform_default",
         ownAgentPricing,
+        walletBalance,
+        canPayFromWallet,
       });
     }
 
@@ -471,7 +520,38 @@ Deno.serve(async (req) => {
       }
 
       const isSuperAgent = role === "SuperAgent";
-      const paymentMethod = isSuperAgent ? "wallet" : "paystack";
+      const isSubAgent = identity.role === "sub_agent";
+      // A sub agent buys from their OWN super agent's wallet, against their
+      // own mirrored balance - the same shape as a data purchase. A sub agent
+      // with no assigned super agent has no wallet to spend from, so they fall
+      // back to Paystack.
+      const canUseWallet =
+        isSuperAgent || (isSubAgent && Boolean(identity.superAgentId));
+      // The wallet that is actually drawn down. For a super agent that is their
+      // own; for a sub agent it is their super agent's, and their mirror is
+      // the ceiling on what they may spend.
+      const walletOwnerId = isSuperAgent ? user.id : identity.superAgentId;
+
+      // WHICH METHOD THE CALLER ASKED FOR.
+      //
+      // A SUPER AGENT ALWAYS PAYS FROM THEIR WALLET. That is the deal they
+      // have with the platform, and it has been the behaviour since wallet
+      // payments were introduced - a crafted request must not be able to move
+      // a super agent's registration onto a card payment.
+      //
+      // A SUB AGENT MAY CHOOSE. Their mirrored balance can be empty while
+      // they still need to register, so a wallet-only path would leave them
+      // with no way to register at all. The default is the wallet because it
+      // is the cheaper and faster route, and Paystack is the fallback they
+      // switch to explicitly.
+      const requestedMethod = String(body.paymentMethod || "")
+        .trim()
+        .toLowerCase();
+      const useWallet = isSuperAgent
+        ? true
+        : canUseWallet && requestedMethod !== "paystack";
+
+      const paymentMethod = useWallet ? "wallet" : "paystack";
       const reference = `afa_${Date.now()}_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
       const superAgentId = isSuperAgent ? user.id : identity.superAgentId;
 
@@ -515,6 +595,28 @@ Deno.serve(async (req) => {
         }
       }
 
+      // THE PLATFORM'S OWN PRICE FOR THIS TIER.
+      //
+      // `fee_amount` is what the PAYER is charged; `platform_fee_amount` is
+      // what the PLATFORM collects. They differ when a super agent has set
+      // their own sub-agent price: the difference is the super agent's
+      // markup, and it is their revenue.
+      //
+      // This must be the platform's price for the PAYER'S tier, NOT the
+      // global fee. Using the global fee would make the split wrong in both
+      // directions - a super agent on a discounted platform tier would have
+      // the whole discount counted as markup, and a sub agent on a raised
+      // platform tier would have the platform's own share treated as markup.
+      const platformFeeAmount = isSuperAgent
+        ? Number(
+            settings?.super_agent_base_price ?? settings?.registration_fee ?? 0,
+          )
+        : isSubAgent
+          ? Number(
+              settings?.sub_agent_base_price ?? settings?.registration_fee ?? 0,
+            )
+          : Number(settings?.registration_fee ?? 0);
+
       const { data: registration, error: createError } = await admin
         .from("afa_registrations")
         .insert({
@@ -534,7 +636,7 @@ Deno.serve(async (req) => {
           // was derived from. Both snapshotted - editing a price later must
           // never rewrite what a historical registration was worth.
           fee_amount: quotedFee,
-          platform_fee_amount: Number(settings.registration_fee || 0),
+          platform_fee_amount: platformFeeAmount,
           price_source: priceSource,
           currency: settings.currency || "GHS",
           payment_method: paymentMethod,
@@ -545,13 +647,20 @@ Deno.serve(async (req) => {
         .single();
       if (createError) throw createError;
 
-      if (isSuperAgent) {
+      if (useWallet) {
+        // The payer is passed explicitly so the RPC can tell "the super agent
+        // paying their own wallet" from "a sub agent paying from their super
+        // agent's wallet against their own mirror". The RPC draws down the
+        // super agent's real money by the PLATFORM price and the sub agent's
+        // mirror by the amount THEY were charged - which is how the markup a
+        // super agent set for their sub-agents becomes their revenue.
         const { data: result, error: walletError } = await admin.rpc(
           "pay_afa_registration_from_wallet",
           {
             p_registration_id: registration.id,
-            p_super_agent_id: user.id,
+            p_super_agent_id: walletOwnerId,
             p_reference: reference,
+            p_payer_user_id: user.id,
           },
         );
         if (walletError) throw walletError;

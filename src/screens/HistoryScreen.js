@@ -3,9 +3,10 @@ import {
   View,
   Text,
   TouchableOpacity,
-  ScrollView,
+  FlatList,
   RefreshControl,
   Animated,
+  ActivityIndicator,
   StatusBar,
   Platform,
   StyleSheet,
@@ -28,9 +29,43 @@ import {
   isRealStatus,
   resolveOrderStatus,
 } from "../lib/orderStatus";
-import { fetchNamedTopups } from "../lib/superAgentRoster";
+import {
+  fetchNamedTopups,
+  updateSubAgentOrderStatus,
+  SUPER_AGENT_WRITABLE_STATUSES,
+} from "../lib/superAgentRoster";
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
+
+// HOW MUCH HISTORY IS FETCHED AT A TIME.
+//
+// This screen used to load the ENTIRE history in one go - four separate
+// unbounded `.select("*")` queries, merged and rendered inside a `ScrollView`.
+//
+// Two separate costs, both of which made the app slow:
+//
+//   1. THE QUERY. An unbounded select is clamped by PostgREST's `max-rows`
+//      (1000 by default) SILENTLY, so a large history was both slow AND
+//      truncated, with no indication anything was missing.
+//   2. THE RENDER. A `ScrollView` renders every row it is given. A thousand
+//      transaction cards - each with a status spine, a breakdown panel and
+//      several nested `Text` nodes - is a thousand views mounted at once.
+//
+// The fix is the same shape as `OrderManagementScreen` in the admin app:
+// fetch a page at a time, and load the next page when the user reaches the
+// bottom. The list is also moved onto a `FlatList`, which unmounts rows that
+// have scrolled away instead of keeping them all alive.
+//
+// TEN ROWS PER PAGE.
+//
+// A page of ten is deliberately small. The cost of a page is dominated by the
+// provider status refresh, and that work is now batched into ONE edge call
+// for the page - so the marginal cost of a tenth row is a fraction of a
+// round trip, not a round trip. Ten rows fill roughly a screen and a half,
+// which means the user reaches the "load more" trigger having seen
+// something, rather than scrolling through three pages of content that was
+// never going to be read.
+const PAGE_SIZE = 10;
 
 // A money value that may genuinely be UNKNOWN, rendered so an unknown reads as
 // unknown.
@@ -82,6 +117,66 @@ const warnProviderOrderMissingOnce = (orderId) => {
 };
 
 /**
+ * The sub-agent business names for a super agent, CACHED.
+ *
+ * A super agent's roster is the same on every page of their history - it
+ * does not change because the user scrolled. So the edge call that fetches
+ * it is made ONCE and the result reused for every subsequent page.
+ *
+ * Without this, scrolling through ten pages of history made ten identical
+ * edge calls, each of which returned the whole roster.
+ *
+ * A failed fetch is NOT cached, so a transient failure does not leave the
+ * screen permanently showing blank names - the next page tries again.
+ */
+const subAgentNameCache = new Map();
+
+const getSubAgentBusinessNames = async (superAgentId) => {
+  if (!superAgentId) return new Map();
+  if (subAgentNameCache.has(superAgentId)) {
+    return subAgentNameCache.get(superAgentId);
+  }
+
+  try {
+    const subAgentFunctionName = getEdgeFunctionName(
+      "super-agent-user-management",
+    );
+    let subAgentResult = await supabase.functions.invoke(
+      subAgentFunctionName,
+      { body: { action: "listUsers", superAgentId } },
+    );
+    if (
+      subAgentResult.error &&
+      subAgentFunctionName !== "super-agent-user-management"
+    ) {
+      subAgentResult = await supabase.functions.invoke(
+        "super-agent-user-management",
+        { body: { action: "listUsers", superAgentId } },
+      );
+    }
+    if (subAgentResult.error) {
+      console.error(
+        "Error fetching sub-agent names:",
+        subAgentResult.error,
+      );
+      return new Map();
+    }
+
+    const names = new Map(
+      (subAgentResult.data?.users || []).map((subAgent) => [
+        subAgent.id,
+        subAgent.user_metadata?.business_name || "",
+      ]),
+    );
+    subAgentNameCache.set(superAgentId, names);
+    return names;
+  } catch (error) {
+    console.error("Error fetching sub-agent names:", error);
+    return new Map();
+  }
+};
+
+/**
  * Refreshes the provider status for a set of order rows and mirrors it back
  * into the database.
  *
@@ -90,8 +185,192 @@ const warnProviderOrderMissingOnce = (orderId) => {
  * build, which still runs the old code until it is deployed; the deployed
  * build syncs all three tables server-side and reports `synced`. See the note
  * on the write-back below.
+ *
+ * ONE BATCHED CALL FOR THE WHOLE PAGE
+ * -----------------------------------
+ * This used to invoke the edge function ONCE PER ORDER. Each invocation
+ * authenticated the caller, read the profile, called the provider and then
+ * ran three database queries - roughly six round trips per order, all of
+ * which had to finish before the list could render. Ten orders was sixty
+ * round trips, and on a slow connection the screen was unusable.
+ *
+ * The edge function now accepts an ARRAY of provider order ids and does the
+ * whole page in one invocation, with the provider calls concurrent and the
+ * database work batched. Same work, a fraction of the round trips.
+ *
+ * ORDERS THAT ALREADY SETTLED ARE NOT ASKED ABOUT AT ALL
+ * ------------------------------------------------------
+ * An order whose provider status is already `COMPLETED` (or `DELIVERED`)
+ * cannot change. Asking the provider about it again is a guaranteed waste of
+ * a round trip, and on a long history those are the MAJORITY of the rows.
+ * Only orders that could still move are sent to the provider.
+ *
+ * This is the single biggest win on a long history, and it is why a page of
+ * ten old orders costs almost nothing while a page of ten fresh ones costs
+ * one batched call.
  */
 const refreshProviderStatuses = async (orders, table) => {
+  const rows = orders || [];
+  if (rows.length === 0) return [];
+
+  // WHICH ORDERS COULD STILL CHANGE.
+  //
+  // A settled provider status is final. An order with no provider id was
+  // never dispatched, so there is nothing to ask about. An order whose
+  // provider status is still `processing` is exactly the one worth asking.
+  const settled = new Set(["completed", "delivered"]);
+
+  // The rows we do NOT ask about are returned untouched, so the caller still
+  // gets one row per order.
+  const needsRefresh = rows.filter((order) => {
+    if (!order.jehuca_order_id) return false;
+    const providerStatus = String(order.jehuca_order_status || "")
+      .trim()
+      .toLowerCase();
+    if (settled.has(providerStatus)) return false;
+    return true;
+  });
+
+  if (needsRefresh.length === 0) return rows;
+
+  // THE PROVIDER IDS, DEDUPED.
+  //
+  // The same provider id can appear on more than one row (a wallet order
+  // mirrored onto `orders` and `agent_orders`, for instance). Asking the
+  // provider about it twice is pure waste.
+  const orderIds = Array.from(
+    new Set(
+      needsRefresh
+        .map((order) => String(order.jehuca_order_id).trim())
+        .filter(Boolean),
+    ),
+  );
+
+  if (orderIds.length === 0) return rows;
+
+  let results = [];
+  try {
+    const functionName = getEdgeFunctionName("check-order-status");
+    const { data, error } = await supabase.functions.invoke(functionName, {
+      body: { orderIds },
+    });
+
+    if (error) {
+      // The deployed build may be the OLD one, which only understands a
+      // single `orderId`. Fall back to the unsuffixed production name, and
+      // then to the per-order path, so a stale deployment degrades to "slow"
+      // rather than to "broken".
+      if (functionName !== "check-order-status") {
+        const fallback = await supabase.functions.invoke(
+          "check-order-status",
+          { body: { orderIds } },
+        );
+        if (!fallback.error) {
+          results = fallback.data?.results || [];
+        } else {
+          return await refreshProviderStatusesOneByOne(needsRefresh, table);
+        }
+      } else {
+        return await refreshProviderStatusesOneByOne(needsRefresh, table);
+      }
+    } else {
+      results = data?.results || [];
+    }
+  } catch (error) {
+    console.warn("Unable to refresh Jehuca status:", error);
+    return rows;
+  }
+
+  // The status each provider order id resolved to.
+  const statusById = new Map();
+  (results || []).forEach((result) => {
+    if (!result?.orderId) return;
+    if (result.success === false) {
+      // A 404 is TERMINAL, not transient: the order has fallen out of the
+      // provider's retention window and no retry can recover it. Warn once
+      // per order id instead of once per order per refresh. Everything else
+      // (balance errors, network blips) stays a per-refresh warning because
+      // those genuinely are worth retrying.
+      if (result.notFound || result.providerStatusCode === 404) {
+        warnProviderOrderMissingOnce(result.orderId);
+      } else {
+        console.warn(
+          "Jehucal status request failed:",
+          result.error,
+          result.providerStatusCode,
+        );
+      }
+      return;
+    }
+    const status =
+      result.orderStatus ||
+      result.providerOrderStatus ||
+      (typeof result.status === "string" ? result.status : null);
+    if (isRealStatus(status)) statusById.set(String(result.orderId), status);
+  });
+
+  // THE WRITE-BACK FALLBACK.
+  //
+  // `synced === true` means the deployed function already wrote the status
+  // server-side, to every table carrying this provider id. Writing again from
+  // here is redundant - and keeping two writers is how the field drifted from
+  // the provider in the first place. `synced` undefined means the response
+  // came from the OLD build, which has no server-side sync, so the write-back
+  // below is the only persistence path there.
+  const writeBack = async (order) => {
+    const providerStatus = statusById.get(String(order.jehuca_order_id));
+    if (!providerStatus) return order;
+
+    const result = (results || []).find(
+      (r) => String(r?.orderId) === String(order.jehuca_order_id),
+    );
+
+    if (result?.synced !== true && providerStatus !== order.jehuca_order_status) {
+      const { error: writeError } = await supabase
+        .from(table)
+        .update({ jehuca_order_status: providerStatus })
+        .eq("id", order.id);
+      if (writeError) {
+        // This fallback write needs the caller to pass RLS on the row. It
+        // can silently no-op (anon key + RLS) for some table/account
+        // combinations, and a silent write failure is how the stored
+        // status drifted from the provider in the first place. Log it
+        // rather than pretending the write landed.
+        console.warn(
+          "Could not persist the provider status locally:",
+          table,
+          order.id,
+          writeError.message,
+        );
+      }
+    }
+
+    return { ...order, jehuca_order_status: providerStatus };
+  };
+
+  const refreshed = await Promise.all(needsRefresh.map(writeBack));
+
+  // PUT THE ROWS BACK IN THEIR ORIGINAL ORDER.
+  //
+  // `refreshed` only covers the orders we asked the provider about, and
+  // `untouched` holds the settled ones. Returning `refreshed` alone would
+  // silently DROP every settled order from the list - which, on a long
+  // history, is most of the rows. The caller expects one row back per row
+  // in, in the order it gave them.
+  const refreshedById = new Map(
+    refreshed.map((order) => [order.id, order]),
+  );
+  return rows.map((order) => refreshedById.get(order.id) || order);
+};
+
+/**
+ * The per-order fallback, used only when the deployed edge function is too
+ * old to understand a batch.
+ *
+ * Slow - one invocation per order - but correct. It exists so that a stale
+ * deployment degrades to "slow" rather than to "broken".
+ */
+const refreshProviderStatusesOneByOne = async (orders, table) => {
   const results = await Promise.all(
     (orders || []).map(async (order) => {
       if (!order.jehuca_order_id) return order;
@@ -110,8 +389,6 @@ const refreshProviderStatuses = async (orders, table) => {
               { body: { orderId: order.jehuca_order_id } },
             );
             if (!fallback.error) {
-              // Same rule as the primary path: read the normalised
-              // orderStatus, never the provider's boolean `status`.
               const fallbackStatus =
                 fallback.data?.orderStatus ||
                 fallback.data?.providerOrderStatus ||
@@ -119,20 +396,12 @@ const refreshProviderStatuses = async (orders, table) => {
                   ? fallback.data.status
                   : null);
               if (!isRealStatus(fallbackStatus)) return order;
-              return {
-                ...order,
-                jehuca_order_status: fallbackStatus,
-              };
+              return { ...order, jehuca_order_status: fallbackStatus };
             }
           }
           return order;
         }
         if (data?.success === false) {
-          // A 404 is TERMINAL, not transient: the order has fallen out of the
-          // provider's retention window and no retry can recover it. Warn once
-          // per order id instead of once per order per refresh. Everything else
-          // (balance errors, network blips) stays a per-refresh warning because
-          // those genuinely are worth retrying.
           if (data?.notFound || data?.providerStatusCode === 404) {
             warnProviderOrderMissingOnce(order.jehuca_order_id);
           } else {
@@ -142,20 +411,9 @@ const refreshProviderStatuses = async (orders, table) => {
               data.providerStatusCode,
             );
           }
-          // The stored status is deliberately left alone. A previously-synced
-          // COMPLETED must not be erased by a later 404.
           return order;
         }
 
-        // The edge function normalises the real provider status onto
-        // `orderStatus` / `providerOrderStatus`. Those are the ONLY fields
-        // that hold an order status.
-        //
-        // The bare `data.status` is the provider's success BOOLEAN (`true`),
-        // not a status string, and this chain used to fall all the way through
-        // to it - so the card rendered "true" as the order status. A boolean
-        // can never be a valid status, so reject it explicitly rather than
-        // relying on it not being reached.
         const providerStatus =
           data?.orderStatus ||
           data?.providerOrderStatus ||
@@ -165,13 +423,6 @@ const refreshProviderStatuses = async (orders, table) => {
 
         if (!isRealStatus(providerStatus)) return order;
 
-        // `synced === true` means the deployed function already wrote the
-        // status server-side, to every table carrying this provider id
-        // (agent_orders, orders AND payment_transactions). Writing again from
-        // here is redundant - and keeping two writers is how the field drifted
-        // from the provider in the first place. `undefined` means the response
-        // came from the OLD production build, which has no server-side sync,
-        // so the write-back below is the only persistence path there.
         if (data?.synced === true) {
           return { ...order, jehuca_order_status: providerStatus };
         }
@@ -182,11 +433,6 @@ const refreshProviderStatuses = async (orders, table) => {
             .update({ jehuca_order_status: providerStatus })
             .eq("id", order.id);
           if (writeError) {
-            // This fallback write needs the caller to pass RLS on the row. It
-            // can silently no-op (anon key + RLS) for some table/account
-            // combinations, and a silent write failure is how the stored
-            // status drifted from the provider in the first place. Log it
-            // rather than pretending the write landed.
             console.warn(
               "Could not persist the provider status locally:",
               table,
@@ -220,9 +466,26 @@ export default function HistoryScreen({ navigation }) {
   const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Whether there is more history below the last loaded page. False once every
+  // source has run out of rows, which is what stops the "load more" footer
+  // from appearing on a screen that has nothing more to show.
+  const [hasMore, setHasMore] = useState(true);
+  // How many pages have been loaded. Used to work out which page to ask for
+  // next, and to render "Showing N transactions" - a truthful statement about
+  // what is on screen, rather than a count of the entire history which would
+  // require reading the whole thing to know.
+  const [loadedPages, setLoadedPages] = useState(0);
+  // True while a further page is being fetched. Prevents the footer spinner
+  // from firing several overlapping requests when the user keeps scrolling.
+  const [loadingMore, setLoadingMore] = useState(false);
   const [isAgent, setIsAgent] = useState(false);
   const [isSuperAgentUser, setIsSuperAgentUser] = useState(false);
   const [reorderingId, setReorderingId] = useState(null);
+  // The order whose status picker is expanded, or null. An id rather than a
+  // boolean so two rows cannot be open at once - with a boolean, tapping a
+  // second row would silently move the picker rather than opening a new one.
+  const [statusEditingId, setStatusEditingId] = useState(null);
+  const [statusSaving, setStatusSaving] = useState(false);
   // The order the super agent is currently disputing. Null when the sheet is
   // closed. One object rather than a boolean so the sheet is always given the
   // row it belongs to - reopening for a different order must not show the
@@ -395,6 +658,7 @@ export default function HistoryScreen({ navigation }) {
   const fetchTransactions = async (
     agentStatus = isAgent,
     isRefresh = false,
+    page = 0,
   ) => {
     try {
       if (!isRefresh) {
@@ -408,16 +672,41 @@ export default function HistoryScreen({ navigation }) {
       if (user) {
         let allTransactions = [];
 
+        // THE PAGE WINDOW.
+        //
+        // Each source is read with the SAME server-side range, so every branch
+        // contributes its newest `PAGE_SIZE` rows to the page and the merged
+        // result is still the newest `PAGE_SIZE` transactions overall.
+        //
+        // The range is applied per source rather than after the merge, because
+        // the merge happens in memory across four different tables - there is
+        // no single query to page. The consequence is that a page is not
+        // guaranteed to hold exactly `PAGE_SIZE` rows, which is why
+        // `hasMore` is decided per source rather than from the merged length.
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+
+        // A source is "exhausted" when it returned fewer rows than the window
+        // asked for. Tracked per source so the screen knows when EVERY branch
+        // is exhausted, and only then stops offering to load more.
+        let anySourceHasMore = false;
+
+        const markExhausted = (rowCount) => {
+          if (rowCount >= PAGE_SIZE) anySourceHasMore = true;
+        };
+
         // Fetch regular orders
         const { data: regularOrders, error: regularError } = await supabase
           .from("orders")
           .select("*")
           .eq("user_id", user.id)
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .range(from, to);
 
         if (regularError) {
           console.error("Error fetching regular orders:", regularError);
         } else {
+          markExhausted((regularOrders || []).length);
           // Regular orders carry their own `jehuca_order_id`. They were
           // previously NEVER refreshed, so a normal user or a super agent's own
           // wallet purchase kept whatever status was written at dispatch time
@@ -443,11 +732,13 @@ export default function HistoryScreen({ navigation }) {
             .from("agent_orders")
             .select("*")
             .eq("agent_id", user.id)
-            .order("created_at", { ascending: false });
+            .order("created_at", { ascending: false })
+            .range(from, to);
 
           if (agentError) {
             console.error("Error fetching agent orders:", agentError);
           } else {
+            markExhausted((agentOrders || []).length);
             const refreshedAgentOrders = await refreshProviderStatuses(
               agentOrders,
               "agent_orders",
@@ -477,7 +768,11 @@ export default function HistoryScreen({ navigation }) {
           try {
             const namedTopups = await fetchNamedTopups({
               superAgentId: user.id,
+              from,
+              to,
             });
+
+            markExhausted(namedTopups.length);
 
             const topupTransactions = namedTopups.map((topup) => ({
               ...topup,
@@ -507,42 +802,26 @@ export default function HistoryScreen({ navigation }) {
                       .from("agent_orders")
                       .select("*")
                       .eq("super_agent_id", user.id)
-                      .order("created_at", { ascending: false });
+                      .order("created_at", { ascending: false })
+                      .range(from, to);
 
           if (assignedError) {
             console.error("Error fetching sub-agent orders:", assignedError);
           } else {
+            markExhausted((assignedOrders || []).length);
             const refreshedAssignedOrders = await refreshProviderStatuses(
               assignedOrders,
               "agent_orders",
             );
-            const subAgentFunctionName = getEdgeFunctionName(
-              "super-agent-user-management",
-            );
-            let subAgentResult = await supabase.functions.invoke(
-              subAgentFunctionName,
-              { body: { action: "listUsers", superAgentId: user.id } },
-            );
-            if (
-              subAgentResult.error &&
-              subAgentFunctionName !== "super-agent-user-management"
-            ) {
-              subAgentResult = await supabase.functions.invoke(
-                "super-agent-user-management",
-                { body: { action: "listUsers", superAgentId: user.id } },
-              );
-            }
-            const subAgentData = subAgentResult.data;
-            const subAgentError = subAgentResult.error;
-            if (subAgentError) {
-              console.error("Error fetching sub-agent names:", subAgentError);
-            }
-            subAgentBusinessNames = new Map(
-              (subAgentData?.users || []).map((subAgent) => [
-                subAgent.id,
-                subAgent.user_metadata?.business_name || "",
-              ]),
-            );
+            // THE SUB-AGENT NAMES.
+            //
+            // These come from an edge function and are the SAME on every page
+            // - the roster does not change because the user scrolled. So they
+            // are fetched ONCE and cached, rather than re-fetched for every
+            // page the user loads. On a history the user scrolls through
+            // several pages, that was several identical edge calls.
+            subAgentBusinessNames =
+              await getSubAgentBusinessNames(user.id);
             const assignedTransactions = refreshedAssignedOrders.map(
               (order) => ({
                 ...order,
@@ -599,7 +878,8 @@ export default function HistoryScreen({ navigation }) {
                           .from("orders")
                           .select("*")
                           .eq("super_agent_id", user.id)
-                          .order("created_at", { ascending: false });
+                          .order("created_at", { ascending: false })
+                          .range(from, to);
 
                         if (walletOrdersError) {
                           console.error(
@@ -607,6 +887,7 @@ export default function HistoryScreen({ navigation }) {
                             walletOrdersError,
                           );
                         } else {
+                          markExhausted((walletOrders || []).length);
                           const refreshedWalletOrders = await refreshProviderStatuses(
                             walletOrders,
                             "orders",
@@ -757,7 +1038,45 @@ export default function HistoryScreen({ navigation }) {
           (a, b) => new Date(b.created_at) - new Date(a.created_at),
         );
 
-        setTransactions(allTransactions);
+        // APPEND, NOT REPLACE.
+        //
+        // Page 0 replaces the list - it is the whole list so far. Later pages
+        // are ADDED to it, which is the entire point of the batching: the
+        // user scrolls to the bottom and the next page arrives underneath
+        // what they are already looking at.
+        //
+        // A page is never allowed to REPLACE an earlier one, because a
+        // transient read failure would then silently truncate the history
+        // back to whatever the last good page held. `page === 0` is the only
+        // case that resets.
+        if (page === 0) {
+          setTransactions(allTransactions);
+        } else {
+          setTransactions((previous) => {
+            const merged = [...previous, ...allTransactions];
+            // A row can appear twice: the same order can be visible through
+            // two branches (a super agent's own wallet order is in `orders`
+            // under `user_id`, and also under `super_agent_id` when they are
+            // their own agent). Deduplicate on the row's identity, keeping the
+            // FIRST occurrence - which is the one from the earlier branch.
+            const seen = new Set();
+            const unique = [];
+            merged.forEach((transaction) => {
+              const key = `${transaction.source || transaction.orderType || "order"}-${transaction.id}`;
+              if (seen.has(key)) return;
+              seen.add(key);
+              unique.push(transaction);
+            });
+            return unique.sort(
+              (a, b) => new Date(b.created_at) - new Date(a.created_at),
+            );
+          });
+        }
+
+        // Whether the user can still scroll for more. True while ANY source
+        // had a full page; false once every source has run dry.
+        setHasMore(anySourceHasMore);
+        setLoadedPages(page + 1);
       }
     } catch (error) {
       console.error("Error:", error);
@@ -767,9 +1086,77 @@ export default function HistoryScreen({ navigation }) {
     }
   };
 
-  const onRefresh = () => {
-    checkAgentStatus(true);
-  };
+  /**
+     * Moves a sub-agent's order to a new lifecycle status.
+     *
+     * Two rules are enforced by the SERVER and are deliberately not re-implemented
+     * here: ownership (the row's `super_agent_id` must be the caller) and the
+     * exclusion of the money-moving statuses. `cancelled` and `refunded` are not in
+     * `SUPER_AGENT_WRITABLE_STATUSES` because those route through
+     * `cancel_admin_order`, which CREDITS the debited wallet - a super agent is a
+     * commercial party to these orders, so allowing it would let them refund
+     * themselves for data the recipient already received. Re-deriving either rule on
+     * the client would be a second copy that drifts, and a client that "corrects"
+     * the server is exactly how a restriction gets bypassed.
+     *
+     * RELOADS rather than patching local state: one call also settles
+     * `settlement_status` on both `agent_orders` and `payment_transactions` - two
+     * tables this list merges - and a local patch would leave them disagreeing on
+     * screen.
+     */
+    const handleStatusChange = async (orderId, status) => {
+      setStatusSaving(true);
+      try {
+        const result = await updateSubAgentOrderStatus(orderId, status);
+        if (!result.ok) {
+          showError("Update failed", result.message);
+          return;
+        }
+        setStatusEditingId(null);
+        const label =
+          SUPER_AGENT_WRITABLE_STATUSES.find((o) => o.value === status)?.label ||
+          status;
+        showSuccess("Order updated", `Order marked as ${label}.`);
+        await checkAgentStatus(true);
+      } finally {
+        setStatusSaving(false);
+      }
+    };
+
+    const onRefresh = () => {
+      // A refresh goes back to page 0. The pages already loaded are replaced,
+      // not appended to, because a refresh is a statement that what is on
+      // screen may have changed - keeping the old rows underneath would show
+      // stale transactions next to fresh ones.
+      setHasMore(true);
+      setLoadedPages(0);
+      checkAgentStatus(true);
+    };
+
+    // LOAD THE NEXT PAGE.
+    //
+    // Fired when the list reaches the bottom. Guarded on three things, all of
+    // which have to be true for it to run:
+    //
+    //   hasMore      - some source still has rows beyond what is loaded.
+    //   !loadingMore - a request is not already in flight. Without this the
+    //                  user scrolling past the bottom fires a burst of
+    //                  overlapping page requests, each of which appends the
+    //                  SAME rows.
+    //   !loading     - the first page is still loading.
+    const loadMore = () => {
+      if (!hasMore || loadingMore || loading) return;
+      setLoadingMore(true);
+      fetchTransactions(isAgent, true, loadedPages)
+        .catch((error) => {
+          console.error("Error loading more history:", error);
+          showError(
+            "Could not load more",
+            "Something went wrong loading older transactions. Pull down to retry.",
+          );
+        })
+        .finally(() => setLoadingMore(false));
+    };
 
     // On web this route can be entered cold - deep link, reload, bookmark - in
     // which case there is nothing behind it in the stack and `goBack()` warns
@@ -841,18 +1228,24 @@ export default function HistoryScreen({ navigation }) {
     });
   };
 
-  const counts = useMemo(() => {
-    const acc = { total: transactions.length, completed: 0, pending: 0 };
-    transactions.forEach((transaction) => {
-      // Same resolver the card and receipt use, so the summary tiles can never
-      // disagree with the rows they summarise.
-      const key = String(resolveOrderStatus(transaction) || "").toLowerCase();
-      if (key === "completed" || key === "delivered") acc.completed += 1;
-      else if (key === "pending" || key === "processing" || key === "held")
-        acc.pending += 1;
-    });
-    return acc;
-  }, [transactions]);
+  // NO COUNT SUMMARY.
+  //
+  // There used to be a `counts` memo feeding a header count and a three-tile
+  // summary strip. It is gone, and deliberately so:
+  //
+  //   - A count of the WHOLE history cannot be known without reading the
+  //     whole history. With the list now paged, the screen only knows what it
+  //     has loaded, so any "total" would have been a claim about rows that
+  //     were never fetched.
+  //   - Getting it honestly would have cost a `count: "exact"` query on
+  //     every one of the four tables, on every load - exactly the work the
+  //     batching removed.
+  //   - "Settled" and "In flight" were counts of the LOADED rows, so they
+  //     would have reported "3 settled" on a screen holding 3 of 400
+  //     settled transactions. A confidently wrong figure is worse than none.
+  //
+  // The footer reports the number of transactions CURRENTLY ON SCREEN, which
+  // is honestly known: it is the length of the array in memory.
 
   return (
     <View style={s.screen}>
@@ -862,108 +1255,32 @@ export default function HistoryScreen({ navigation }) {
         barStyle={isDark ? "light-content" : "dark-content"}
       />
 
-      <ScrollView
-        contentContainerStyle={[
-          s.scrollContent,
-          { paddingBottom: dockPadding },
-        ]}
-        showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={c.mint}
-            colors={[c.mint]}
-            progressBackgroundColor={c.surface}
-          />
+      {/* A `FlatList`, not a `ScrollView`.
+
+          THE REASON FOR THE CHANGE
+          ------------------------
+          A `ScrollView` renders EVERY row it is handed. Every transaction
+          card is a stack of nested views - a status spine, a header, a
+          description, a status pair and, for sub-agent rows, a whole
+          settlement breakdown panel. Rendering a few hundred of those at
+          once is what made this screen slow, and it got slower with every
+          order the user made.
+
+          A `FlatList` mounts only the rows near the viewport and unmounts
+          the rest. The screen's memory and render cost stay flat however
+          long the history is, which is the whole point of paging the data
+          as well.
+
+          The header, the skeleton and the empty state become the list's
+          header and empty components, so the scroll position, the pull to
+          refresh and the "load more" trigger all belong to the same
+          scrollable - the list itself. */}
+      <FlatList
+        data={transactions}
+        keyExtractor={(transaction) =>
+          `${transaction.source || transaction.orderType || "order"}-${transaction.id}`
         }
-      >
-        <View style={s.header}>
-          <TouchableOpacity
-            style={s.backButton}
-                    onPress={handleBack}
-            activeOpacity={0.7}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel="Go back"
-          >
-            <Ionicons name="chevron-back" size={20} color={c.textPrimary} />
-          </TouchableOpacity>
-          <View style={s.headerTextWrap}>
-                    {/* Eyebrow above the title: the screen's job, stated, so the count
-                        below reads as a figure on a statement rather than as the whole
-                        purpose of the page. */}
-                    <Text style={s.headerEyebrow}>Statement</Text>
-                    <Text style={s.headerTitle}>Transaction History</Text>
-                  </View>
-                  <Text style={s.headerCount}>
-                    {counts.total === 0 ? "—" : counts.total}
-                  </Text>
-                </View>
-
-        {/* Summary strip - only meaningful once there is something to summarise.
-
-                    Label above value rather than below: a statement reads top-down, and
-                    the label tells you what the number IS before you meet it. The
-                    third tile is set apart because "Total" is the number people came
-                    for; the other two are context for it. */}
-                {!loading && counts.total > 0 ? (
-                  <View style={s.summary}>
-                    <SummaryTile
-                      label="Settled"
-                      value={counts.completed}
-                      tone={tones.completed}
-                      labelColor={c.textMuted}
-                    />
-                    <View style={s.summaryDivider} />
-                    <SummaryTile
-                      label="In flight"
-                      value={counts.pending}
-                      tone={tones.pending}
-                      labelColor={c.textMuted}
-                    />
-                    <View style={s.summaryDivider} />
-                    <SummaryTile
-                      label="Orders"
-                      value={counts.total}
-                      tone={{ color: c.mint }}
-                      labelColor={c.textSecondary}
-                      last
-                    />
-                  </View>
-                ) : null}
-
-        {loading ? (
-          <View style={s.list}>
-            {[0, 1, 2, 3].map((index) => (
-              <Animated.View
-                key={`history-placeholder-${index}`}
-                style={[s.placeholder, { opacity: skeletonOpacity }]}
-              >
-                <View style={s.placeholderBody}>
-                  <View style={s.placeholderLine} />
-                  <View style={s.placeholderLineShort} />
-                </View>
-                <View style={s.placeholderTail}>
-                  <View style={s.placeholderAmount} />
-                  <View style={s.placeholderBadge} />
-                </View>
-              </Animated.View>
-            ))}
-          </View>
-        ) : transactions.length === 0 ? (
-          <EmptyState
-            icon="receipt-outline"
-                      title="Nothing on the statement yet"
-                      message={
-                        isSuperAgentUser
-                          ? "Orders your sub-agents place — whether they pay by card or from a wallet balance — land here, along with every settlement split."
-                          : "Your purchases will appear here once you buy a data bundle."
-                      }
-                    />
-        ) : (
-          <View style={s.list}>
-            {transactions.map((transaction) => {
+        renderItem={({ item: transaction }) => {
               // A wallet top-up is not an order: it has no network, no package,
               // no recipient and no settlement split. Without this branch it
               // would fall through to the order markup below and render "Ghc
@@ -1313,6 +1630,81 @@ export default function HistoryScreen({ navigation }) {
                     </TouchableOpacity>
                   ) : null}
 
+                                      {/* UPDATE STATUS.
+
+                                          Gated on `isSubAgent` - a super agent's OWN orders are not
+                                          theirs to relabel, and the server would refuse the write
+                                          anyway.
+
+                                          Available on BOTH sub-agent shapes. The wallet one was
+                                          previously excluded here on the premise that the edge
+                                          function only reads `agent_orders`, so the button was
+                                          hidden rather than made to work. That hid the control from
+                                          the majority of the business: a wallet-funded purchase is
+                                          the primary sub-agent flow, not an edge case.
+                                          `super-agent-order-status` now resolves both tables and
+                                          writes back to whichever it read, so the control works on
+                                          either.
+
+                                          Reorder stays wallet-excluded, though - `reorder-held-agent-order`
+                                          genuinely acts on `agent_orders` only, and that one is a
+                                          server change rather than a client one.
+
+                                          The picker renders the SERVER's vocabulary
+                                          (`SUPER_AGENT_WRITABLE_STATUSES`), never a local list, so
+                                          the two surfaces cannot offer different actions. */}
+                                      {isSubAgent ? (
+                                        statusEditingId === transaction.id ? (
+                                          <View style={s.statusPicker}>
+                                            {SUPER_AGENT_WRITABLE_STATUSES.map((option) => {
+                                              const isCurrent =
+                                                String(cardInternalStatus || "").toLowerCase() ===
+                                                option.value;
+                                              return (
+                                                <TouchableOpacity
+                                                  key={option.value}
+                                                  style={[
+                                                    s.statusOption,
+                                                    isCurrent && s.statusOptionCurrent,
+                                                  ]}
+                                                  disabled={statusSaving}
+                                                  onPress={() =>
+                                                    handleStatusChange(transaction.id, option.value)
+                                                  }
+                                                  activeOpacity={0.85}
+                                                  accessibilityRole="button"
+                                                  accessibilityLabel={`Mark order as ${option.label}`}
+                                                >
+                                                  <Text
+                                                    style={[
+                                                      s.statusOptionText,
+                                                      isCurrent && s.statusOptionTextCurrent,
+                                                    ]}
+                                                  >
+                                                    {option.label}
+                                                  </Text>
+                                                </TouchableOpacity>
+                                              );
+                                            })}
+                                          </View>
+                                        ) : (
+                                          <TouchableOpacity
+                                            style={s.statusButton}
+                                            onPress={() => setStatusEditingId(transaction.id)}
+                                            activeOpacity={0.85}
+                                            accessibilityRole="button"
+                                            accessibilityLabel={`Update status of order ${transaction.id}`}
+                                          >
+                                            <Ionicons
+                                              name="create-outline"
+                                              size={14}
+                                              color={c.mint}
+                                            />
+                                            <Text style={s.statusButtonText}>Update status</Text>
+                                          </TouchableOpacity>
+                                        )
+                                      ) : null}
+
                   {/* Report a problem. The card itself navigates to the
                       receipt, so the press has to stop here or the sheet opens
                       and the navigation fires too.
@@ -1347,10 +1739,148 @@ export default function HistoryScreen({ navigation }) {
                                         </TouchableOpacity>
                                       </View>
                                     );
-                                  })}
-          </View>
-        )}
-      </ScrollView>
+        }}
+        contentContainerStyle={[
+          s.scrollContent,
+          { paddingBottom: dockPadding },
+        ]}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={c.mint}
+            colors={[c.mint]}
+            progressBackgroundColor={c.surface}
+          />
+        }
+        ListHeaderComponent={
+          <>
+            <View style={s.header}>
+              <TouchableOpacity
+                style={s.backButton}
+                onPress={handleBack}
+                activeOpacity={0.7}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Go back"
+              >
+                <Ionicons
+                  name="chevron-back"
+                  size={20}
+                  color={c.textPrimary}
+                />
+              </TouchableOpacity>
+              <View style={s.headerTextWrap}>
+                <Text style={s.headerEyebrow}>Statement</Text>
+                <Text style={s.headerTitle}>Transaction History</Text>
+              </View>
+            </View>
+            {/* NO COUNT TILES.
+
+                There used to be a header count and a three-tile summary strip
+                ("Settled" / "In flight" / "Orders") above the list.
+
+                They were the slowest part of the screen and they cost the most
+                of what they showed. A COUNT OF THE WHOLE HISTORY cannot be
+                known without reading the whole history, so the number was
+                either wrong (the list is now paged, so the screen only knows
+                what it has loaded) or it required an extra `count: "exact"`
+                query on every table - four of them - on every single load. On
+                a large history that is exactly the work the batching removed.
+
+                "Settled" and "In flight" had the same problem: they are counts
+                of the loaded rows, so they would have reported "3 settled" on
+                a screen holding 3 of 400 settled transactions - a
+                confidently wrong figure, which is worse than no figure.
+
+                The rows themselves carry their own status, so nothing was lost
+                by removing the summary. The count of what is CURRENTLY ON
+                SCREEN is shown in the footer instead, because that one is
+                honestly known: it is the length of the array in memory, not a
+                claim about rows that were never loaded. */}
+            {loading ? (
+              <View style={s.list}>
+                {[0, 1, 2, 3].map((index) => (
+                  <Animated.View
+                    key={`history-placeholder-${index}`}
+                    style={[s.placeholder, { opacity: skeletonOpacity }]}
+                  >
+                    <View style={s.placeholderBody}>
+                      <View style={s.placeholderLine} />
+                      <View style={s.placeholderLineShort} />
+                    </View>
+                    <View style={s.placeholderTail}>
+                      <View style={s.placeholderAmount} />
+                      <View style={s.placeholderBadge} />
+                    </View>
+                  </Animated.View>
+                ))}
+              </View>
+            ) : null}
+          </>
+        }
+        ListEmptyComponent={
+          loading ? null : (
+            <EmptyState
+              icon="receipt-outline"
+              title="Nothing on the statement yet"
+              message={
+                isSuperAgentUser
+                  ? "Orders your sub-agents place — whether they pay by card or from a wallet balance — land here, along with every settlement split."
+                  : "Your purchases will appear here once you buy a data bundle."
+              }
+            />
+          )
+        }
+        ListFooterComponent={
+          transactions.length === 0 ? null : (
+            <View style={s.footer}>
+              {loadingMore ? (
+                <ActivityIndicator
+                  size="small"
+                  color={c.mint}
+                  style={styles.footerSpinner}
+                />
+              ) : hasMore ? (
+                <TouchableOpacity
+                  style={s.loadMoreButton}
+                  onPress={loadMore}
+                  activeOpacity={0.85}
+                  accessibilityRole="button"
+                  accessibilityLabel="Load older transactions"
+                >
+                  <Text style={s.loadMoreText}>Load older transactions</Text>
+                  <Ionicons
+                    name="chevron-down"
+                    size={15}
+                    color={c.mint}
+                  />
+                </TouchableOpacity>
+              ) : (
+                <Text style={s.footerText}>
+                  Showing all {transactions.length} transaction
+                  {transactions.length === 1 ? "" : "s"}
+                </Text>
+              )}
+            </View>
+          )
+        }
+        onEndReached={loadMore}
+        onEndReachedThreshold={0.4}
+        // The window of rows kept mounted either side of the viewport. The
+        // default of 10 is tight for cards this tall - scrolling back up
+        // would re-mount them and the user would see a flash. 6 keeps a
+        // comfortable buffer without holding the whole list in memory.
+        windowSize={6}
+        // The first page is ten rows, and they are the only rows on screen
+        // at first, so all ten are rendered immediately. Rendering fewer
+        // would leave gaps in the list on a fast scroll, and rendering more
+        // is impossible - there are only ten.
+        initialNumToRender={PAGE_SIZE}
+        maxToRenderPerBatch={PAGE_SIZE}
+        removeClippedSubviews
+      />
 
       <ComplaintSheet
         visible={Boolean(complaintOrder)}
@@ -1645,6 +2175,38 @@ const buildStyles = (c, topInset = 0) =>
       backgroundColor: c.hairline,
     },
 
+    /* ---------- Footer: paging ---------- */
+    // The footer carries the paging control and the honest "showing N"
+    // statement. It sits BELOW the last row rather than being pinned, so it
+    // scrolls with the content and never covers a transaction.
+    footer: {
+      alignItems: "center",
+      justifyContent: "center",
+      paddingVertical: 22,
+      gap: 10,
+    },
+    loadMoreButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 6,
+      paddingHorizontal: 20,
+      paddingVertical: 12,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      backgroundColor: c.surface,
+    },
+    loadMoreText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.mint,
+    },
+    footerText: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+    },
+
     /* ---------- Cards ---------- */
     list: {
       gap: 12,
@@ -1822,7 +2384,54 @@ const buildStyles = (c, topInset = 0) =>
     },
 
     /* ---------- Reorder ---------- */
-    reorderButton: {
+        // Outlined, not filled: on a HELD order the Reorder button is the primary
+        // action and sits directly above it. Two filled mint buttons in one card
+        // would give the pair equal weight and neither would read as primary.
+        statusButton: {
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7,
+          marginTop: 9,
+          paddingVertical: 9,
+          borderRadius: 999,
+          borderWidth: 1,
+          borderColor: c.hairlineStrong,
+        },
+        statusButtonText: {
+          fontFamily: fonts.bodySemi,
+          fontSize: 12.5,
+          color: c.mint,
+        },
+        statusPicker: {
+          flexDirection: "row",
+          flexWrap: "wrap",
+          gap: 6,
+          marginTop: 9,
+        },
+        statusOption: {
+          paddingHorizontal: 12,
+          paddingVertical: 8,
+          borderRadius: 999,
+          borderWidth: 1,
+          borderColor: c.hairlineStrong,
+        },
+        // The status already applied. Filled rather than outlined so "what is it
+        // now?" is answerable at a glance without reading all four labels.
+        statusOptionCurrent: {
+          backgroundColor: c.surfaceHover,
+          borderColor: c.mintDim,
+        },
+        statusOptionText: {
+          fontFamily: fonts.bodySemi,
+          fontSize: 12,
+          color: c.textSecondary,
+        },
+        statusOptionTextCurrent: {
+          color: c.mint,
+        },
+
+        reorderButton: {
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
@@ -1906,6 +2515,12 @@ const buildStyles = (c, topInset = 0) =>
 // Typography for the summary tiles and settlement rows. The per-row VALUES are
 // tinted at the call site (they carry semantic colour); labels are plain.
 const styles = StyleSheet.create({
+  // The paging spinner in the footer. Module-level because it carries no
+  // palette-dependent colour - the `ActivityIndicator` takes its colour from
+  // the `color` prop, which is theme-aware and passed in at the call site.
+  footerSpinner: {
+    marginVertical: 4,
+  },
   summaryTile: {
     flex: 1,
     alignItems: "center",

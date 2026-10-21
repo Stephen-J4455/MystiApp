@@ -406,21 +406,40 @@ export const fetchWalletLedger = async ({
  * sub-agent rows. Without it those rows are filtered out silently (HTTP 200,
  * no error), so a legitimate `[]` and a denied read are indistinguishable.
  */
-export const fetchSubAgentTopups = async ({ superAgentId, limit } = {}) => {
+export const fetchSubAgentTopups = async ({
+  superAgentId,
+  limit,
+  from,
+  to,
+} = {}) => {
   const userId = superAgentId || (await getCurrentUserId());
   if (!userId) return [];
 
-  // OR-joined in one round trip. Two `.or()` calls would need Supabase to
-  // merge them, which it does not; a single filter string with both branches is
-  // the reliable form.
-  const rows = await walkAll((from, to) =>
-    supabase
-      .from("wallet_topups")
-      .select("*", { count: "exact" })
-      .or(`wallet_owner_id.eq.${userId},agent_id.eq.${userId}`)
-      .order("created_at", { ascending: false })
-      .range(from, to),
-  );
+  // A PAGED READ. `from`/`to` are a server-side range, used by the history
+  // screen to walk the top-ups in batches instead of pulling the whole set.
+  //
+  // When they are absent the full set is walked, as before - the other
+  // callers want everything.
+  const paged =
+    Number.isInteger(from) && Number.isInteger(to) && to >= from;
+
+  const rows = paged
+    ? (
+        await supabase
+          .from("wallet_topups")
+          .select("*")
+          .or(`wallet_owner_id.eq.${userId},agent_id.eq.${userId}`)
+          .order("created_at", { ascending: false })
+          .range(from, to)
+      ).data || []
+    : await walkAll((pageFrom, pageTo) =>
+        supabase
+          .from("wallet_topups")
+          .select("*", { count: "exact" })
+          .or(`wallet_owner_id.eq.${userId},agent_id.eq.${userId}`)
+          .order("created_at", { ascending: false })
+          .range(pageFrom, pageTo),
+      );
 
   return Number.isFinite(limit) && limit > 0 ? rows.slice(0, limit) : rows;
 };
@@ -443,31 +462,57 @@ export const fetchSubAgentTopups = async ({ superAgentId, limit } = {}) => {
  * "Sub-agent" otherwise. Neither is a guess about identity - both are honest
  * statements of what the row can prove, and a UUID is never shown.
  */
+// THE ROSTER NAME MAP, CACHED PER SUPER AGENT.
+//
+// `fetchNamedTopups` needs a name for each payer. Resolving those names
+// means reading the sub-agent roster, which is a second query - and on a
+// PAGED read it would run once per page, which is precisely the redundant
+// work the batching exists to remove.
+//
+// The roster changes only when the super agent adds or removes a sub-agent,
+// which is rare, so it is cached for the life of the session. `null` means
+// "not loaded yet"; an empty Map means "loaded, and there are no sub-agents".
+const rosterNameCache = new Map();
+
+const getRosterNameMap = async (superAgentId) => {
+  if (rosterNameCache.has(superAgentId)) {
+    return rosterNameCache.get(superAgentId);
+  }
+  try {
+    const roster = (await fetchSubAgentBalances({ superAgentId })) || [];
+    const nameForAgent = new Map(
+      roster.map((member) => [member.id, member.name]),
+    );
+    rosterNameCache.set(superAgentId, nameForAgent);
+    return nameForAgent;
+  } catch (error) {
+    console.error("Failed to load sub-agent roster for top-up names:", error);
+    // NOT cached, so the next call retries rather than pinning an empty
+    // roster for the rest of the session.
+    return new Map();
+  }
+};
+
 export const fetchNamedTopups = async ({
   superAgentId,
   limit,
+  from,
+  to,
   onWarning,
 } = {}) => {
   const userId = superAgentId || (await getCurrentUserId());
   if (!userId) return [];
 
-  let roster = [];
-  try {
-    roster = (await fetchSubAgentBalances({ superAgentId: userId })) || [];
-  } catch (error) {
-    console.error("Failed to load sub-agent roster for top-up names:", error);
-    if (typeof onWarning === "function") {
-      onWarning(
-        "Could not load your sub-agent roster, so top-ups may not show a name.",
-      );
-    }
-  }
-
-  const nameForAgent = new Map(roster.map((member) => [member.id, member.name]));
+  const nameForAgent = await getRosterNameMap(userId);
 
   let rows;
   try {
-    rows = await fetchSubAgentTopups({ superAgentId: userId, limit });
+    rows = await fetchSubAgentTopups({
+      superAgentId: userId,
+      limit,
+      from,
+      to,
+    });
   } catch (error) {
     console.error("Failed to load wallet top-ups:", error);
     if (typeof onWarning === "function") {

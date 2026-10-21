@@ -393,17 +393,54 @@ Deno.serve(async (req) => {
     // `verify-payment` from `user_profiles.super_agent_id`, which only admins
     // write. Scoping the select by it means an order belonging to someone else's
     // sub-agent simply is not found.
-    const { data: order, error: orderError } = await admin
+    //
+    // TWO TABLES, RESOLVED IN ORDER - a sub-agent's order is written to one or
+    // the other depending on how it was PAID FOR, not on who bought it:
+    //
+    //   paid by Paystack -> agent_orders   (carries its own super_agent_id)
+    //   paid from wallet -> orders         (ownership added by 20261005_001)
+    //
+    // `agent_orders` is tried first and `orders` only if it misses, because
+    // the two have INDEPENDENT id sequences - order #7 in one has nothing to
+    // do with order #7 in the other. So "check both" cannot be a single
+    // untyped lookup by id: doing that would let a super agent relabel an
+    // unrelated wallet order that happened to share a number with one of
+    // theirs.
+    //
+    // The ORDER TYPE IS PROVEN BY THE TABLE IT CAME FROM, and both carry the
+    // owner, so ownership is checked identically either way. A wallet order
+    // with a NULL owner is skipped rather than guessed at - the backfill
+    // deliberately refuses to guess (20261005_001), so those rows are left to
+    // support rather than opened up to whichever agent asks first.
+    const { data: agentOrder, error: agentOrderError } = await admin
       .from("agent_orders")
       .select("id, agent_id, super_agent_id, status, jehuca_order_id, settlement_status")
       .eq("id", orderId)
       .maybeSingle();
-    if (orderError) throw orderError;
+    if (agentOrderError) throw agentOrderError;
+
+    const { data: walletOrder, error: walletOrderError } = agentOrder
+      ? { data: null, error: null }
+      : await admin
+          .from("orders")
+          .select("id, user_id, super_agent_id, status, jehuca_order_id")
+          .eq("id", orderId)
+          .eq("buyer_type", "sub_agent")
+          .maybeSingle();
+    if (walletOrderError) throw walletOrderError;
+
+    const order = agentOrder || walletOrder;
+    // Which table the row actually came from. Drives the write below, so the
+    // status can never be recorded against the wrong one.
+    const isWalletOrder = !agentOrder && Boolean(walletOrder);
     if (!order) return respond({ error: "Order not found" }, 404);
 
     // Admins keep the existing escalation route, so this does not become a
     // second, narrower admin path.
     if (!identityIsAdmin(identity)) {
+      // `super_agent_id` is the owner on BOTH shapes: stamped by `verify-payment`
+      // on the Paystack branch, added and back-filled by 20261005_001 on the
+      // wallet branch. Same check, same terms.
       if (order.super_agent_id !== identity.id) {
         // 403, not 404-by-silence. The order exists but is not this super
         // agent's to touch. Deliberately does NOT confirm anything about the
@@ -433,20 +470,28 @@ Deno.serve(async (req) => {
 
     const settles = SETTLING_STATUSES.includes(newStatus);
 
+    // `orders` has no `settlement_status` column - it is a customer table and
+    // carries no settlement of its own - so the mirror flag is only ever set on
+    // the agent shape. Writing one there would be a 42703 on every wallet order.
+    const canSettleMirror =
+      settles && !isWalletOrder && order.settlement_status !== "settled";
+
     const patch: Record<string, unknown> = { status: newStatus };
     // Only ever moves pending -> settled. Never the reverse, which would be a
     // refund. See the asymmetry note above.
-    if (settles && order.settlement_status !== "settled") {
+    if (canSettleMirror) {
       patch.settlement_status = "settled";
     }
 
+    // Writes to the table the row was READ from. Hardcoding `agent_orders` here
+    // is what made every wallet order a silent no-op-then-404.
     const { error: updateError } = await admin
-      .from("agent_orders")
+      .from(isWalletOrder ? "orders" : "agent_orders")
       .update(patch)
       .eq("id", orderId);
     if (updateError) {
       console.error(
-        "[SuperAgentOrderStatus] agent_orders update failed:",
+        `[SuperAgentOrderStatus] ${isWalletOrder ? "orders" : "agent_orders"} update failed:`,
         updateError,
       );
       return respond({ error: "Failed to update the order" }, 500);
@@ -456,8 +501,12 @@ Deno.serve(async (req) => {
     // on order_id, which is the column `verify-payment` populates for agent
     // orders, rather than payment_reference - that is NULL on historical agent
     // rows predating migration 20260926_008.
+    //
+    // A wallet order's payment row is ALREADY `settled` at creation - the
+    // wallet was debited and confirmed in one request - so there is nothing to
+    // mirror and the extra write would be redundant.
     let ledgerUpdated = false;
-    if (order.settlement_status !== "settled" && settles) {
+    if (canSettleMirror) {
       const { error: ledgerError } = await admin
         .from("payment_transactions")
         .update({ settlement_status: "settled" })
@@ -476,6 +525,10 @@ Deno.serve(async (req) => {
 
     console.log("[SuperAgentOrderStatus] order status updated", {
       order_id: orderId,
+      // Which table the write landed on. Logged because the two shapes are
+      // indistinguishable in the request body, so this is the only way to tell
+      // from the logs which path a given call took.
+      shape: isWalletOrder ? "wallet (orders)" : "paystack (agent_orders)",
       from: currentStatus,
       to: newStatus,
       actor: identity.id,
@@ -485,6 +538,7 @@ Deno.serve(async (req) => {
     return respond({
       success: true,
       order_id: orderId,
+      order_type: isWalletOrder ? "regular" : "agent",
       previous_status: order.status,
       status: newStatus,
       settled: settles,

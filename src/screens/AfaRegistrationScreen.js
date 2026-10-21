@@ -22,6 +22,11 @@ import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
+import { copyToClipboard } from "../lib/clipboard";
+import {
+  buildAfaRegistrationText,
+  getAfaStatusLabel,
+} from "../lib/afaStatus";
 
 const escapeJs = (value) =>
   String(value ?? "")
@@ -83,6 +88,23 @@ export default function AfaRegistrationScreen({ navigation }) {
   const [webPaymentRequested, setWebPaymentRequested] = useState(false);
   const [paymentCompleted, setPaymentCompleted] = useState(false);
   const [requestingAnother, setRequestingAnother] = useState(false);
+  // The caller's wallet balance, and whether they may pay from a wallet at
+  // all. Both come from the server with the status, because only the server
+  // knows the caller's real role and wallet ownership.
+  //
+  // A sub agent buys against their OWN mirrored balance, which is a ceiling
+  // on what they may spend rather than money of their own - so the number
+  // shown to them is their spending power, and it is what they can act on.
+  const [walletBalance, setWalletBalance] = useState(null);
+  const [canPayFromWallet, setCanPayFromWallet] = useState(false);
+  // Which payment method the user has CHOSEN.
+  //
+  // The default is the wallet when the caller has one, because it is the
+  // cheaper and faster route. A sub agent can switch to Paystack instead -
+  // which matters when their mirrored balance is empty but they still need to
+  // register. A super agent cannot: a registration they are entitled to buy
+  // from their own wallet is always bought from that wallet.
+  const [paymentMethod, setPaymentMethod] = useState("wallet");
 
   const loadRegistration = useCallback(async () => {
     try {
@@ -106,6 +128,10 @@ export default function AfaRegistrationScreen({ navigation }) {
           : String(data.ownAgentPricing.sub_agent_base_price),
       );
       setQuotedFee(data?.quotedFee == null ? null : Number(data.quotedFee));
+      setWalletBalance(
+        data?.walletBalance == null ? null : Number(data.walletBalance),
+      );
+      setCanPayFromWallet(Boolean(data?.canPayFromWallet));
     } catch (error) {
       showError(
         "AFA Registration",
@@ -251,10 +277,26 @@ export default function AfaRegistrationScreen({ navigation }) {
     try {
       const { data, error } = await supabase.functions.invoke(
         getEdgeFunctionName("afa-registration"),
-        { body: { action: "createRegistration", ...form } },
+        {
+          body: {
+            action: "createRegistration",
+            ...form,
+            // The server decides what is actually allowed - this is the
+            // user's PREFERENCE, not a request they can force.
+            paymentMethod: canPayFromWallet ? paymentMethod : "paystack",
+          },
+        },
       );
       if (error) throw error;
-      if (data?.success && data.registration?.status === "active") {
+      // A WALLET payment completes the registration server-side, so the
+      // response carries the finished registration and there is no payment
+      // sheet to open. This is the path for a super agent AND for a sub agent
+      // paying from their balance.
+      if (
+        data?.success &&
+        (data.registration?.status === "active" ||
+          data.registration?.status === "approved")
+      ) {
         showSuccess(
           "Registration Complete",
           "The registration fee was paid from your wallet.",
@@ -281,8 +323,35 @@ export default function AfaRegistrationScreen({ navigation }) {
   };
 
   const activeRegistration = registrations.find(
-    (item) => item.status === "active",
+    (item) => item.status === "active" || item.status === "approved",
   );
+
+  // COPY THE REGISTRATION DETAILS.
+  //
+  // A user who has just registered often needs to show somebody else the
+  // details - an AFA agent on the phone, a family member, a support chat. Until
+  // now the only way to do that was to read the screen aloud or retype it.
+  //
+  // The copied text is PLAIN TEXT and self-contained, because the recipient
+  // usually does not have this app. It carries the STATUS first, since that is
+  // the one fact the person receiving it is checking.
+  const copyRegistration = async (registration) => {
+    if (!registration) return;
+    const copied = await copyToClipboard(
+      buildAfaRegistrationText(registration),
+    );
+    if (copied) {
+      showSuccess(
+        "Copied",
+        "The registration details were copied to your clipboard.",
+      );
+    } else {
+      showError(
+        "Copy unavailable",
+        "This build cannot copy to the clipboard. Please update the app and try again.",
+      );
+    }
+  };
   // Role from `public.user_profiles` via the profile context. The old read of
   // `user_metadata.role` is self-assignable, and `app_metadata.role` lives in
   // the access token - neither may decide whether this account may set a
@@ -383,7 +452,7 @@ export default function AfaRegistrationScreen({ navigation }) {
           <View style={styles.heroCopy}>
             <Text style={styles.heroTitle}>
               {activeRegistration
-                ? "Registration Active"
+                ? getAfaStatusLabel(activeRegistration.status)
                 : "Register with confidence"}
             </Text>
             <Text style={styles.heroText}>
@@ -414,7 +483,9 @@ export default function AfaRegistrationScreen({ navigation }) {
               </View>
               <View style={styles.activeStatus}>
                 <View style={styles.activeDot} />
-                <Text style={styles.activeStatusText}>Active</Text>
+                <Text style={styles.activeStatusText}>
+                  {getAfaStatusLabel(activeRegistration.status)}
+                </Text>
               </View>
             </View>
             <View style={styles.activeDivider} />
@@ -450,6 +521,21 @@ export default function AfaRegistrationScreen({ navigation }) {
                 {activeRegistration.payment_reference}
               </Text>
             </View>
+            {/* COPY THE DETAILS.
+                The one-tap way to show somebody the registration without
+                retyping it. It sits above "Request another registration"
+                because it is the action a user needs most often once the
+                registration exists. */}
+            <TouchableOpacity
+              style={styles.copyButton}
+              onPress={() => copyRegistration(activeRegistration)}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel="Copy registration details to clipboard"
+            >
+              <Ionicons name="copy-outline" size={18} color={c.mintDim} />
+              <Text style={styles.copyButtonText}>Copy registration details</Text>
+            </TouchableOpacity>
             <TouchableOpacity
               style={styles.requestAnotherButton}
               onPress={() => {
@@ -480,12 +566,21 @@ export default function AfaRegistrationScreen({ navigation }) {
               <View>
                 <Text style={styles.feeLabel}>REGISTRATION FEE</Text>
                 <Text style={styles.feeNote}>
-                  {isSuperAgent
-                    ? "Paid from your Super Agent wallet"
+                  {canPayFromWallet
+                    ? "Paid from your wallet balance"
                     : paystackSubaccount
                       ? "Paid to your super agent"
                       : "Pay securely to the platform account"}
                 </Text>
+                {/* The balance the user will be drawn down from.
+                    Only shown when there IS one - a normal user paying by
+                    Paystack has no wallet, and a "GHS 0.00" would read as a
+                    figure rather than as the absence of one. */}
+                {canPayFromWallet && walletBalance != null ? (
+                  <Text style={styles.feeBalance}>
+                    Wallet balance: GHS {Number(walletBalance).toFixed(2)}
+                  </Text>
+                ) : null}
               </View>
               {/* The tiered quote, not the global registration_fee: a
                   sub-agent may be charged their own super agent's price. */}
@@ -642,20 +737,75 @@ export default function AfaRegistrationScreen({ navigation }) {
               />
             </View>
 
+            {/* THE PAYMENT METHOD TOGGLE.
+                Only for a SUB AGENT. A super agent always pays from their own
+                wallet - that is the deal they have with the platform - so
+                giving them a choice would only offer a worse way to pay.
+
+                A sub agent gets the choice because their mirrored balance can
+                be empty while they still need to register, and a wallet-only
+                path would leave them stuck. */}
+            {canPayFromWallet && !isSuperAgent ? (
+              <View style={styles.methodToggle}>
+                {[
+                  {
+                    value: "wallet",
+                    label: "Wallet",
+                    icon: "wallet-outline",
+                  },
+                  {
+                    value: "paystack",
+                    label: "Paystack",
+                    icon: "card-outline",
+                  },
+                ].map((method) => {
+                  const active = paymentMethod === method.value;
+                  return (
+                    <TouchableOpacity
+                      key={method.value}
+                      style={[
+                        styles.methodOption,
+                        active && styles.methodOptionActive,
+                      ]}
+                      onPress={() => setPaymentMethod(method.value)}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected: active }}
+                      accessibilityLabel={`Pay with ${method.label}`}
+                    >
+                      <Ionicons
+                        name={method.icon}
+                        size={15}
+                        color={active ? c.mintDim : c.textMuted}
+                      />
+                      <Text
+                        style={[
+                          styles.methodOptionText,
+                          active && styles.methodOptionTextActive,
+                        ]}
+                      >
+                        {method.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ) : null}
+
             <TouchableOpacity
               style={[styles.payButton, submitting && styles.disabled]}
               onPress={submitRegistration}
               disabled={submitting}
             >
               <Ionicons
-                name={isSuperAgent ? "wallet" : "shield-checkmark"}
+                name={canPayFromWallet ? "wallet" : "shield-checkmark"}
                 size={20}
                 color={c.onAccent}
               />
               <Text style={styles.payButtonText}>
                 {submitting
                   ? "Processing..."
-                  : isSuperAgent
+                  : canPayFromWallet && paymentMethod === "wallet"
                     ? "Register from Wallet"
                     : "Register & Pay"}
               </Text>
@@ -846,6 +996,39 @@ const useAfaStyles = (c, topInset = 0) => {
     },
     feeAmount: { fontFamily: fonts.display, fontSize: 22, color: c.mint },
 
+    // The wallet balance the fee will be drawn down from. Sits under the
+    // note so the reader sees WHAT the fee is, then WHERE the money comes
+    // from, then HOW MUCH is there.
+    feeBalance: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+      marginTop: 4,
+    },
+
+    /* ---------- Copy registration ---------- */
+    // Quietly secondary to the primary action, but above "Request another
+    // registration" - it is what a user reaches for most often once the
+    // registration exists.
+    copyButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 8,
+      backgroundColor: `${c.mint}14`,
+      borderColor: `${c.mint}33`,
+      borderWidth: 1,
+      borderRadius: 16,
+      paddingVertical: 14,
+      marginTop: 14,
+      marginBottom: 10,
+    },
+    copyButtonText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.mintDim,
+    },
+
     /* ---------- Super agent sub-agent AFA price ---------- */
     // Deliberately quieter than the fee card: this is a configuration surface
     // for a super agent, not the primary action of the screen.
@@ -961,6 +1144,39 @@ const useAfaStyles = (c, topInset = 0) => {
       marginLeft: 6,
     },
     idTypeTextActive: { color: c.mint },
+
+    /* ---------- Payment method toggle ---------- */
+    // A segmented control, so the two methods read as alternatives rather
+    // than as two separate buttons.
+    methodToggle: {
+      flexDirection: "row",
+      gap: 9,
+      marginBottom: 14,
+    },
+    methodOption: {
+      flex: 1,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      borderRadius: 14,
+      backgroundColor: c.surface,
+      paddingVertical: 12,
+    },
+    methodOptionActive: {
+      backgroundColor: `${c.mint}14`,
+      borderColor: c.mint,
+    },
+    methodOptionText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textMuted,
+    },
+    methodOptionTextActive: {
+      color: c.mintDim,
+    },
 
     payButton: {
       flexDirection: "row",
