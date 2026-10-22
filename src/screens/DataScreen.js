@@ -1,4 +1,4 @@
-﻿import React, {
+import React, {
   useState,
   useEffect,
   useMemo,
@@ -138,6 +138,13 @@ export default function DataScreen({ navigation, route }) {
     profile,
   } = useProfile();
   const bundleSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
+
+  // A SUB-AGENT specifically: `isAgent` is true for sub-agents AND super
+  // agents (both may buy from an agent package list), and `isSuperAgentUser`
+  // distinguishes the two. This flag is the "sub-agent and not a super agent"
+  // test, which is what the UI needs wherever the two roles must be treated
+  // differently - e.g. hiding the base-price/markup split.
+  const isAgentSubAgent = isAgent && !isSuperAgentUser;
 
   useEffect(() => {
     let active = true;
@@ -2508,10 +2515,26 @@ export default function DataScreen({ navigation, route }) {
           rows={[
             { label: "Package", value: walletConfirm.bundle?.name || "-" },
             { label: "Recipient", value: walletConfirm.phone },
-            // Split base and markup only when there IS a markup. A zero row
-            // would imply a fee that does not exist, the same reason there is
-            // no transaction-fee row.
-            ...(walletConfirm.breakdown.tierExtra > 0
+            // Split base and markup only when there IS a markup AND the buyer
+            // is entitled to see the split.
+            //
+            // A SUB-AGENT buys at their super agent's published offer price,
+            // which is `base_price + tier_extra`. The base price and the
+            // markup are the super agent's internal cost and margin - the
+            // sub-agent has no business seeing how the offer is built up, and
+            // showing them invites the sub-agent to believe they are being
+            // overcharged by a markup that is simply the price they agreed to
+            // pay. So for a sub-agent the dialog quotes the price on the card
+            // only, as a single "Package price" row.
+            //
+            // A zero row would imply a fee that does not exist, the same
+            // reason there is no transaction-fee row.
+            //
+            // A SUPER AGENT keeps the split: the markup is their own margin
+            // on a purchase out of their own wallet, and seeing it here is
+            // what makes the dialog agree with the bundle card.
+            ...(walletConfirm.breakdown.tierExtra > 0 &&
+            !isAgentSubAgent
               ? [
                   {
                     label: "Base price",
@@ -2519,7 +2542,8 @@ export default function DataScreen({ navigation, route }) {
                   },
                 ]
               : []),
-            ...(walletConfirm.breakdown.tierExtra > 0
+            ...(walletConfirm.breakdown.tierExtra > 0 &&
+            !isAgentSubAgent
               ? [
                   {
                     label: "Super Agent markup",
@@ -2527,14 +2551,31 @@ export default function DataScreen({ navigation, route }) {
                   },
                 ]
               : []),
+            // The single price row a sub-agent sees in place of the split.
+            // For a sub-agent the card price IS the total, so the separate
+            // "Total from wallet" row would repeat the same figure - the
+            // package price row carries the emphasis instead.
+            ...(isAgentSubAgent
+              ? [
+                  {
+                    label: "Package price",
+                    value: formatCedi(walletConfirm.breakdown.grossAmount),
+                    emphasis: true,
+                  },
+                ]
+              : []),
             // The 1.95% Paystack charge is paid at top-up, not here, so no fee
             // row: showing a 0.00 "Transaction fee" would imply a charge that
             // does not exist and hide where the money actually went.
-            {
-              label: "Total from wallet",
-              value: formatCedi(walletConfirm.breakdown.grossAmount),
-              emphasis: true,
-            },
+            ...(!isAgentSubAgent
+              ? [
+                  {
+                    label: "Total from wallet",
+                    value: formatCedi(walletConfirm.breakdown.grossAmount),
+                    emphasis: true,
+                  },
+                ]
+              : []),
             ...(walletConfirm.agentBalance != null
               ? [
                   {

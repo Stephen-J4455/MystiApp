@@ -52,9 +52,27 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-# shellcheck disable=SC1090
+# THE ENV FILE IS SOURCED, NOT PARSED.
+#
+# `source` is used so that the values become shell variables, and the
+# `set -a` above exports them for the `supabase` child processes.
+#
+# The env file is edited on Windows and therefore has CRLF line endings, and
+# a CRLF in a sourced file leaves a trailing `\r` on the last variable of each
+# line. That `\r` is then part of the VALUE - so a project id ends up as
+# "sffgznknlmqxtikkyhwu\r" and every API call fails with an error that names
+# the wrong thing entirely.
+#
+# `tr -d '\r'` strips them. This is done to a temp copy rather than in place
+# so the real env file on disk is never modified.
+#
+# The same applies to THIS SCRIPT: the `.ps1` sibling was written on Windows
+# and the `.sh` alongside it inherited CRLF endings, so bash reported
+# "invalid option name" and "$'\r': command not found" before running a
+# single line of it.
 set -a
-source "$ENV_FILE"
+# shellcheck disable=SC1090
+source <(tr -d '\r' < "$ENV_FILE")
 set +a
 
 PROJECT_ID=""

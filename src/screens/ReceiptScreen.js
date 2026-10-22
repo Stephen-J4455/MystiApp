@@ -19,7 +19,7 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getStatusTone, fonts } from "../components/theme";
 import { splitReceiptNumber } from "../lib/receiptNumber";
-import { formatOrderStatusLabel, resolveOrderStatus, isRealStatus } from "../lib/orderStatus";
+import { formatOrderStatusLabel, resolveOrderStatus } from "../lib/orderStatus";
 import {
   canReorderHeldOrders,
   isHeldWindowElapsed,
@@ -291,40 +291,42 @@ export default function ReceiptScreen({ navigation, route }) {
     //                         whether data actually landed, and often newer than
     //                         ours.
     //
-    // The old badge showed ONE of them via `resolveOrderStatus`, which picks the
-    // provider status when it is real and falls back to ours otherwise. That is the
-    // correct answer to "what state is this order in?" - but it destroys the one
-    // thing worth knowing when they DISAGREE:
+    // THEY CAN DISAGREE - `status=completed` while the provider still says
+    // `processing` is the ordinary case, and it means the package has not
+    // arrived yet even though we think we finished.
     //
-    //   status=completed, jehuca=processing
-    //       We think we finished. The provider says it has not. The package has
-    //       not arrived and nothing is wrong yet - but this order needs watching,
-    //       and the old badge made it look settled.
+    // THAT GAP WAS ONCE SHOWN TO THE CUSTOMER, and it was a mistake. Both
+    // columns were rendered side by side under "Provider status" and "Our
+    // status", with a "Sources differ" flag and a note explaining which one to
+    // believe. It was built for a support audience - on a support ticket ("I
+    // paid and nothing arrived") that gap is the whole question - but this
+    // screen is the CUSTOMER's receipt. A customer cannot call Jehucal, and
+    // cannot tell which of the two is "right"; showing them that two systems
+    // disagree about their own order makes a settled purchase look undecided.
     //
-    //   status=processing, jehuca=completed
-    //       Data landed but our own record never caught up. Harmless, and the
-    //       customer is owed reassurance.
+    // So the panel shows ONE status: the resolved one, which is the provider's
+    // value when it is real and ours otherwise. That is the same value the
+    // history card shows and the same value its status spine is coloured from,
+    // so the receipt and the list can never disagree.
     //
-    // On a support ticket ("I paid and nothing arrived") that gap is the whole
-    // question, and one merged badge cannot answer it. So both are shown, each
-    // labelled with what it actually is.
+    // The provider status is still fetched, still persisted, and still what the
+    // platform uses internally. It is simply not narrated to the customer.
+    //
+    // THE STATUS SHOWN TO THE CUSTOMER.
+    //
+    // `rawStatus` (the resolved status) is the only one that is rendered. The
+    // provider's own column is still fetched and persisted, and it is still
+    // what the platform uses internally to decide whether data actually
+    // landed - but it is not narrated here, because a customer cannot act on
+    // the difference between two systems' view of their own order.
+    //
+    // The two columns used to be shown side by side, under "Provider status"
+    // and "Our status", with a "Sources differ" flag and a note saying which
+    // one to believe. That was a support tool, on a customer-facing screen,
+    // and it made settled orders look undecided.
     //
     // A top-up has no provider leg at all - no package was dispatched - so the
-    // panel collapses to its single row rather than rendering an "Awaiting
-    // provider" that would imply a dispatch that never happened.
-    const internalStatus = isRealStatus(transaction?.status)
-      ? transaction.status.trim()
-      : null;
-    const providerStatus = isRealStatus(transaction?.jehuca_order_status)
-      ? transaction.jehuca_order_status.trim()
-      : null;
-    // Whether the two tell different stories. Drives the disagreement note, and is
-    // the only case where the panel needs to draw attention to itself.
-    const statusDisagreement =
-      !isTopup &&
-      internalStatus != null &&
-      providerStatus != null &&
-      internalStatus.toLowerCase() !== providerStatus.toLowerCase();
+    // panel shows its Paystack status instead.
 
       // The settlement block belongs to a super agent looking at somebody else's
       // purchase. Gated on the ROW, not just the role: a super agent's own order is
@@ -413,82 +415,41 @@ export default function ReceiptScreen({ navigation, route }) {
                   </View>
                 ) : null}
 
-        {/* ======================================================================
-                    STATUS - BOTH TRACKS
+                {/* ======================================================================
+                    STATUS - ONE TRACK
 
-                    Two rows, two sources, labelled with what each one actually is.
-                    The headline is the PROVIDER status where we have one, because on a
-                    dispute the question is always "did the data land?", and only the
-                    provider knows.
+                    ONE row, ONE status.
 
-                    The old single badge collapsed these via `resolveOrderStatus`, which
-                    is right for "what state is this?" and useless for "why do I think
-                    it says one thing and the provider another?" See the note where
-                    `statusDisagreement` is computed.
+                    This used to show two rows - "Provider status" and "Our status" -
+                    plus a "Sources differ" flag and a note explaining which one to
+                    believe. That was built for a support audience, but this screen is
+                    the CUSTOMER's receipt, and the distinction is internal
+                    information: a customer cannot call Jehucal, and showing them
+                    that two systems disagree about their own order makes a settled
+                    purchase look undecided.
+
+                    The status shown is the RESOLVED one - the provider's value when
+                    it is real, ours otherwise - which is the same value the history
+                    card and its status spine use, so the two screens can never
+                    disagree.
+
+                    The provider status is still fetched, still persisted, and still
+                    the authority internally. It is simply not narrated to the
+                    customer.
                     ====================================================================== */}
                 <View style={s.statusPanel}>
                   <View style={s.statusPanelHead}>
                     <Text style={s.statusPanelTitle}>Status</Text>
-                    {statusDisagreement ? (
-                      <View style={s.statusFlag}>
-                        <Ionicons name="git-compare-outline" size={11} color={c.amber} />
-                        <Text style={s.statusFlagText}>Sources differ</Text>
-                      </View>
-                    ) : null}
           </View>
 
-                  {/* Track 1 - the provider. First because it is the authority on
-                      delivery, and because on a top-up this row does not exist at all. */}
-                  {isTopup ? null : (
-                    <View style={s.statusTrack}>
-                      <View style={s.statusTrackHead}>
-                        <View style={s.statusTrackLabelWrap}>
-                          <Ionicons
-                            name="radio-outline"
-                            size={13}
-                            color={c.textMuted}
-                          />
-                          <Text style={s.statusTrackLabel}>Provider status</Text>
-                        </View>
-                        {providerStatus ? (
-                          <View
-                            style={[
-                              s.statusChip,
-                              { backgroundColor: getStatusColor(providerStatus) },
-                            ]}
-                          >
-                            <Text style={s.statusChipText}>
-                              {getStatusText(providerStatus)}
-                            </Text>
-                          </View>
-                        ) : (
-                          <Text style={s.statusPending}>Not reported yet</Text>
-                        )}
-                      </View>
-                      {/* A provider id that has aged out of the ~10-order retention
-                          window still needs saying, so a failed refresh reads as "we
-                          checked and it is gone" rather than as "we never tried". */}
-                      {transaction.jehuca_order_id ? (
-                        <Text style={s.statusTrackMeta}>
-                          Reference {transaction.jehuca_order_id}
-                        </Text>
-                      ) : null}
-                    </View>
-                  )}
-
-                  {/* Track 2 - ours. Always shown, including for a top-up, because it is
+                  {/* THE STATUS. Always shown, including for a top-up, because it is
                       the app's own record of what it decided. */}
-                  <View
-                    style={[
-                      s.statusTrack,
-                      isTopup ? null : s.statusTrackDivided,
-                    ]}
-                  >
+                  <View style={s.statusTrack}>
                     <View style={s.statusTrackHead}>
                       <View style={s.statusTrackLabelWrap}>
                         <Ionicons name="apps-outline" size={13} color={c.textMuted} />
                         <Text style={s.statusTrackLabel}>
-                          {isTopup ? "Paystack" : "Our status"}
+                          {isTopup ? "Paystack" : "Status"}
                         </Text>
                       </View>
                       <View
@@ -502,22 +463,19 @@ export default function ReceiptScreen({ navigation, route }) {
                                   ? tones.failed
                                   : tones.pending
                               )?.color
-                              // `internalStatus` ONLY - never `internalStatus ||
-                              // rawStatus`.
+                              // THE RESOLVED STATUS.
                               //
-                              // `rawStatus` is the RESOLVED status, which prefers the
-                              // provider's value whenever it is real. Falling back to it
-                              // therefore made the internal track print the PROVIDER's
-                              // word, so both rows showed the same status and the panel
-                              // claimed two sources while displaying one fact twice - and
-                              // it did so silently, which is worse than not showing the
-                              // split at all.
+                              // `rawStatus` is the resolved status - the provider's
+                              // value when it is real, ours otherwise. That is the
+                              // SAME value the history card shows and the SAME value
+                              // its status spine is coloured from, so the receipt and
+                              // the list can never disagree about an order.
                               //
-                              // When our own column is blank there is nothing to report
-                              // for this track. It renders as unresolved below rather
-                              // than borrowing the other track's answer.
-                              : internalStatus
-                              ? getStatusColor(internalStatus)
+                              // The provider's own column is deliberately not
+                              // narrated to the customer; it is fetched, persisted and
+                              // used internally, but it is not shown.
+                              : rawStatus
+                              ? getStatusColor(rawStatus)
                               : c.surfaceHover,
                           },
                         ]}
@@ -529,13 +487,13 @@ export default function ReceiptScreen({ navigation, route }) {
                             // fallback surface it would be near-invisible. Switched with
                             // the chip so an unresolved track reads as "not reported"
                             // rather than as blank text.
-                            !isTopup && !internalStatus ? s.statusChipTextNeutral : null,
+                            !isTopup && !rawStatus ? s.statusChipTextNeutral : null,
                           ]}
                         >
                           {isTopup
                             ? displayStatusLabel
-                            : internalStatus
-                              ? getStatusText(internalStatus)
+                            : rawStatus
+                              ? getStatusText(rawStatus)
                               : "Not recorded"}
                         </Text>
                       </View>
@@ -546,32 +504,6 @@ export default function ReceiptScreen({ navigation, route }) {
                       </Text>
                     ) : null}
                   </View>
-
-                  {/* The one place the two statuses are put side by side and named as a
-                      conflict. Written as an explanation rather than an alarm: a
-                      mismatch is usually a lag between our write and the provider's, not
-                      a lost order. */}
-                  {statusDisagreement ? (
-                    <View style={s.statusNote}>
-                      <Ionicons
-                        name="information-circle-outline"
-                        size={15}
-                        color={c.amber}
-                      />
-                      <Text style={s.statusNoteText}>
-                        Our record says{" "}
-                        <Text style={s.statusNoteStrong}>
-                          {getStatusText(internalStatus)}
-                        </Text>{" "}
-                        while the provider reports{" "}
-                        <Text style={s.statusNoteStrong}>
-                          {getStatusText(providerStatus)}
-                        </Text>
-                        . The provider's status is the one that reflects whether the
-                        data actually landed.
-                      </Text>
-                    </View>
-                  ) : null}
                 </View>
 
         {/* Retry a held order. Only rendered for a super agent, only for a row
@@ -1048,30 +980,8 @@ const buildStyles = (c) =>
         // Amber rather than rose: a mismatch is almost always a lag between our
         // write and the provider's, not a lost order. Alarming it would make people
         // panic over bookkeeping.
-        statusFlag: {
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 4,
-          backgroundColor: `${c.amber}1F`,
-          paddingHorizontal: 9,
-          paddingVertical: 4,
-          borderRadius: 999,
-        },
-        statusFlagText: {
-          fontFamily: fonts.bodySemi,
-          fontSize: 9.5,
-          letterSpacing: 0.6,
-          textTransform: "uppercase",
-          color: c.amber,
-        },
         statusTrack: {
           gap: 4,
-        },
-        statusTrackDivided: {
-          marginTop: 12,
-          paddingTop: 12,
-          borderTopWidth: StyleSheet.hairlineWidth,
-          borderTopColor: c.hairline,
         },
         statusTrackHead: {
           flexDirection: "row",
@@ -1108,37 +1018,11 @@ const buildStyles = (c) =>
         statusChipTextNeutral: {
           color: c.textMuted,
         },
-        statusPending: {
-          fontFamily: fonts.body,
-          fontSize: 12,
-          color: c.textMuted,
-          fontStyle: "italic",
-        },
         statusTrackMeta: {
           fontFamily: fonts.body,
           fontSize: 11,
           color: c.textMuted,
           marginTop: 2,
-        },
-        statusNote: {
-          flexDirection: "row",
-          gap: 8,
-          marginTop: 13,
-          paddingTop: 12,
-          borderTopWidth: StyleSheet.hairlineWidth,
-          borderTopColor: c.hairline,
-          alignItems: "flex-start",
-        },
-        statusNoteText: {
-          flex: 1,
-          fontFamily: fonts.body,
-          fontSize: 12,
-          lineHeight: 18,
-          color: c.textSecondary,
-        },
-        statusNoteStrong: {
-          fontFamily: fonts.bodyBold,
-          color: c.textPrimary,
         },
 
         /* ---------- Settlement ---------- */

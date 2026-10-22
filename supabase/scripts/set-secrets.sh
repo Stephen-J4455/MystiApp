@@ -24,9 +24,16 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 
-# shellcheck disable=SC1090
+# CRLF-SAFE SOURCE.
+#
+# The env file is edited on Windows and has CRLF line endings. A CRLF left on
+# the end of a sourced line becomes part of the VALUE, so a project id would
+# end up as "sffgznknlmqxtikkyhwu\r" and every API call would fail with an
+# error that names the wrong thing entirely. `tr -d '\r'` strips them, reading
+# from a process substitution so the real env file on disk is never modified.
 set -a
-source "$ENV_FILE"
+# shellcheck disable=SC1090
+source <(tr -d '\r' < "$ENV_FILE")
 set +a
 
 PROJECT_ID=""

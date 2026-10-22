@@ -494,7 +494,7 @@ Deno.serve(async (req) => {
           .from("afa_registrations")
           .select("id")
           .eq("registered_user_id", user.id)
-          .eq("status", "pending_payment")
+          .eq("status", "pending")
           .maybeSingle();
       if (pendingLookupError) throw pendingLookupError;
       if (pendingRegistration) {
@@ -641,7 +641,7 @@ Deno.serve(async (req) => {
           currency: settings.currency || "GHS",
           payment_method: paymentMethod,
           payment_reference: reference,
-          status: "pending_payment",
+          status: "pending",
         })
         .select()
         .single();

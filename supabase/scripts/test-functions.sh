@@ -25,9 +25,16 @@ if [[ -z "$URL" ]]; then
     echo "Missing $ENV_FILE. Copy $ENV_FILE.template and fill in your values first." >&2
     exit 1
   fi
-  # shellcheck disable=SC1090
+  # CRLF-SAFE SOURCE.
+  #
+  # The env file is edited on Windows and has CRLF line endings. A CRLF left
+  # on the end of a sourced line becomes part of the VALUE, so a URL would
+  # end up as "https://...\r" and every request would fail. `tr -d '\r'`
+  # strips them, reading from a process substitution so the real env file on
+  # disk is never modified.
   set -a
-  source "$ENV_FILE"
+  # shellcheck disable=SC1090
+  source <(tr -d '\r' < "$ENV_FILE")
   set +a
   if [[ "$ENV_NAME" == "test" ]]; then
     URL_CANDIDATES=(EXPO_PUBLIC_SUPABASE_TEST_URL SUPABASE_TEST_URL SUPABASE_URL_TEST)

@@ -2,66 +2,33 @@
 // AFA registration status vocabulary
 // ===========================================================================
 //
-// WHY THIS FILE EXISTS
-// --------------------
-// The `afa_registrations.status` column stores the PAYMENT's state, not the
-// REGISTRATION's. `pending_payment` and `active` are what the server writes,
-// and both describe money rather than approval:
-//
-//   pending_payment  - the money has not landed yet
-//   active           - the money landed, and the registration is live
-//
-// A user reading "Pending payment" for a registration they have PAID for
-// learns that their money has not gone through - which is wrong, and
-// alarming. What they actually want to know is whether the AFA has approved
-// them.
-//
-// So the words the user sees are the registration's real lifecycle:
-//
-//   Pending processing  - paid for, awaiting the AFA's approval
-//   Approved            - approved
-//
-// THE DATABASE IS NOT REWRITTEN
-// -----------------------------
-// `active` is the historical value, and rows written before today carry it.
-// The mapping lives here, on the READ side, so:
-//
-//   - every historic row reads correctly without a migration rewriting it, and
-//   - the admin app and the customer app cannot disagree about what a value
-//     means, because both import the same table.
-//
-// It also matters that the DATABASE keeps saying `active`: `finalize_afa_
-// registration_payment` sets it the moment the PAYMENT clears, which is
-// BEFORE the AFA has approved anything. Renaming it to `approved` in the
-// database would assert an approval that has not happened.
-//
-// `pending_processing` and `approved` are also real values - an admin sets
-// them from the admin app, which is where a manual approval actually happens.
+// The database status records payment progress separately from AFA review:
+// `pending` means payment is outstanding and `processing` means it was paid.
+// `approved` is set only after AFA approval. Legacy values remain readable
+// during the status migration.
 
-// The values the server may write, and the two an admin may set directly.
+// Recognized canonical statuses and legacy values kept readable during migration.
 export const AFA_STATUS_VALUES = Object.freeze([
-  "pending_payment",
-  "pending_processing",
-  "paid",
-  "active",
+  "pending",
+  "processing",
   "approved",
   "rejected",
   "refunded",
   "cancelled",
+  // Legacy database values.
+  "pending_payment",
+  "pending_processing",
+  "paid",
+  "active",
 ]);
 
-// The words shown to a user, per stored value.
-//
-// `active` and `approved` both read as "Approved" - `active` is the
-// historical name for the same state. `pending_payment` and
-// `pending_processing` both read as "Pending processing" - the first means
-// "money not in yet", the second "money in, awaiting approval", and neither
-// distinction is one the user can act on.
 const AFA_STATUS_LABELS = {
-  pending_payment: "Pending processing",
-  pending_processing: "Pending processing",
-  paid: "Pending processing",
-  active: "Approved",
+  pending: "Pending",
+  pending_payment: "Pending",
+  processing: "Processing",
+  pending_processing: "Processing",
+  paid: "Processing",
+  active: "Processing",
   approved: "Approved",
   rejected: "Rejected",
   refunded: "Refunded",
@@ -72,21 +39,19 @@ export const getAfaStatusLabel = (status) => {
   const key = String(status || "")
     .trim()
     .toLowerCase();
-  return AFA_STATUS_LABELS[key] || "Pending processing";
+  return AFA_STATUS_LABELS[key] || "Pending";
 };
 
 /**
  * The tone a status renders in.
  *
- * Deliberately keyed on the USER-FACING state, not the stored value, so
- * `active` and `approved` share a colour and `pending_payment` and
- * `pending_processing` share another.
+ * Pending and processing share a tone; approved has its own tone.
  */
 export const getAfaStatusTone = (status) => {
   const key = String(status || "")
     .trim()
     .toLowerCase();
-  if (key === "active" || key === "approved") {
+  if (key === "approved") {
     return { background: "#e6f7ed", text: "#16834A" };
   }
   if (key === "rejected") return { background: "#fdecea", text: "#b42318" };
@@ -96,18 +61,13 @@ export const getAfaStatusTone = (status) => {
 };
 
 /**
- * Whether a registration is awaiting the AFA's approval.
- *
- * "Paid for but not approved yet" is the state a user spends the most time
- * in, and the one the copy is written around.
+ * Whether a registration has not reached a final AFA review outcome.
  */
 export const isAfaPending = (status) => {
   const key = String(status || "")
     .trim()
     .toLowerCase();
-  return !["active", "approved", "rejected", "refunded", "cancelled"].includes(
-    key,
-  );
+  return !["approved", "rejected", "refunded", "cancelled"].includes(key);
 };
 
 /**

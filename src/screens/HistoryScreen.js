@@ -1,11 +1,10 @@
-﻿import React, { useState, useEffect, useMemo, useRef } from "react";
+﻿import React, { useState, useEffect, useMemo } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   FlatList,
   RefreshControl,
-  Animated,
   ActivityIndicator,
   StatusBar,
   Platform,
@@ -494,7 +493,6 @@ export default function HistoryScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
   const { isSuperAgent: isSuperAgentProfile, isSubAgent: isAgentProfile } =
     useProfile();
-  const skeletonOpacity = useRef(new Animated.Value(0.6)).current;
 
   useEffect(() => {
     checkAgentStatus();
@@ -507,25 +505,6 @@ export default function HistoryScreen({ navigation }) {
 
     return unsubscribe;
   }, [navigation]);
-
-  useEffect(() => {
-    const animation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(skeletonOpacity, {
-          toValue: 1,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-        Animated.timing(skeletonOpacity, {
-          toValue: 0.6,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-      ]),
-    );
-    animation.start();
-    return () => animation.stop();
-  }, [skeletonOpacity]);
 
   // Real-time updates for orders
   useEffect(() => {
@@ -1304,10 +1283,19 @@ export default function HistoryScreen({ navigation }) {
                             // only the wallet-funded shape.
                             const isSubAgentWalletOrder =
                               isSubAgent && transaction.orderType !== "agent";
-                                          // BOTH status columns, resolved independently - see the note on the
-                                          // card's status block below. `displayStatus` above is the RESOLVED
-                                          // status (provider preferred), which is right for the spine colour
-                                          // but wrong for a row that claims to show two sources.
+                                          // THE TWO STATUS COLUMNS, resolved independently.
+                                          //
+                                          // An order carries OUR internal state and the
+                                          // PROVIDER's mirrored one. They are read
+                                          // separately here, each guarded by
+                                          // `isRealStatus` so a corrupt boolean string
+                                          // ("true") can never become a status.
+                                          //
+                                          // `displayStatus` below is the RESOLVED status
+                                          // (provider preferred) and is what the card's
+                                          // SPINE is coloured from. `DualStatus` resolves
+                                          // the same way, so the spine and the pill can
+                                          // never show different words.
                                           const cardInternalStatus = isRealStatus(transaction.status)
                               ? transaction.status.trim()
                               : null;
@@ -1575,23 +1563,23 @@ export default function HistoryScreen({ navigation }) {
                                                                   </View>
                                                                 ) : (
                     <View style={s.cardFoot}>
-                                          {/* BOTH STATUSES, side by side.
+                                          {/* THE STATUS.
 
-                                              The single pill this replaced read the RESOLVED status,
-                                              which prefers the provider's value whenever it is real.
-                                              That is the right answer to "what state is this?" and
-                                              the wrong one for the question this list actually gets
-                                              asked: "is this order stuck?"
+                                              ONE status, and it is the RESOLVED one - the
+                                              provider's value when it is real, ours
+                                              otherwise. That is the right answer to "what
+                                              state is this?", and it is the SAME value the
+                                              card's status SPINE is coloured from, so the
+                                              pill and the edge rule can never disagree.
 
-                                              The case that matters is `status = completed` while the
-                                              provider still says `processing`. We think we finished,
-                                              the data has not landed, and the old pill rendered it as
-                                              settled - so a super agent scanning the list saw nothing
-                                              wrong with an order that needed watching.
-
-                                              Both columns are read independently and never fall back
-                                              to each other: a row with no provider status yet says so
-                                              rather than borrowing ours.
+                                              The provider's status used to be shown beside
+                                              ours, under a "Provider" label. It is internal
+                                              information: a customer cannot call Jehucal and
+                                              cannot tell which of the two systems is right.
+                                              Showing both made a settled order look
+                                              undecided. The provider status is still fetched
+                                              and still drives the spine - it is simply not
+                                              narrated.
 
                                               Rendered by `DualStatus`, the same component the
                                               sub-agent branch uses - the two used to be separate
@@ -1603,7 +1591,6 @@ export default function HistoryScreen({ navigation }) {
                                             providerStatus={cardProviderStatus}
                                             toneOf={statusToneOf}
                                             labelOf={getStatusText}
-                                            showProvider={!isTopup}
                                             fill
                                           />
                                           <Ionicons
@@ -1800,22 +1787,30 @@ export default function HistoryScreen({ navigation }) {
                 honestly known: it is the length of the array in memory, not a
                 claim about rows that were never loaded. */}
             {loading ? (
-              <View style={s.list}>
-                {[0, 1, 2, 3].map((index) => (
-                  <Animated.View
-                    key={`history-placeholder-${index}`}
-                    style={[s.placeholder, { opacity: skeletonOpacity }]}
-                  >
-                    <View style={s.placeholderBody}>
-                      <View style={s.placeholderLine} />
-                      <View style={s.placeholderLineShort} />
-                    </View>
-                    <View style={s.placeholderTail}>
-                      <View style={s.placeholderAmount} />
-                      <View style={s.placeholderBadge} />
-                    </View>
-                  </Animated.View>
-                ))}
+              // A CENTRED SPINNER, NOT A SKELETON.
+              //
+              // The screen used to render four shimmering placeholder cards
+              // while the first page loaded. Two problems with that:
+              //
+              //   1. THE SKELETON LIES. It shows the SHAPE of a transaction
+              //      card, so the user sees four transactions that are not
+              //      there, then watches them vanish and be replaced by
+              //      different content. A spinner says "not yet" and shows
+              //      nothing it has not got.
+              //   2. IT COSTS A FRAME EVERY TICK. The pulse was driven by an
+              //      `Animated` loop that re-rendered the whole list while
+              //      the data was arriving - the exact opposite of what a
+              //      loading state should be doing.
+              //
+              // A single centred `ActivityIndicator` says the same thing
+              // more honestly and costs nothing to animate.
+              <View style={s.loadingState}>
+                <ActivityIndicator
+                  size="large"
+                  color={c.mint}
+                  style={s.loadingSpinner}
+                />
+                <Text style={s.loadingText}>Loading your transactions…</Text>
               </View>
             ) : null}
           </>
@@ -1868,6 +1863,23 @@ export default function HistoryScreen({ navigation }) {
         }
         onEndReached={loadMore}
         onEndReachedThreshold={0.4}
+        // THE GAP BETWEEN TRANSACTION CARDS.
+        //
+        // This used to be `gap: 12` on a wrapping `View` around the whole
+        // list. That stopped working when the list became a `FlatList`:
+        // `gap` on a `ScrollView` child spaced the CARDS, but a `FlatList`
+        // renders each row as a direct child of the list, and the wrapper
+        // only ever wrapped the SKELETON. So the cards ended up flush
+        // against each other with no space at all - which on a list of
+        // rounded cards with drop shadows reads as one broken block rather
+        // than as a list of separate items.
+        //
+        // `ItemSeparatorComponent` is the right tool rather than padding
+        // every row: a separator is ONE view for the whole list, whereas
+        // padding each card would add that padding to the first and last
+        // row as well, and would put the space INSIDE the card's shadow
+        // instead of between the shadows.
+        ItemSeparatorComponent={() => <View style={s.listSeparator} />}
         // The window of rows kept mounted either side of the viewport. The
         // default of 10 is tight for cards this tall - scrolling back up
         // would re-mount them and the user would see a flash. 6 keeps a
@@ -1910,9 +1922,25 @@ export default function HistoryScreen({ navigation }) {
  * exact same resolver the card's spine colour uses, so the chip and the edge
  * rule can never disagree.
  *
- * Neither column ever falls back to the other. A missing provider status is
- * absent data, and printing our own value in its place would recreate exactly
- * the silent duplication this component exists to remove.
+ * THE PROVIDER COLUMN IS NOT SHOWN
+ * --------------------------------
+ * The provider's mirrored status used to be shown beside ours, under a
+ * "Provider" label. It is hidden now.
+ *
+ * The reason is that it is INTERNAL INFORMATION. "Ours" and "Provider" are
+ * two views of one order from two different systems, and a customer looking
+ * at their transaction list has no way to act on the difference - they cannot
+ * call Jehucal, and they certainly cannot tell which of the two is "right".
+ * Showing them side by side made a settled order look undecided.
+ *
+ * So the card shows ONE status: the RESOLVED one, which is the provider's
+ * value when it is real and ours otherwise. That is the same value the card's
+ * status SPINE is coloured from, so the pill and the edge rule can never
+ * disagree - which was the whole reason the two columns were ever shown side
+ * by side.
+ *
+ * The provider status is still fetched, still persisted, and still drives
+ * the spine. Hiding it is a display decision, not a data decision.
  */
 function DualStatus({
   s,
@@ -1920,20 +1948,25 @@ function DualStatus({
   providerStatus,
   toneOf,
   labelOf,
-  showProvider = true,
-  // Whether this pair shares a row with something else that it must not crowd
+  // Whether the status shares a row with something else that it must not crowd
   // out. True in the card foot (the chevron lives beside it), false in the
   // settlement panel (it owns the line).
   fill = false,
 }) {
+  // THE RESOLVED STATUS: the provider's when it is real, ours otherwise.
+  //
+  // This is exactly `resolveOrderStatus`'s rule, applied here so the pill and
+  // the card's spine colour cannot disagree. The spine is coloured from
+  // `resolveOrderStatus(transaction)`, and if the pill resolved the status a
+  // different way the two could show different words.
+  const resolved = providerStatus || internalStatus;
 
-  const track = (label, status) => (
-    <View style={s.statusPairItem}>
-      <Text style={s.statusPairLabel}>{label}</Text>
-      {status ? (
-        <View style={[s.pill, { backgroundColor: toneOf(status).bg }]}>
-          <Text style={[s.pillText, { color: toneOf(status).color }]}>
-            {labelOf(status)}
+  return (
+    <View style={[s.statusPair, fill ? { flex: 1 } : null]}>
+      {resolved ? (
+        <View style={[s.pill, { backgroundColor: toneOf(resolved).bg }]}>
+          <Text style={[s.pillText, { color: toneOf(resolved).color }]}>
+            {labelOf(resolved)}
           </Text>
         </View>
       ) : (
@@ -1941,13 +1974,6 @@ function DualStatus({
         // and giving it a chip would make it weigh the same as a real one.
         <Text style={s.statusPairNone}>—</Text>
       )}
-    </View>
-  );
-
-  return (
-      <View style={[s.statusPair, fill ? { flex: 1 } : null]}>
-      {track("Ours", internalStatus)}
-      {showProvider ? track("Provider", providerStatus) : null}
     </View>
   );
 }
@@ -2211,6 +2237,19 @@ const buildStyles = (c, topInset = 0) =>
     list: {
       gap: 12,
     },
+    // THE GAP BETWEEN CARDS.
+    //
+    // A plain height, not a margin on the card. A margin would have to be
+    // applied to every row, and the first and last rows would then carry a
+    // margin too - pushing the first card away from the header and leaving
+    // dead space under the last one.
+    //
+    // 12 matches the `gap: 12` the list used to have, so the spacing is
+    // unchanged from before the `FlatList` conversion - it was simply lost
+    // in that conversion and is now restored where it actually applies.
+    listSeparator: {
+      height: 12,
+    },
         // The spine sits outside the card's padding so the status colour reads as a
         // rule on the list rather than as part of the card's content. The shell is
         // transparent and clips the corner radii; `overflow: "hidden"` on the shell
@@ -2283,6 +2322,11 @@ const buildStyles = (c, topInset = 0) =>
     },
         // The two status tracks, side by side. `flexWrap` so a long status word
         // drops to a second line rather than squeezing the chevron off the row.
+        // The status row.
+        //
+        // It holds ONE status now. It used to hold two - "Ours" and
+        // "Provider" - side by side, which is why the name is still a pair.
+        // The provider column was removed; see the note on `DualStatus`.
         statusPair: {
           flexDirection: "row",
                   // Wraps rather than compresses: a long status word ("Processing")
@@ -2297,20 +2341,6 @@ const buildStyles = (c, topInset = 0) =>
                   // `flex: 1` into the component made the panel variant leave half the
                   // line empty.
                 },
-        statusPairItem: {
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 5,
-        },
-        // Capitalised micro-label rather than an icon: "ours" vs "provider" is a
-        // distinction of ownership, and a glyph does not convey it.
-        statusPairLabel: {
-          fontFamily: fonts.bodySemi,
-          fontSize: 8.5,
-          letterSpacing: 0.9,
-          textTransform: "uppercase",
-          color: c.textMuted,
-        },
         // Em dash, not a pill: an unreported status is absent data, and drawing it
         // as a status chip would give it the same visual weight as a real one.
         statusPairNone: {
@@ -2468,47 +2498,28 @@ const buildStyles = (c, topInset = 0) =>
       color: c.textSecondary,
     },
 
-    /* ---------- Skeleton ---------- */
-    placeholder: {
-      flexDirection: "row",
+    /* ---------- Loading ---------- */
+    // The centred loading state.
+    //
+    // Centred VERTICALLY as well as horizontally, so it sits in the middle of
+    // the screen rather than at the top under the header - a spinner in the
+    // top-left corner reads as "something is wrong with the header", while a
+    // centred one reads as "the screen is loading".
+    loadingState: {
       alignItems: "center",
-      gap: 12,
-      height: 92,
-      borderRadius: 22,
-      backgroundColor: c.skeleton,
-      padding: 16,
+      justifyContent: "center",
+      paddingVertical: 72,
+      gap: 14,
     },
-    placeholderBody: {
-      flex: 1,
-      gap: 9,
+    loadingSpinner: {
+      // `ActivityIndicator` on Android draws its own bounds; this nudges it
+      // off the text baseline so the two are not fighting for the same line.
+      marginBottom: 2,
     },
-    placeholderTail: {
-      alignItems: "flex-end",
-      gap: 9,
-    },
-    placeholderLine: {
-      height: 12,
-      borderRadius: 6,
-      backgroundColor: c.surfaceHover,
-      width: "70%",
-    },
-    placeholderLineShort: {
-      height: 10,
-      borderRadius: 5,
-      backgroundColor: c.surfaceHover,
-      width: "45%",
-    },
-    placeholderAmount: {
-      height: 13,
-      borderRadius: 6,
-      backgroundColor: c.surfaceHover,
-      width: 72,
-    },
-    placeholderBadge: {
-      height: 18,
-      borderRadius: 9,
-      backgroundColor: c.surfaceHover,
-      width: 62,
+    loadingText: {
+      fontFamily: fonts.body,
+      fontSize: 13,
+      color: c.textMuted,
     },
   });
 

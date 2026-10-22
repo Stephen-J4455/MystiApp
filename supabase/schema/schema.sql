@@ -434,7 +434,7 @@ CREATE TABLE public.afa_registrations (
   fee_amount numeric NOT NULL CHECK (fee_amount >= 0::numeric),
   currency text NOT NULL DEFAULT 'GHS'::text CHECK (currency = 'GHS'::text),
   payment_method text NOT NULL CHECK (payment_method = ANY (ARRAY['paystack'::text, 'wallet'::text])),
-  status text NOT NULL DEFAULT 'pending_payment'::text CHECK (status = ANY (ARRAY['pending_payment'::text, 'paid'::text, 'active'::text, 'rejected'::text, 'refunded'::text, 'cancelled'::text])),
+  status text NOT NULL DEFAULT 'pending'::text CHECK (status = ANY (ARRAY['pending'::text, 'processing'::text, 'approved'::text, 'rejected'::text, 'refunded'::text, 'cancelled'::text])),
   payment_reference text UNIQUE,
   paystack_transaction_id text,
   paystack_transaction_status text,

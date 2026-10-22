@@ -294,7 +294,10 @@ export default function AfaRegistrationScreen({ navigation }) {
       // paying from their balance.
       if (
         data?.success &&
-        (data.registration?.status === "active" ||
+        (data.registration?.status === "processing" ||
+          data.registration?.status === "pending_processing" ||
+          data.registration?.status === "paid" ||
+          data.registration?.status === "active" ||
           data.registration?.status === "approved")
       ) {
         showSuccess(
@@ -323,7 +326,12 @@ export default function AfaRegistrationScreen({ navigation }) {
   };
 
   const activeRegistration = registrations.find(
-    (item) => item.status === "active" || item.status === "approved",
+    (item) =>
+      item.status === "processing" ||
+      item.status === "pending_processing" ||
+      item.status === "paid" ||
+      item.status === "active" ||
+      item.status === "approved",
   );
 
   // COPY THE REGISTRATION DETAILS.
