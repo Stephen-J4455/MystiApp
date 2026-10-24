@@ -49,17 +49,39 @@ import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
 // Tab order for the data-type switcher. The key must match the value returned
 // by getBundleFamily in the component.
 const BUNDLE_FAMILY_ORDER = [
-  { key: "everyday", label: "Everyday", icon: "flash-outline" },
   { key: "ishare", label: "iShare", icon: "people-outline" },
+  { key: "everyday", label: "Everyday", icon: "flash-outline" },
   { key: "big_time", label: "Big Time", icon: "trending-up-outline" },
 ];
+
+const DATA_PROVIDERS = [
+  { key: "all", label: "All providers" },
+  { key: "jehuca", label: "Jehuca" },
+  { key: "bisdel", label: "Bisdel" },
+];
+
+const normalizeUiNetwork = (value) => {
+  const key = String(value || "").trim().toLowerCase();
+  if (key === "vodafone" || key === "vod") return "telecel";
+  if (key === "telecel") return "telecel";
+  return key;
+};
+
+const formatUiNetwork = (value) => {
+  const key = normalizeUiNetwork(value);
+  if (!key) return "";
+  return key.charAt(0).toUpperCase() + key.slice(1);
+};
 
 export default function DataScreen({ navigation, route }) {
   // Several call sites reach this screen without params (the "Browse" action,
   // the empty-state CTA, ad deep links). `route.params` is undefined there, so
   // this must not destructure directly. MTN is the default landing network -
   // it matches the hero "Buy Data" button and the first network card.
-  const network = route.params?.network || "mtn";
+  // Bisdel packages may come through as "vodafone", but the customer-facing UI
+  // should still present Telecel branding and comparisons against the selected
+  // network should match that alias.
+  const network = normalizeUiNetwork(route.params?.network || "mtn");
   const { c, isDark } = useTheme();
   const s = useDataStyles(c);
   // Clears the floating bottom dock so the last bundle row stays reachable.
@@ -73,6 +95,7 @@ export default function DataScreen({ navigation, route }) {
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [bundles, setBundles] = useState([]);
   const [activeFamily, setActiveFamily] = useState(null);
+  const [activeProvider, setActiveProvider] = useState("all");
   const [loading, setLoading] = useState(true);
   const [paystackModalVisible, setPaystackModalVisible] = useState(false);
   const [directPaystackRequested, setDirectPaystackRequested] = useState(false);
@@ -194,41 +217,48 @@ export default function DataScreen({ navigation, route }) {
     };
   }, [selectedBundle, superAgentId, paymentChargeSettings]);
 
-  const dispatchProviderOrder = useCallback(async (orderId, orderType) => {
-    const functionName = getEdgeFunctionName("dispatch-order");
-    const { data, error } = await supabase.functions.invoke(functionName, {
-      body: { order_id: orderId, order_type: orderType },
-    });
+  const dispatchProviderOrder = useCallback(
+    async (orderId, orderType, provider) => {
+      const functionName = getEdgeFunctionName(
+        String(provider || "").toLowerCase() === "bisdel"
+          ? "bisdel-order"
+          : "dispatch-order",
+      );
+      const { data, error } = await supabase.functions.invoke(functionName, {
+        body: { order_id: orderId, order_type: orderType },
+      });
 
-    // A 2xx that reports `deferred: true` is a QUEUED order: the provider
-    // could not be reached yet (usually an unfunded provider account) and the
-    // admin will retry it. A 4xx is a PERMANENT failure - the order is missing
-    // data it can never be dispatched with, so retrying will not help.
-    //
-    // These must not be collapsed into one another. Reporting a 4xx as
-    // "queued, we'll complete the delivery shortly" is how an undeliverable
-    // order ends up looking identical to a legitimately deferred one.
-    const status = Number(error?.status || error?.context?.status || 0);
-    const rejected = Boolean(error) && status >= 400 && status < 500;
+      // A 2xx that reports `deferred: true` is a QUEUED order: the provider
+      // could not be reached yet (usually an unfunded provider account) and the
+      // admin will retry it. A 4xx is a PERMANENT failure - the order is missing
+      // data it can never be dispatched with, so retrying will not help.
+      //
+      // These must not be collapsed into one another. Reporting a 4xx as
+      // "queued, we'll complete the delivery shortly" is how an undeliverable
+      // order ends up looking identical to a legitimately deferred one.
+      const status = Number(error?.status || error?.context?.status || 0);
+      const rejected = Boolean(error) && status >= 400 && status < 500;
 
-    return {
-      data,
-      error,
-      // The edge function reports a queued order as deferred rather than
-      // failed, so the customer keeps a confirmed receipt.
-      deferred: Boolean(!error && data?.deferred),
-      dispatched: Boolean(!error && data?.success && !data?.deferred),
-      // Undispatchable: needs a fix, not a retry. Surfaced so the caller can
-      // tell the customer their order cannot be delivered.
-      rejected,
-      status,
-      errorMessage:
-        data?.error ||
-        error?.context?.error ||
-        error?.message ||
-        "The provider could not accept this order.",
-    };
-  }, []);
+      return {
+        data,
+        error,
+        // The edge function reports a queued order as deferred rather than
+        // failed, so the customer keeps a confirmed receipt.
+        deferred: Boolean(!error && data?.deferred),
+        dispatched: Boolean(!error && data?.success && !data?.deferred),
+        // Undispatchable: needs a fix, not a retry. Surfaced so the caller can
+        // tell the customer their order cannot be delivered.
+        rejected,
+        status,
+        errorMessage:
+          data?.error ||
+          error?.context?.error ||
+          error?.message ||
+          "The provider could not accept this order.",
+      };
+    },
+    [],
+  );
 
   // Paystack payment handlers
   const handlePaymentSuccess = useCallback(
@@ -251,6 +281,7 @@ export default function DataScreen({ navigation, route }) {
             user_id: user.id,
             offer_id: selectedBundle.id,
             provider_package_id: selectedBundle.package_id || selectedBundle.id,
+            provider_name: selectedBundle.provider || "jehuca",
             package_name: selectedBundle.name,
             package_type: selectedBundle.type || null,
             package_size: selectedBundle.dataSize || null,
@@ -337,6 +368,7 @@ export default function DataScreen({ navigation, route }) {
           const providerResult = await dispatchProviderOrder(
             data.order.id,
             orderType,
+            selectedBundle?.provider,
           );
 
           if (providerResult.rejected) {
@@ -518,6 +550,7 @@ export default function DataScreen({ navigation, route }) {
       metadata: {
         offer_id: selectedBundle.id,
         offer_title: selectedBundle.name,
+        provider_name: selectedBundle.provider || "jehuca",
         network: network,
         is_self: purchaseType === "self",
         recipient_phone:
@@ -819,21 +852,24 @@ export default function DataScreen({ navigation, route }) {
           const mappedBundles = superAgentOffers
             .filter(
               (agentOffer) =>
-                String(agentOffer.network || "").toUpperCase() ===
-                network.toUpperCase(),
+                normalizeUiNetwork(agentOffer.network) === network,
             )
             .map((agentOffer) => {
               const descriptor = String(agentOffer.data_value || "");
+              const uiNetwork = formatUiNetwork(agentOffer.network);
 
               return {
                 id: String(agentOffer.superAgentOfferId || agentOffer.id),
                 package_id: agentOffer.package_id || null,
+                provider: agentOffer.provider || "jehuca",
                 superAgentOfferId:
                   agentOffer.superAgentOfferId || agentOffer.id,
-                network: String(agentOffer.network || "").toUpperCase(),
+                network: uiNetwork,
+                data_value: descriptor,
+                title: `${uiNetwork} — ${descriptor}`,
                 type: String(agentOffer.type || descriptor).toUpperCase(),
                 name:
-                  agentOffer.title || `${agentOffer.network} — ${descriptor}`,
+                  `${uiNetwork} — ${descriptor} · ${String(agentOffer.provider || "jehuca").toUpperCase()}`,
                 price:
                   typeof agentOffer.price === "string" &&
                   agentOffer.price.startsWith("Ghc")
@@ -859,9 +895,17 @@ export default function DataScreen({ navigation, route }) {
 
         // Direct top-level agent without a super agent: load from catalog
         const catalogOffers = await fetchCatalogPackages();
+        if (catalogOffers.length === 0) {
+          setBundles([]);
+          setLoading(false);
+          showError("Provider Unavailable", "Could not load the active provider catalog.");
+          return;
+        }
+        const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
         const { data: pricingRows, error: pricingError } = await supabase
           .from("package_pricing")
-          .select("package_id, network, type, size, base_price, is_active")
+          .select("provider, package_id, network, type, size, base_price, is_active")
+          .in("provider", providers)
           .eq("is_active", true);
 
         if (pricingError) {
@@ -874,17 +918,17 @@ export default function DataScreen({ navigation, route }) {
           const descriptor = String(row.type || "")
             .trim()
             .toUpperCase();
-          const key = `${String(row.network || "").toUpperCase()}::${descriptor}`;
+          const key = `${String(row.provider || "jehuca").toLowerCase()}::${String(row.network || "").toUpperCase()}::${descriptor}`;
           basePriceByKey[key] = Number(row.base_price || 0);
           if (row.package_id) {
-            basePriceByPackageId[String(row.package_id)] = Number(
+            basePriceByPackageId[`${row.provider}::${String(row.package_id)}`] = Number(
               row.base_price || 0,
             );
           }
         });
 
         const filteredOffers = (catalogOffers || []).filter((pkg) => {
-          if (pkg.network?.toUpperCase() !== network.toUpperCase()) {
+          if (normalizeUiNetwork(pkg.network) !== network) {
             return false;
           }
           const pkgType = String(pkg.type || "")
@@ -897,6 +941,12 @@ export default function DataScreen({ navigation, route }) {
               ? `${pkgType} - ${pkgSize}`.toUpperCase()
               : (pkgType || pkgSize).toUpperCase();
           return (pricingRows || []).some((row) => {
+            if (
+              String(row.provider || "jehuca").toLowerCase() !==
+              String(pkg.provider || "jehuca").toLowerCase()
+            ) {
+              return false;
+            }
             if (row.package_id && String(row.package_id) === String(pkg.id)) {
               return true;
             }
@@ -918,18 +968,24 @@ export default function DataScreen({ navigation, route }) {
             size && !rawType.toUpperCase().includes(size.toUpperCase())
               ? `${rawType} - ${size}`.toUpperCase()
               : (rawType || size).toUpperCase();
-          const key = `${String(pkg.network || "").toUpperCase()}::${descriptor}`;
+          const provider = String(pkg.provider || "jehuca").toLowerCase();
+          const key = `${provider}::${String(pkg.network || "").toUpperCase()}::${descriptor}`;
           const basePrice =
-            basePriceByPackageId[String(pkg.id)] ?? basePriceByKey[key];
+            basePriceByPackageId[`${provider}::${String(pkg.id)}`] ??
+            basePriceByKey[key];
           const catalogPrice = Number(pkg.price || 0) / 100;
           const finalPrice = basePrice > 0 ? basePrice : catalogPrice;
 
+          const uiNetwork = formatUiNetwork(pkg.network);
           return {
             id: pkg.id,
             package_id: pkg.id,
-            network: pkg.network,
+            provider,
+            network: uiNetwork,
+            category: pkg.category ?? null,
+            data_volume: pkg.data_volume ?? null,
             type: pkg.type,
-            name: `${pkg.network} — ${pkg.type}`,
+            name: `${uiNetwork} — ${pkg.type} · ${provider.toUpperCase()}`,
             price: `Ghc ${finalPrice.toFixed(2)}`,
             base_price: finalPrice,
             dataSize: `${pkg.size} GB`,
@@ -941,27 +997,66 @@ export default function DataScreen({ navigation, route }) {
       }
 
       // Regular customer
+      const catalogOffers = await fetchCatalogPackages();
+      if (catalogOffers.length === 0) {
+        setBundles([]);
+        setLoading(false);
+        showError("Provider Unavailable", "Could not load the active provider catalog.");
+        return;
+      }
+      const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
       const { data: pricingRows, error: pricingError } = await supabase
         .from("normal_user_package_pricing")
-        .select("package_id, network, type, size, base_price, is_active")
+        .select("provider, package_id, network, type, size, base_price, is_active")
+        .in("provider", providers)
         .eq("is_active", true);
 
       if (pricingError) throw pricingError;
 
       const mappedBundles = (pricingRows || [])
         .filter(
-          (row) =>
-            String(row.network || "").toUpperCase() === network.toUpperCase(),
+          (row) => normalizeUiNetwork(row.network) === network,
         )
         .map((row) => {
+          const provider = String(row.provider || "jehuca").toLowerCase();
           const descriptor = String(row.type || "").trim();
           const size = row.size ?? null;
-          const displayName = `${row.network} — ${descriptor}`;
+          const uiNetwork = formatUiNetwork(row.network);
+          const displayName = `${uiNetwork} — ${descriptor} · ${provider.toUpperCase()}`;
+          const normalizedDescriptor = descriptor.toUpperCase();
+          const catalogPackage = catalogOffers.find((pkg) => {
+            if (
+              String(pkg.provider || "jehuca").toLowerCase() !== provider ||
+              normalizeUiNetwork(pkg.network) !== normalizeUiNetwork(row.network)
+            ) {
+              return false;
+            }
+            if (
+              row.package_id &&
+              String(pkg.id) === String(row.package_id)
+            ) {
+              return true;
+            }
+            const pkgType = String(pkg.type || "").trim().toUpperCase();
+            const pkgSize =
+              pkg.size !== undefined && pkg.size !== null
+                ? `${pkg.size}GB`
+                : "";
+            const pkgDescriptor =
+              pkgSize && !pkgType.includes(pkgSize)
+                ? `${pkgType} - ${pkgSize}`
+                : pkgType || pkgSize;
+            return pkgDescriptor === normalizedDescriptor;
+          });
 
           return {
-            id: row.package_id || `${row.network}-${descriptor}`,
-            package_id: row.package_id || null,
-            network: String(row.network || "").toUpperCase(),
+            id:
+              row.package_id ||
+              catalogPackage?.id ||
+              `${row.network}-${descriptor}`,
+            package_id: row.package_id || catalogPackage?.id || null,
+            provider,
+            network: uiNetwork,
             type: descriptor,
             name: displayName,
             price: `Ghc ${Number(row.base_price || 0).toFixed(2)}`,
@@ -969,7 +1064,10 @@ export default function DataScreen({ navigation, route }) {
             dataSize:
               size !== null
                 ? `${size} GB`
-                : formatBundleSizeFromDescriptor(descriptor),
+                : catalogPackage?.size !== undefined &&
+                    catalogPackage?.size !== null
+                  ? `${catalogPackage.size} GB`
+                  : formatBundleSizeFromDescriptor(descriptor),
           };
         });
       setBundles(mappedBundles);
@@ -982,7 +1080,7 @@ export default function DataScreen({ navigation, route }) {
     }
   };
 
-  // Groups bundles by network and sorts each group by ascending price.
+  // Groups bundles by network and sorts each group by displayed price.
   const groupBundlesByNetwork = useCallback((list) => {
     const grouped = {};
     list.forEach((bundle) => {
@@ -995,16 +1093,18 @@ export default function DataScreen({ navigation, route }) {
 
     Object.values(grouped).forEach((networkBundles) => {
       networkBundles.sort((first, second) => {
-        const firstPrice = Number(
-          first.base_price ??
-            String(first.price || "").replace(/[^0-9.]/g, "") ??
-            0,
+        const firstDisplayPrice = Number(
+          String(first.price || "").replace(/[^0-9.]/g, ""),
         );
-        const secondPrice = Number(
-          second.base_price ??
-            String(second.price || "").replace(/[^0-9.]/g, "") ??
-            0,
+        const secondDisplayPrice = Number(
+          String(second.price || "").replace(/[^0-9.]/g, ""),
         );
+        const firstPrice = Number.isFinite(firstDisplayPrice)
+          ? firstDisplayPrice
+          : Number(first.base_price ?? Number.POSITIVE_INFINITY);
+        const secondPrice = Number.isFinite(secondDisplayPrice)
+          ? secondDisplayPrice
+          : Number(second.base_price ?? Number.POSITIVE_INFINITY);
         return firstPrice - secondPrice;
       });
     });
@@ -1016,15 +1116,67 @@ export default function DataScreen({ navigation, route }) {
   // (e.g. "MTN 1GB - Daily"), so the family is inferred the same way the
   // provider API groups them: BIG TIME, ISHARE, everything else.
   const getBundleFamily = (bundle) => {
-    const type = String(bundle?.type || "").toUpperCase();
-    if (type.includes("BIG TIME")) return "big_time";
+    const type = [
+      bundle?.type,
+      bundle?.data_value,
+      bundle?.category,
+      bundle?.name,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toUpperCase()
+      .replace(/[\s_-]+/g, "");
+    if (type.includes("BIGTIME")) return "big_time";
     if (type.includes("ISHARE")) return "ishare";
     return "everyday";
   };
 
+  const providerOptions = useMemo(() => {
+    const available = new Set(
+      bundles.map((bundle) =>
+        String(bundle.provider || "jehuca").toLowerCase(),
+      ),
+    );
+    return DATA_PROVIDERS.filter(
+      (provider) =>
+        provider.key === "all" || available.has(provider.key),
+    ).map((provider) => ({
+      ...provider,
+      count:
+        provider.key === "all"
+          ? bundles.length
+          : bundles.filter(
+              (bundle) =>
+                String(bundle.provider || "jehuca").toLowerCase() ===
+                provider.key,
+            ).length,
+    }));
+  }, [bundles]);
+
+  const providerFilteredBundles = useMemo(
+    () =>
+      !isSuperAgentUser || activeProvider === "all"
+        ? bundles
+        : bundles.filter(
+            (bundle) =>
+              String(bundle.provider || "jehuca").toLowerCase() ===
+              activeProvider,
+          ),
+    [bundles, isSuperAgentUser, activeProvider],
+  );
+
+  useEffect(() => {
+    if (
+      activeProvider !== "all" &&
+      !providerOptions.some((provider) => provider.key === activeProvider)
+    ) {
+      setActiveProvider("all");
+    }
+  }, [activeProvider, providerOptions]);
+
   const bundleFamilies = useMemo(() => {
     const families = new Map();
-    bundles.forEach((bundle) => {
+    providerFilteredBundles.forEach((bundle) => {
       const family = getBundleFamily(bundle);
       const existing = families.get(family) || { key: family, count: 0 };
       existing.count += 1;
@@ -1035,7 +1187,7 @@ export default function DataScreen({ navigation, route }) {
     return BUNDLE_FAMILY_ORDER.filter((family) => families.has(family.key)).map(
       (family) => families.get(family.key),
     );
-  }, [bundles]);
+  }, [providerFilteredBundles]);
 
   // A single family means there is nothing to switch between, so the tab strip
   // is hidden entirely rather than showing one pointless tab.
@@ -1054,14 +1206,14 @@ export default function DataScreen({ navigation, route }) {
   // exist on the new network never shows an empty list.
   useEffect(() => {
     setActiveFamily(null);
-  }, [network, isAgent]);
+  }, [network, isAgent, activeProvider]);
 
   const visibleBundles = useMemo(() => {
-    if (!showFamilyTabs || !activeFamilyKey) return bundles;
-    return bundles.filter(
+    if (!showFamilyTabs || !activeFamilyKey) return providerFilteredBundles;
+    return providerFilteredBundles.filter(
       (bundle) => getBundleFamily(bundle) === activeFamilyKey,
     );
-  }, [bundles, showFamilyTabs, activeFamilyKey]);
+  }, [providerFilteredBundles, showFamilyTabs, activeFamilyKey]);
 
   const visibleBundlesByNetwork = useMemo(
     () => groupBundlesByNetwork(visibleBundles),
@@ -1307,6 +1459,7 @@ export default function DataScreen({ navigation, route }) {
           wallet_order: true,
           reference,
           offer_id: bundle.id,
+          provider_name: bundle.provider || "jehuca",
           package_name: bundle.name,
           package_size: bundle.dataSize || null,
           // Provider identity. Without these the order cannot be dispatched:
@@ -1359,6 +1512,7 @@ export default function DataScreen({ navigation, route }) {
       const providerResult = await dispatchProviderOrder(
         data.order.id,
         "regular",
+        bundle?.provider,
       );
 
       if (providerResult.rejected) {
@@ -1961,6 +2115,55 @@ export default function DataScreen({ navigation, route }) {
                 ? `${agentTier} tier · prices set by your super agent`
                 : "Packages and prices set by your super agent"}
             </Text>
+          </View>
+        ) : null}
+
+        {isSuperAgentUser && providerOptions.length > 2 ? (
+          <View style={s.familyTabsWrap}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={s.familyTabsContent}
+            >
+              {providerOptions.map((provider) => {
+                const isActive = provider.key === activeProvider;
+                return (
+                  <TouchableOpacity
+                    key={`provider-${provider.key}`}
+                    style={[s.familyTab, isActive ? s.familyTabActive : null]}
+                    onPress={() => setActiveProvider(provider.key)}
+                    activeOpacity={0.85}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: isActive }}
+                    accessibilityLabel={`${provider.label}, ${provider.count} packages`}
+                  >
+                    <Text
+                      style={[
+                        s.familyTabText,
+                        isActive ? s.familyTabTextActive : null,
+                      ]}
+                    >
+                      {provider.label}
+                    </Text>
+                    <View
+                      style={[
+                        s.familyTabCount,
+                        isActive ? s.familyTabCountActive : null,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          s.familyTabCountText,
+                          isActive ? s.familyTabCountTextActive : null,
+                        ]}
+                      >
+                        {provider.count}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
           </View>
         ) : null}
 
@@ -2919,6 +3122,7 @@ export default function DataScreen({ navigation, route }) {
                           offer_id: selectedBundle.id,
                           provider_package_id:
                             selectedBundle.package_id || selectedBundle.id,
+                          provider_name: selectedBundle.provider || "jehuca",
                           package_name: selectedBundle.name,
                           package_type: selectedBundle.type || null,
                           package_size: selectedBundle.dataSize || null,
@@ -2982,6 +3186,7 @@ export default function DataScreen({ navigation, route }) {
                       const providerResult = await dispatchProviderOrder(
                         data.order.id,
                         data.is_agent_order ? "agent" : "regular",
+                        selectedBundle?.provider,
                       );
 
                       if (providerResult.rejected) {

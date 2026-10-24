@@ -270,6 +270,11 @@ const normalizeKey = (value: unknown) =>
     .trim()
     .toUpperCase();
 
+const normalizeNetworkKey = (value: unknown) => {
+  const key = normalizeKey(value);
+  return key === "VODAFONE" || key === "VOD" ? "TELECEL" : key;
+};
+
 const sizeFromDataValue = (dataValue: unknown) => {
   const match = String(dataValue || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
   return match ? Number(match[1]) : null;
@@ -278,13 +283,13 @@ const sizeFromDataValue = (dataValue: unknown) => {
 // Matches a super-agent offer (e.g. "ISHARE - 1GB") to a Jehuca catalog package
 // so sub-agents still get a package id, size, and bundle type for display.
 const findCatalogPackageForOffer = (catalog: any[], offer: any) => {
-  const network = normalizeKey(offer?.network);
+  const network = normalizeNetworkKey(offer?.network);
   const dataValue = normalizeKey(offer?.data_value);
   if (!dataValue) return null;
 
   return (
     catalog.find((pkg: any) => {
-      if (normalizeKey(pkg?.network) !== network) return false;
+      if (normalizeNetworkKey(pkg?.network) !== network) return false;
       const type = normalizeKey(pkg?.type);
       const size =
         pkg?.size !== undefined &&
@@ -317,17 +322,84 @@ const findCatalogPackageForOffer = (catalog: any[], offer: any) => {
   );
 };
 
-const fetchCatalogPackages = async () => {
-  const apiKey = Deno.env.get("JEHUCA_API_KEY");
-  if (!apiKey) return [];
+const getActiveProvider = async (admin: ReturnType<typeof createClient>) => {
+  const { data, error } = await admin
+    .from("data_provider_settings")
+    .select("provider")
+    .eq("id", true)
+    .single();
+  if (error) throw error;
+  const provider = String(data.provider || "").toLowerCase();
+  if (provider !== "jehuca" && provider !== "bisdel") {
+    throw new Error("Configured data provider is invalid");
+  }
+  return provider;
+};
 
+const getEnabledProviders = async (
+  admin: ReturnType<typeof createClient>,
+) => {
+  const { data, error } = await admin
+    .from("data_provider_settings")
+    .select("jehuca_enabled, bisdel_enabled")
+    .eq("id", true)
+    .single();
+  if (error) throw error;
+  return [
+    ...(data.jehuca_enabled === true ? ["jehuca"] : []),
+    ...(data.bisdel_enabled === true ? ["bisdel"] : []),
+  ];
+};
+
+const fetchCatalogPackages = async (
+  provider: string,
+) => {
+  if (provider === "bisdel") {
+    const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+    const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
+      .replace(/\0/g, "")
+      .trim();
+    if (!apiKey || !apiSecret) {
+      throw new Error("Bisdel API credentials are not configured");
+    }
+    const response = await fetch("https://bisdelgh.com/api/xx1/products.php", {
+      headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+    });
+    const data = await response.json();
+    if (!response.ok || data?.success !== true) {
+      throw new Error(data?.error || "Bisdel package request failed");
+    }
+    const products = Array.isArray(data?.data?.products)
+      ? data.data.products
+      : [];
+    return products.map((product: Record<string, unknown>) => {
+      const dataVolume = String(product.data_volume || "");
+      const apiPrice = Number(product.api_price);
+      return {
+        id: String(product.product_id ?? ""),
+        network: String(product.network || "").trim().toUpperCase()
+          .replace(/^MTN.*$/, "MTN"),
+        type: String(product.name || dataVolume).trim(),
+        size: Number(
+          dataVolume.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0,
+        ),
+        price: Number.isFinite(apiPrice) ? Math.round(apiPrice * 100) : 0,
+        data_volume: dataVolume,
+        provider,
+      };
+    });
+  }
+
+  const apiKey = Deno.env.get("JEHUCA_API_KEY");
+  if (!apiKey) throw new Error("Jehuca API key is not configured");
   const response = await fetch(
     "https://backend.jehucale-business.com/api/packages",
     { headers: { "X-API-Key": apiKey } },
   );
   const data = await response.json();
-
-  return Array.isArray(data?.payload) ? data.payload : [];
+  return (Array.isArray(data?.payload) ? data.payload : []).map(
+    (pkg: Record<string, unknown>) => ({ ...pkg, provider }),
+  );
 };
 
 Deno.serve(async (req) => {
@@ -441,55 +513,29 @@ Deno.serve(async (req) => {
     }
 
     if (action === "listOffers") {
-      // Load packages from Jehuca API instead of database
-      const apiKey = Deno.env.get("JEHUCA_API_KEY");
-      if (!apiKey) {
-        return new Response(
-          JSON.stringify({
-            offers: [],
-            error: "Jehuca API key not configured on server",
-          }),
-          {
-            status: 500,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          },
-        );
+      const providers = await getEnabledProviders(supabaseAdmin);
+      if (providers.length === 0) {
+        return new Response(JSON.stringify({ offers: [], providers }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
-
-      const baseUrl = "https://backend.jehucale-business.com/api/packages";
-      const queryParts: string[] = [];
+      const catalogs = await Promise.all(
+        providers.map((provider) => fetchCatalogPackages(provider)),
+      );
+      const catalog = catalogs.flat();
       const networkFilter = String(
         offer?.network || body?.network || "",
-      ).trim();
+      ).trim().toUpperCase();
       const typeFilter = String(offer?.type || body?.type || "").trim();
-      if (networkFilter) {
-        queryParts.push(`network=${encodeURIComponent(networkFilter)}`);
-      }
-      if (typeFilter) {
-        queryParts.push(`type=${encodeURIComponent(typeFilter)}`);
-      }
-      const requestUrl = queryParts.length
-        ? `${baseUrl}?${queryParts.join("&")}`
-        : baseUrl;
-
-      console.log(
-        "Fetching offers from Jehuca API:",
-        requestUrl,
-        "for super agent:",
-        targetSuperAgentId,
+      const offers = catalog.filter((pkg: Record<string, unknown>) =>
+        (!networkFilter ||
+          normalizeNetworkKey(pkg.network) ===
+            normalizeNetworkKey(networkFilter)) &&
+        (!typeFilter ||
+          normalizeKey(pkg.type).includes(normalizeKey(typeFilter)))
       );
-
-      const response = await fetch(requestUrl, {
-        method: "GET",
-        headers: {
-          "X-API-Key": apiKey,
-        },
-      });
-
-      const apiData = await response.json();
-      const offers = apiData.payload || [];
-
-      return new Response(JSON.stringify({ offers }), {
+      return new Response(JSON.stringify({ offers, providers }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -603,6 +649,10 @@ Deno.serve(async (req) => {
           );
         }
         updatePayload.price = numericPrice;
+      }
+      if (offer?.uses_admin_base_price !== undefined) {
+        updatePayload.uses_admin_base_price =
+          Boolean(offer.uses_admin_base_price);
       }
       if (offer?.description !== undefined) {
         updatePayload.description = String(offer.description).trim() || null;
@@ -939,13 +989,15 @@ Deno.serve(async (req) => {
       const tierName = String(
         offer?.tier_name || offer?.default_tier_name || "",
       ).trim();
+      const provider = String(offer?.provider || "jehuca").trim().toLowerCase();
       const price = Number(offer?.price || 0);
+      const usesAdminBasePrice = offer?.uses_admin_base_price === true;
       const title = String(offer?.title || "").trim();
       const description = String(offer?.description || "").trim();
 
-      if (!network || !dataValue) {
+      if (!network || !dataValue || !["jehuca", "bisdel"].includes(provider)) {
         return new Response(
-          JSON.stringify({ error: "Network and data value are required" }),
+          JSON.stringify({ error: "Provider, network, and data value are required" }),
           {
             status: 400,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -969,6 +1021,7 @@ Deno.serve(async (req) => {
         .eq("super_agent_id", targetSuperAgentId)
         .eq("network", network)
         .eq("data_value", dataValue)
+        .eq("provider", provider)
         .limit(1);
 
       if (tierName) {
@@ -1001,6 +1054,8 @@ Deno.serve(async (req) => {
       if (existing) {
         const tierUpdatePayload: Record<string, unknown> = {
           price,
+          uses_admin_base_price: usesAdminBasePrice,
+          provider,
           tier_name: tierName || null,
           is_active: true,
           updated_at: new Date().toISOString(),
@@ -1043,7 +1098,9 @@ Deno.serve(async (req) => {
         title: title || `${network} — ${dataValue}`,
         network,
         data_value: dataValue,
+        provider,
         price,
+        uses_admin_base_price: usesAdminBasePrice,
         description: description || null,
         tier_name: tierName || null,
         is_active: true,
@@ -1086,6 +1143,21 @@ Deno.serve(async (req) => {
       // `user_metadata.super_agent_id` first, so a sub-agent could point
       // themselves at a different super agent and read that agent's offers.
       const assignedSuperAgentId = String(identity.superAgentId || "").trim();
+      const providers = await getEnabledProviders(supabaseAdmin);
+      if (providers.length === 0) {
+        return new Response(
+          JSON.stringify({
+            offers: [],
+            agent_tier: null,
+            super_agent_id: assignedSuperAgentId,
+            providers,
+          }),
+          {
+            status: 200,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          },
+        );
+      }
 
       // The tier is NOT on `user_profiles`, so it has to come from the auth
       // record. It is not on `identity` either, and it cannot be read off the
@@ -1135,6 +1207,7 @@ Deno.serve(async (req) => {
         .from("super_agent_offers")
         .select("*")
         .eq("super_agent_id", assignedSuperAgentId)
+        .in("provider", providers)
         .eq("is_active", true)
         .order("network", { ascending: true });
 
@@ -1157,7 +1230,7 @@ Deno.serve(async (req) => {
 
       const publishedOffers = (offerRows || []) as any[];
       const packageKeyOf = (row: any) =>
-        `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+        `${normalizeKey(row?.provider || "jehuca")}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
       const offerTier = (row: any) =>
         String(row?.tier_name || row?.default_tier_name || "").trim();
 
@@ -1184,7 +1257,8 @@ Deno.serve(async (req) => {
       const { data: activePricingRows, error: activePricingError } =
         await supabaseAdmin
           .from("package_pricing")
-          .select("package_id, network, type, size, is_active")
+          .select("provider, package_id, network, type, size, base_price, is_active")
+          .in("provider", providers)
           .eq("is_active", true);
 
       if (activePricingError) {
@@ -1207,7 +1281,7 @@ Deno.serve(async (req) => {
 
       const activePackageIds = new Set(
         (activePricingRows || [])
-          .map((row: any) => String(row?.package_id || "").trim())
+          .map((row: any) => `${normalizeKey(row?.provider)}::${String(row?.package_id || "").trim()}`)
           .filter(Boolean),
       );
       const activePricingKeys = new Set(
@@ -1220,73 +1294,130 @@ Deno.serve(async (req) => {
             !descriptor.includes(`${size}GB`)
               ? `${descriptor} - ${size}GB`
               : descriptor;
-          return `${normalizeKey(row?.network)}::${descriptorWithSize}`;
+          return `${normalizeKey(row?.provider)}::${normalizeNetworkKey(row?.network)}::${descriptorWithSize}`;
         }),
       );
 
-      let catalog: any[] = [];
-      try {
-        catalog = await fetchCatalogPackages();
-      } catch (catalogError) {
-        console.warn(
-          "Could not load the package catalog for offer enrichment:",
-          catalogError,
-        );
-      }
+      const catalogs = await Promise.all(
+        providers.map((provider) => fetchCatalogPackages(provider)),
+      );
+      const catalog: any[] = catalogs.flat();
 
-      const networkFilter = normalizeKey(body?.network);
+      const networkFilter = normalizeNetworkKey(body?.network);
       const enabledOffers = selectedOffers.filter((row: any) => {
-        const networkKey = normalizeKey(row?.network);
+        const networkKey = normalizeNetworkKey(row?.network);
         const descriptorKey = normalizeKey(row?.data_value);
         const offerPackageId = String(row?.package_id || "").trim();
-        const catalogPackage = findCatalogPackageForOffer(catalog, row);
+        const provider = String(row?.provider || "jehuca").toLowerCase();
+        const providerCatalog = catalog.filter(
+          (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
+        );
+        const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
         const catalogPackageId = String(catalogPackage?.id || "").trim();
         return (
-          (offerPackageId && activePackageIds.has(offerPackageId)) ||
-          (catalogPackageId && activePackageIds.has(catalogPackageId)) ||
-          activePricingKeys.has(`${networkKey}::${descriptorKey}`)
+          (offerPackageId &&
+            activePackageIds.has(`${normalizeKey(provider)}::${offerPackageId}`)) ||
+          (catalogPackageId &&
+            activePackageIds.has(`${normalizeKey(provider)}::${catalogPackageId}`)) ||
+          activePricingKeys.has(`${normalizeKey(provider)}::${networkKey}::${descriptorKey}`)
         );
       });
 
       const packages = enabledOffers
         .filter(
           (row) =>
-            !networkFilter || normalizeKey(row?.network) === networkFilter,
+            !networkFilter ||
+            normalizeNetworkKey(row?.network) === networkFilter,
         )
         .map((row) => {
-          const catalogPackage = findCatalogPackageForOffer(catalog, row);
+          const provider = String(row?.provider || "jehuca").toLowerCase();
+          const providerCatalog = catalog.filter(
+            (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
+          );
+          const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
           const size =
             catalogPackage?.size ?? sizeFromDataValue(row?.data_value);
           const dataValue = String(row?.data_value || "");
+          const normalizedDataValue = normalizeKey(dataValue);
+          const packageBasePriceRow = (activePricingRows || []).find(
+            (pricing: any) => {
+              if (
+                normalizeKey(pricing?.provider) !== normalizeKey(provider)
+              ) return false;
+              const packageIdMatches =
+                catalogPackage?.id &&
+                String(pricing?.package_id || "") ===
+                  String(catalogPackage.id);
+              if (packageIdMatches) return true;
+
+              const pricingType = normalizeKey(pricing?.type);
+              const pricingSize =
+                pricing?.size !== null &&
+                pricing?.size !== undefined &&
+                String(pricing.size).trim() !== ""
+                  ? `${pricing.size}GB`
+                  : "";
+              const pricingDescriptor =
+                pricingSize && !pricingType.includes(pricingSize)
+                  ? `${pricingType} - ${pricingSize}`
+                  : pricingType;
+              return (
+                normalizeNetworkKey(pricing?.network) ===
+                  normalizeNetworkKey(row?.network) &&
+                (pricingDescriptor === normalizedDataValue ||
+                  pricingType === normalizedDataValue)
+              );
+            },
+          );
+          const adminBasePrice = Number(packageBasePriceRow?.base_price);
+          const hasAdminBasePrice =
+            Number.isFinite(adminBasePrice) && adminBasePrice > 0;
+          const storedPrice = Number(row?.price || 0);
+          const effectivePrice = row?.uses_admin_base_price
+            ? hasAdminBasePrice
+              ? adminBasePrice
+              : 0
+            : storedPrice;
+          const catalogBasePrice = Number(catalogPackage?.price);
+          if (!Number.isFinite(effectivePrice) || effectivePrice <= 0) {
+            return null;
+          }
 
           return {
             id: Number(row?.id),
-            network: normalizeKey(row?.network),
+            network: normalizeNetworkKey(row?.network),
             data_value: dataValue,
             title: row?.title || `${row?.network || ""} — ${dataValue}`.trim(),
-            price: Number(row?.price || 0),
-            base_price: catalogPackage?.price
-              ? Number(catalogPackage.price) / 100
-              : Number(row?.price || 0),
+            price: effectivePrice,
+            base_price: hasAdminBasePrice
+              ? adminBasePrice
+              : Number.isFinite(catalogBasePrice) && catalogBasePrice > 0
+                ? catalogBasePrice / 100
+                : effectivePrice,
             tier_extra: Math.max(
               0,
-              Number(row?.price || 0) -
-                (catalogPackage?.price
-                  ? Number(catalogPackage.price) / 100
-                  : Number(row?.price || 0)),
+              effectivePrice -
+                (hasAdminBasePrice
+                  ? adminBasePrice
+                  : Number.isFinite(catalogBasePrice) && catalogBasePrice > 0
+                    ? catalogBasePrice / 100
+                    : effectivePrice),
             ),
             tier_name: offerTier(row) || null,
             package_id: catalogPackage?.id ?? null,
             type: catalogPackage?.type ?? null,
             size: size !== null && size !== undefined ? size : null,
+            provider,
           };
-        });
+        })
+        .filter(Boolean);
 
       return new Response(
         JSON.stringify({
           offers: packages,
           agent_tier: agentTier || null,
           super_agent_id: assignedSuperAgentId,
+          providers,
         }),
         {
           status: 200,
@@ -1308,6 +1439,7 @@ Deno.serve(async (req) => {
 
       const network = String(body?.network || "").trim();
       const type = String(body?.type || "").trim();
+      const provider = await getActiveProvider(supabaseAdmin);
       const basePrice = Number(body?.basePrice || body?.base_price || 0);
 
       if (!network || !type) {
@@ -1334,13 +1466,14 @@ Deno.serve(async (req) => {
         .from("package_pricing")
         .upsert(
           {
+            provider,
             network,
             type,
             base_price: basePrice,
             created_by: user.id,
             updated_at: new Date().toISOString(),
           },
-          { onConflict: "package_pricing_network_type_unique" },
+          { onConflict: "provider,network,type" },
         )
         .select();
 
@@ -1369,10 +1502,18 @@ Deno.serve(async (req) => {
 
     if (action === "getPackageBasePrices") {
       const networkFilter = String(body?.network || "").trim();
+      const providers = await getEnabledProviders(supabaseAdmin);
+      if (providers.length === 0) {
+        return new Response(JSON.stringify({ pricing: [], providers }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
 
       let query = supabaseAdmin
         .from("package_pricing")
         .select("*")
+        .in("provider", providers)
         .eq("is_active", true)
         .order("network", { ascending: true });
 
@@ -1400,7 +1541,7 @@ Deno.serve(async (req) => {
         throw error;
       }
 
-      return new Response(JSON.stringify({ pricing: data || [] }), {
+      return new Response(JSON.stringify({ pricing: data || [], providers }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1409,6 +1550,15 @@ Deno.serve(async (req) => {
     if (action === "getPackageBasePrice") {
       const network = String(body?.network || "").trim();
       const type = String(body?.type || "").trim();
+      const provider = String(
+        body?.provider || await getActiveProvider(supabaseAdmin),
+      ).trim().toLowerCase();
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return new Response(JSON.stringify({ error: "Unsupported provider" }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
 
       if (!network || !type) {
         return new Response(
@@ -1423,6 +1573,7 @@ Deno.serve(async (req) => {
       const { data, error } = await supabaseAdmin
         .from("package_pricing")
         .select("*")
+        .eq("provider", provider)
         .eq("network", network)
         .eq("type", type)
         .eq("is_active", true)
@@ -1450,7 +1601,7 @@ Deno.serve(async (req) => {
         });
       }
 
-      return new Response(JSON.stringify({ pricing: data }), {
+      return new Response(JSON.stringify({ pricing: data, provider }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

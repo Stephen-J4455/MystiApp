@@ -1033,8 +1033,8 @@ export default function HomeScreen({ navigation }) {
           // what the super agent did THEMSELVES. Their sub-agents' orders, top
           // ups and wallet movements were invisible on Home entirely, which is
           // the wrong screen for it: the super agent's whole job is running
-          // that roster, and the Transactions screen (two taps deeper) already
-          // showed it. Home is the screen they open.
+          // that roster, and the Transactions screen (two taps deeper) showed
+          // only its orders. Home is the screen they open.
           //
           // This block previously pulled in ONLY `status = 'held'` orders, on
           // the reasoning that held rows are the ones needing action. That is a

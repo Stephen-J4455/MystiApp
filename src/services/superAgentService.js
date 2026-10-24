@@ -6,10 +6,12 @@ import { getEdgeFunctionName } from "../lib/env.js";
 // performed by Supabase Edge Functions, never with a browser-exposed service key.
 const adminClient = supabase;
 
-const normalizeKey = (val) =>
-  String(val || "")
-    .trim()
-    .toUpperCase();
+const normalizeKey = (val) => String(val || "").trim().toUpperCase();
+
+const normalizeNetworkKey = (val) => {
+  const key = normalizeKey(val);
+  return key === "VODAFONE" || key === "VOD" ? "TELECEL" : key;
+};
 
 export const formatBundleSizeFromDescriptor = (descriptor) => {
   const match = String(descriptor || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
@@ -22,33 +24,89 @@ const sizeFromDataValue = (dataValue) => {
 };
 
 export const fetchCatalogPackages = async () => {
-  // 1. Try edge function
   try {
-    const { data: edgeData, error: edgeError } =
-      await supabase.functions.invoke(getEdgeFunctionName("get-packages"), {});
-    const catalog = edgeData?.payload || edgeData || [];
-    if (Array.isArray(catalog) && catalog.length > 0) {
-      return catalog;
+    const { data: providerData, error: providerError } =
+      await supabase.functions.invoke(
+        getEdgeFunctionName("get-bisdel-packages"),
+      );
+    if (providerError) {
+      console.error("Could not load enabled provider settings:", providerError);
+      return [];
     }
-  } catch (err) {
-    // Edge function failed, proceed to direct fetch
-  }
 
-  // 2. If the Edge Function is unavailable, return an empty catalog. The
-  // provider API key must not be shipped in a Vercel/browser bundle.
-  console.warn("Provider catalog Edge Function unavailable");
-  return [];
+    const catalog = [];
+    if (providerData?.jehuca_enabled === true) {
+      const { data: jehucaData, error: jehucaError } =
+        await supabase.functions.invoke(getEdgeFunctionName("get-packages"));
+      if (jehucaError) {
+        console.error("Could not fetch Jehuca packages:", jehucaError);
+      } else {
+        const jehucaPackages = jehucaData?.payload || jehucaData || [];
+        if (Array.isArray(jehucaPackages)) {
+          catalog.push(
+            ...jehucaPackages.map((pkg) => ({
+              ...pkg,
+              provider: "jehuca",
+            })),
+          );
+        }
+      }
+    }
+
+    if (providerData?.bisdel_enabled === true) {
+      if (providerData?.success === false) {
+        console.error(
+          "Could not fetch enabled Bisdel packages:",
+          providerData.error || providerData,
+        );
+      } else if (Array.isArray(providerData?.payload)) {
+        catalog.push(
+          ...providerData.payload.map((pkg) => ({
+            ...pkg,
+          })),
+        );
+      }
+    }
+
+    if (
+      providerData?.jehuca_enabled !== true &&
+      providerData?.bisdel_enabled !== true
+    ) {
+      console.warn("No data provider APIs are enabled.");
+    }
+
+    if (catalog.length === 0 && providerData?.success === false) {
+      console.error("No enabled provider catalog could be loaded.");
+    }
+
+    if (!Array.isArray(catalog)) {
+      console.error("Combined provider catalog is invalid:", providerData);
+      return [];
+    }
+
+    return catalog;
+  } catch (err) {
+    console.error("Provider catalog request failed:", err);
+    return [];
+  }
 };
 
 const findCatalogPackageForOffer = (catalog, offer) => {
   if (!Array.isArray(catalog) || catalog.length === 0) return null;
-  const net = normalizeKey(offer?.network);
+  const net = normalizeNetworkKey(offer?.network);
   const dataVal = normalizeKey(offer?.data_value);
   if (!dataVal) return null;
 
   return (
     catalog.find((pkg) => {
-      if (normalizeKey(pkg?.network) !== net) return false;
+      if (
+        offer?.provider &&
+        String(pkg?.provider || "jehuca").toLowerCase() !==
+          String(offer.provider).toLowerCase()
+      ) {
+        return false;
+      }
+      if (normalizeNetworkKey(pkg?.network) !== net) return false;
       const type = normalizeKey(pkg?.type);
       const size =
         pkg?.size !== undefined &&
@@ -123,7 +181,11 @@ export const loadSubAgentPackages = async ({
     const { data: edgeData, error: edgeError } =
       await supabase.functions.invoke(
         getEdgeFunctionName("super-agent-offers"),
-        { body: { action: "getAgentPackages", network } },
+        // Do not send the UI network filter to the edge. Bisdel calls its
+        // Telecel catalog "Vodafone"; filtering there by "TELECEL" would
+        // discard those offers before the client can normalize the alias.
+        // Filter locally below, after the server returns authorized offers.
+        { body: { action: "getAgentPackages" } },
       );
 
     if (!edgeError && edgeData && Array.isArray(edgeData.offers)) {
@@ -179,7 +241,7 @@ export const loadSubAgentPackages = async ({
 
     const publishedOffers = Array.isArray(offerRows) ? offerRows : [];
     const packageKeyOf = (row) =>
-      `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+      `${normalizeKey(row?.provider || "jehuca")}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
     const offerTier = (row) =>
       String(row?.tier_name || row?.default_tier_name || "").trim();
 
@@ -206,11 +268,21 @@ export const loadSubAgentPackages = async ({
     });
 
     const catalog = await fetchCatalogPackages();
-    const networkFilter = network ? normalizeKey(network) : null;
+    const providers = [...new Set(catalog.map((pkg) => pkg.provider))];
+    if (providers.length === 0) {
+      return {
+        offers: [],
+        agent_tier: agentTier || null,
+        super_agent_id: assignedSuperAgentId,
+        providers: [],
+      };
+    }
+    const networkFilter = network ? normalizeNetworkKey(network) : null;
     const { data: activePricingRows, error: activePricingError } =
       await adminClient
         .from("package_pricing")
-        .select("package_id, network, type")
+        .select("provider, package_id, network, type, size, base_price")
+        .in("provider", providers)
         .eq("is_active", true);
 
     if (activePricingError) {
@@ -235,12 +307,12 @@ export const loadSubAgentPackages = async ({
           !descriptor.includes(`${rowSize}GB`)
             ? `${descriptor} - ${rowSize}GB`
             : descriptor;
-        return `${normalizeKey(row?.network)}::${descriptorWithSize}`;
+        return `${normalizeKey(row?.provider)}::${normalizeNetworkKey(row?.network)}::${descriptorWithSize}`;
       }),
     );
     const activePackageIds = new Set(
       (activePricingRows || [])
-        .map((row) => String(row?.package_id || ""))
+        .map((row) => `${normalizeKey(row?.provider)}::${String(row?.package_id || "")}`)
         .filter(Boolean),
     );
 
@@ -249,31 +321,81 @@ export const loadSubAgentPackages = async ({
         const rowPackageId = String(row?.package_id || "");
         const catalogPackage = findCatalogPackageForOffer(catalog, row);
         const catalogPackageId = String(catalogPackage?.id || "");
-        const rowKey = `${normalizeKey(row?.network)}::${normalizeKey(row?.data_value)}`;
+        const provider = String(row?.provider || "jehuca").toLowerCase();
+        const rowKey = `${normalizeKey(provider)}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
         return (
-          (rowPackageId && activePackageIds.has(rowPackageId)) ||
-          (catalogPackageId && activePackageIds.has(catalogPackageId)) ||
+          (rowPackageId &&
+            activePackageIds.has(`${normalizeKey(provider)}::${rowPackageId}`)) ||
+          (catalogPackageId &&
+            activePackageIds.has(`${normalizeKey(provider)}::${catalogPackageId}`)) ||
           activePricingKeys.has(rowKey)
         );
       })
       .filter(
-        (row) => !networkFilter || normalizeKey(row?.network) === networkFilter,
+        (row) => !networkFilter || normalizeNetworkKey(row?.network) === networkFilter,
       )
       .map((row) => {
-        const catalogPackage = findCatalogPackageForOffer(catalog, row);
+        const provider = String(row?.provider || "jehuca").toLowerCase();
+        const providerCatalog = catalog.filter(
+          (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
+        );
+        const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
         const descriptor = String(row?.data_value || "");
         const size = catalogPackage?.size ?? sizeFromDataValue(descriptor);
 
-        const tierPrice = Number(row?.price || 0);
-        const basePrice = catalogPackage?.price
-          ? catalogPackage.price / 100
-          : tierPrice;
+        const normalizedDescriptor = normalizeKey(descriptor);
+        const packageBasePriceRow = (activePricingRows || []).find(
+          (pricing) => {
+            if (normalizeKey(pricing?.provider) !== normalizeKey(provider)) {
+              return false;
+            }
+            if (
+              catalogPackage?.id &&
+              String(pricing?.package_id || "") === String(catalogPackage.id)
+            ) {
+              return true;
+            }
+            const pricingType = normalizeKey(pricing?.type);
+            const pricingSize =
+              pricing?.size !== null &&
+              pricing?.size !== undefined &&
+              String(pricing.size).trim() !== ""
+                ? `${pricing.size}GB`
+                : "";
+            const pricingDescriptor =
+              pricingSize && !pricingType.includes(pricingSize)
+                ? `${pricingType} - ${pricingSize}`
+                : pricingType;
+            return (
+              normalizeNetworkKey(pricing?.network) ===
+                normalizeNetworkKey(row?.network) &&
+              (pricingDescriptor === normalizedDescriptor ||
+                pricingType === normalizedDescriptor)
+            );
+          },
+        );
+        const adminBasePrice = Number(packageBasePriceRow?.base_price);
+        const hasAdminBasePrice =
+          Number.isFinite(adminBasePrice) && adminBasePrice > 0;
+        const tierPrice = row?.uses_admin_base_price
+          ? hasAdminBasePrice
+            ? adminBasePrice
+            : 0
+          : Number(row?.price || 0);
+        const catalogPrice = Number(catalogPackage?.price);
+        if (!Number.isFinite(tierPrice) || tierPrice <= 0) return null;
+        const basePrice = hasAdminBasePrice
+          ? adminBasePrice
+          : Number.isFinite(catalogPrice) && catalogPrice > 0
+            ? catalogPrice / 100
+            : tierPrice;
 
         return {
           id: String(row.id),
           superAgentOfferId: row.id,
           package_id: catalogPackage?.id ?? null,
-          network: normalizeKey(row?.network),
+          provider,
+          network: normalizeNetworkKey(row?.network),
           data_value: descriptor,
           type: String(catalogPackage?.type || descriptor).toUpperCase(),
           title:
@@ -292,12 +414,14 @@ export const loadSubAgentPackages = async ({
               ? `${size} GB`
               : formatBundleSizeFromDescriptor(descriptor),
         };
-      });
+      })
+      .filter(Boolean);
 
     return {
       offers: mappedPackages,
       agent_tier: agentTier || null,
       super_agent_id: assignedSuperAgentId,
+      providers,
     };
   } catch (err) {
     console.error("Failed to load sub-agent packages directly:", err);
@@ -426,7 +550,14 @@ export const fetchSuperAgentTiers = async (superAgentId) => {
  * Upserts a tier-specific offer for a super agent.
  */
 export const upsertTierOffer = async ({ superAgentId, offer }) => {
-  const { network, data_value, tier_name, price } = offer;
+  const {
+    network,
+    data_value,
+    tier_name,
+    price,
+    provider = "jehuca",
+    uses_admin_base_price = false,
+  } = offer;
 
   // 1. Try edge function
   try {
@@ -439,7 +570,9 @@ export const upsertTierOffer = async ({ superAgentId, offer }) => {
             network,
             data_value,
             tier_name,
+            provider,
             price: Number(price),
+            uses_admin_base_price: uses_admin_base_price === true,
           },
         },
       },
@@ -454,7 +587,7 @@ export const upsertTierOffer = async ({ superAgentId, offer }) => {
 
   // 2. Direct fallback via adminClient
   try {
-    const net = normalizeKey(network);
+    const net = String(network || "").trim();
     const dataVal = String(data_value || "").trim();
     const tierName = String(tier_name || "").trim() || null;
     const priceNum = Number(price);
@@ -465,7 +598,8 @@ export const upsertTierOffer = async ({ superAgentId, offer }) => {
       .select("id")
       .eq("super_agent_id", superAgentId)
       .eq("network", net)
-      .eq("data_value", dataVal);
+      .eq("data_value", dataVal)
+      .eq("provider", provider);
 
     if (tierName) {
       query = query.eq("tier_name", tierName);
@@ -481,6 +615,7 @@ export const upsertTierOffer = async ({ superAgentId, offer }) => {
         .from("super_agent_offers")
         .update({
           price: priceNum,
+          uses_admin_base_price: uses_admin_base_price === true,
           is_active: true,
           updated_at: new Date().toISOString(),
         })
@@ -498,8 +633,10 @@ export const upsertTierOffer = async ({ superAgentId, offer }) => {
         title: `${net} — ${dataVal}`,
         network: net,
         data_value: dataVal,
+        provider,
         tier_name: tierName,
         price: priceNum,
+        uses_admin_base_price: uses_admin_base_price === true,
         is_active: true,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
@@ -543,7 +680,7 @@ export const upsertSuperAgentOffer = async ({ superAgentId, offer }) => {
     const payload = {
       super_agent_id: superAgentId,
       title: offer.title || `${offer.network} — ${offer.data_value}`,
-      network: normalizeKey(offer.network),
+      network: String(offer.network || "").trim(),
       data_value: String(offer.data_value || "").trim(),
       price: Number(offer.price),
       tier_name: offer.tier_name ? String(offer.tier_name).trim() : null,

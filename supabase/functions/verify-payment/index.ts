@@ -292,31 +292,59 @@ const JEHUCA_PACKAGES_URL =
  * Returns the price in MAJOR units (the provider reports pesewas, e.g. 500 for
  * Ghc 5.00) or null when the catalog is unreachable / the package is missing.
  */
-const fetchProviderPrice = async (packageId?: string | null) => {
+const fetchProviderPrice = async (
+  packageId?: string | null,
+  provider = "jehuca",
+) => {
   const id = String(packageId || "").trim();
   if (!id) return null;
 
-  const apiKey = Deno.env.get("JEHUCA_API_KEY");
-  if (!apiKey) return null;
+  const normalizedProvider = String(provider || "jehuca").toLowerCase();
 
   try {
-    const response = await fetch(JEHUCA_PACKAGES_URL, {
-      method: "GET",
-      headers: { "X-API-Key": apiKey },
-    });
+    let response: Response;
+    if (normalizedProvider === "bisdel") {
+      const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+      const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
+        .replace(/\0/g, "")
+        .trim();
+      if (!apiKey || !apiSecret) return null;
+      response = await fetch("https://bisdelgh.com/api/xx1/products.php", {
+        method: "GET",
+        headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+      });
+    } else {
+      const apiKey = Deno.env.get("JEHUCA_API_KEY");
+      if (!apiKey) return null;
+      response = await fetch(JEHUCA_PACKAGES_URL, {
+        method: "GET",
+        headers: { "X-API-Key": apiKey },
+      });
+    }
     if (!response.ok) return null;
     const payload = await response.json();
-    const list = Array.isArray(payload?.payload)
-      ? payload.payload
-      : Array.isArray(payload)
-        ? payload
-        : [];
+    const list = normalizedProvider === "bisdel"
+      ? Array.isArray(payload?.data?.products)
+        ? payload.data.products
+        : []
+      : Array.isArray(payload?.payload)
+        ? payload.payload
+        : Array.isArray(payload)
+          ? payload
+          : [];
     const match = list.find(
-      (p: { id?: string | number }) => String(p?.id ?? "") === id,
+      (p: { id?: string | number; product_id?: string | number }) =>
+        String(
+          normalizedProvider === "bisdel" ? p?.product_id ?? "" : p?.id ?? "",
+        ) === id,
     );
-    const raw = Number(match?.price);
+    const raw = Number(
+      normalizedProvider === "bisdel" ? match?.api_price : match?.price,
+    );
     if (!Number.isFinite(raw) || raw < 0) return null;
-    return Number((raw / 100).toFixed(2));
+    return Number(
+      (normalizedProvider === "bisdel" ? raw : raw / 100).toFixed(2),
+    );
   } catch (error) {
     console.warn("[resolve-api-cost] provider catalog lookup failed:", error);
     return null;
@@ -337,12 +365,14 @@ const resolveOrderApiCost = async (
     type,
     packageId,
     fallback,
+    provider,
   }: {
     audience: "super_agent" | "normal_user";
     network: string;
     type: string;
     packageId?: string | null;
     fallback: number;
+    provider: string;
   },
 ) => {
   try {
@@ -351,8 +381,9 @@ const resolveOrderApiCost = async (
       p_network: network,
       p_type: type,
       p_package_id: packageId || null,
-      p_live_cost: await fetchProviderPrice(packageId),
+      p_live_cost: await fetchProviderPrice(packageId, provider),
       p_fallback: fallback,
+      p_provider: provider,
     });
     if (error) throw error;
 
@@ -417,11 +448,13 @@ const resolveOrderApiCost = async (
         network,
         type,
         packageId,
+        provider,
       }: {
         audience: "super_agent" | "normal_user";
         network: string;
         type: string;
         packageId?: string | null;
+        provider: string;
       },
     ): Promise<number | null> => {
       const table =
@@ -447,6 +480,7 @@ const resolveOrderApiCost = async (
             .from(table)
             .select("base_price")
             .eq("package_id", cleanPackageId)
+            .eq("provider", provider)
             .eq("is_active", true)
             .maybeSingle();
           if (error) throw error;
@@ -463,6 +497,7 @@ const resolveOrderApiCost = async (
           .select("base_price")
           .eq("network", cleanNetwork)
           .eq("type", cleanType)
+          .eq("provider", provider)
           .eq("is_active", true)
           .maybeSingle();
         if (error) throw error;
@@ -585,6 +620,7 @@ Deno.serve(async (req) => {
       transaction_fee,
       network,
       super_agent_id,
+      provider_name,
     } = await req.json();
 
     console.log("Received request with params:", {
@@ -651,6 +687,36 @@ Deno.serve(async (req) => {
         );
       }
     }
+
+    const { data: providerSettings, error: providerSettingsError } =
+      await supabaseAdmin
+        .from("data_provider_settings")
+        .select("provider")
+        .eq("id", true)
+        .single();
+    if (providerSettingsError) throw providerSettingsError;
+    const configuredProvider = String(providerSettings.provider || "").toLowerCase();
+    if (configuredProvider !== "jehuca" && configuredProvider !== "bisdel") {
+      throw new Error("Configured data provider is invalid");
+    }
+    const requestedProvider = String(provider_name || configuredProvider)
+      .trim()
+      .toLowerCase();
+    if (requestedProvider !== "jehuca" && requestedProvider !== "bisdel") {
+      return new Response(
+        JSON.stringify({
+          error: "Unsupported data provider",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+    // A payment may complete after an administrator switches providers. Keep
+    // the provider carried with the paid checkout so the order reaches the
+    // catalog the customer selected rather than losing an already-paid order.
+    const activeProvider = requestedProvider;
 
     if (wallet_order) {
       // Server-authoritative role from `user_profiles`, not `user_metadata`.
@@ -733,6 +799,7 @@ Deno.serve(async (req) => {
                 .trim()
                 .toUpperCase(),
               packageId: String(provider_package_id || offer_id || "").trim(),
+              provider: activeProvider,
             });
 
             const saleAmount = Number(walletAmount.toFixed(2));
@@ -1026,6 +1093,7 @@ Deno.serve(async (req) => {
         provider_package_id: walletProviderPackageId || null,
         provider_type: walletProviderType || null,
         provider_size: walletProviderSize || null,
+        provider_name: activeProvider,
         device_token: null,
         country_code: "GH",
       };
@@ -1041,12 +1109,14 @@ Deno.serve(async (req) => {
         // platform actually owes.
         packageId: walletProviderPackageId || null,
         fallback: walletAmount,
+        provider: activeProvider,
       });
 
       const { data: order, error: orderError } = await supabaseAdmin
         .from("orders")
         .insert({
           ...orderData,
+          provider_name: activeProvider,
           // A wallet order is a super-agent purchase, so it resolves against
           // the super_agent discount tier. Snapshotted here because this order
           // is created before the Paystack path's cost resolution runs.
@@ -1215,6 +1285,7 @@ Deno.serve(async (req) => {
           user_id: user.id,
           order_id: order.id,
           order_type: "regular",
+          provider_name: activeProvider,
           payment_reference: reference,
           // The BUYER's role, not the money's source. A sub-agent's wallet
           // purchase is debited from their super agent's wallet, which is why
@@ -1712,6 +1783,7 @@ Deno.serve(async (req) => {
       // Last resort: an agent order's base_amount is already the provider cost,
       // and for a normal-user order the sale price bounds the cost.
       fallback: isAgentOrder ? settlement.baseAmount : Number(orderAmount || 0),
+      provider: activeProvider,
     });
     const apiCostSnapshot = orderApiCost.apiCost;
     const resolvedCostSource = orderApiCost.costSource;
@@ -1746,6 +1818,7 @@ Deno.serve(async (req) => {
         provider_package_id: String(provider_package_id || offer_id),
         provider_type: normalizedProviderType,
         provider_size: normalizedProviderSize,
+        provider_name: activeProvider,
         offer_title: orderTitle,
         network: orderNetwork,
         amount: orderAmount,
@@ -1830,6 +1903,7 @@ Deno.serve(async (req) => {
           : null,
         provider_type: normalizedProviderType || null,
         provider_size: normalizedProviderSize || null,
+        provider_name: activeProvider,
         base_amount: orderAmount,
         // The real provider cost, not the price the customer paid. Read back by
         // dispatch-order for its balance check and by analytics for margin.
@@ -1972,6 +2046,7 @@ Deno.serve(async (req) => {
         user_id: user.id,
         order_id: order.id,
         order_type: isAgentOrder ? "agent" : "regular",
+        provider_name: activeProvider,
         payment_reference: reference,
         buyer_type: isAgentOrder ? "sub_agent" : "normal_user",
         paystack_transaction_id: sharedOrderFields.paystack_transaction_id,

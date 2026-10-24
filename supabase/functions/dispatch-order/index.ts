@@ -568,11 +568,17 @@ const extractBalance = (payload: unknown): number => {
     record.available_balance,
     record.wallet_balance,
     (record.data as Record<string, unknown> | undefined)?.balance,
+    (record.data as Record<string, unknown> | undefined)?.wallet_balance,
     (
       (record.data as Record<string, unknown> | undefined)?.data as
         | Record<string, unknown>
         | undefined
     )?.balance,
+    (
+      (record.data as Record<string, unknown> | undefined)?.data as
+        | Record<string, unknown>
+        | undefined
+    )?.wallet_balance,
     (record.payload as Record<string, unknown> | undefined)?.balance,
   ];
 
@@ -583,6 +589,26 @@ const extractBalance = (payload: unknown): number => {
   return Number.NaN;
 };
 
+const submitBisdelOrder = (
+  providerPackageId: string,
+  phone: string,
+  externalOrderId: string,
+  headers: Record<string, string>,
+) =>
+  fetch("https://api.bisdelgh.com/api/xx1/order.php", {
+    method: "POST",
+    headers: {
+      ...headers,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      product_id: providerPackageId,
+      phone,
+      quantity: 1,
+      external_order_id: externalOrderId,
+    }),
+  });
+
 // `ctx` carries the request id and the resolved identity; see _shared/logger.ts.
 Deno.serve((req) =>
   withLogging(req, "dispatch-order", async (req, ctx) => {
@@ -590,10 +616,6 @@ Deno.serve((req) =>
       return new Response("ok", { headers: corsHeaders });
 
     try {
-      const apiKey = Deno.env.get("JEHUCA_API_KEY");
-      if (!apiKey)
-        return respond({ error: "Provider API is not configured" }, 500);
-
       const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
       const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
       const serviceRoleKey =
@@ -671,6 +693,31 @@ Deno.serve((req) =>
         return respond({ error: "This order was cancelled" }, 409);
       }
 
+      const providerName = String(order.provider_name || "jehuca").toLowerCase();
+      if (providerName !== "jehuca" && providerName !== "bisdel") {
+        return respond({ error: "Order has an unsupported data provider" }, 500);
+      }
+      const providerHeaders: Record<string, string> =
+        providerName === "bisdel"
+          ? {
+              "X-API-Key": (Deno.env.get("BISDEL_DB") ?? "")
+                .replace(/\0/g, "")
+                .trim(),
+              "X-API-Secret": (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
+                .replace(/\0/g, "")
+                .trim(),
+            }
+          : { "X-API-Key": Deno.env.get("JEHUCA_API_KEY") || "" };
+      if (
+        !providerHeaders["X-API-Key"] ||
+        (providerName === "bisdel" && !providerHeaders["X-API-Secret"])
+      ) {
+        return respond(
+          { error: `${providerName} API credentials are not configured` },
+          500,
+        );
+      }
+
       // Already handed over: report success without creating a duplicate order
       // at the provider.
       if (order.jehuca_order_id) {
@@ -678,6 +725,8 @@ Deno.serve((req) =>
           success: true,
           already_dispatched: true,
           status: order.status,
+          provider_name: providerName,
+          provider_order_id: order.provider_order_id || null,
           jehuca_order_id: order.jehuca_order_id,
           jehuca_order_status: order.jehuca_order_status || null,
         });
@@ -706,7 +755,11 @@ Deno.serve((req) =>
           String(order.data_amount || order.offer_title || ""),
       );
 
-      if (!providerPackageId || !providerSize || !providerType || !cleanPhone) {
+      const missingProviderDetails =
+        !providerPackageId ||
+        !cleanPhone ||
+        (providerName === "jehuca" && (!providerSize || !providerType));
+      if (missingProviderDetails) {
         return respond(
           {
             error:
@@ -738,93 +791,135 @@ Deno.serve((req) =>
         cost = Number(order.amount || 0);
       }
 
-      const balanceResponse = await fetch(JEHUCA_BALANCE_URL, {
-        method: "GET",
-        headers: { "X-API-Key": apiKey },
-      });
-      const balancePayload = await balanceResponse.json().catch(() => null);
-      const availableBalance = extractBalance(balancePayload);
-
-      if (!Number.isFinite(availableBalance)) {
-        // If the balance cannot be read, do not dispatch blindly. Queue the
-        // order instead so the admin can retry once the provider account is
-        // confirmed to be funded.
-        console.error(
-          "[Dispatch] Could not read provider balance:",
-          balancePayload,
-        );
-        await admin
-          .from(table)
-          .update({
-            status: "pending",
-            provider_deferred_at: new Date().toISOString(),
-            provider_deferred_reason: "balance_check_failed",
-            provider_dispatch_attempts:
-              Number(order.provider_dispatch_attempts || 0) + 1,
-          })
-          .eq("id", order.id);
-
-        return respond(
-          {
-            success: false,
-            deferred: true,
-            reason: "balance_check_failed",
-            error:
-              "Could not confirm the provider account balance. The order was queued for retry.",
-          },
-          202,
-        );
-      }
-
-      if (availableBalance < cost) {
-        await admin
-          .from(table)
-          .update({
-            status: "pending",
-            provider_deferred_at: new Date().toISOString(),
-            provider_deferred_reason: "insufficient_api_balance",
-            provider_dispatch_attempts:
-              Number(order.provider_dispatch_attempts || 0) + 1,
-          })
-          .eq("id", order.id);
-
-        console.warn("[Dispatch] Provider balance too low, order queued:", {
-          order_id: order.id,
-          available_balance: availableBalance,
-          required: cost,
+      if (providerName === "jehuca") {
+        const balanceResponse = await fetch(JEHUCA_BALANCE_URL, {
+          method: "GET",
+          headers: providerHeaders,
         });
+        const balancePayload = await balanceResponse.json().catch(() => null);
+        const availableBalance = extractBalance(balancePayload);
 
-        return respond(
-          {
-            success: false,
-            deferred: true,
-            reason: "insufficient_api_balance",
+        if (!Number.isFinite(availableBalance)) {
+          console.error(
+            "[Dispatch] Could not read provider balance:",
+            balancePayload,
+          );
+          await admin
+            .from(table)
+            .update({
+              status: "pending",
+              provider_deferred_at: new Date().toISOString(),
+              provider_deferred_reason: "balance_check_failed",
+              provider_dispatch_attempts:
+                Number(order.provider_dispatch_attempts || 0) + 1,
+            })
+            .eq("id", order.id);
+
+          return respond(
+            {
+              success: false,
+              deferred: true,
+              reason: "balance_check_failed",
+              error:
+                "Could not confirm the provider account balance. The order was queued for retry.",
+            },
+            202,
+          );
+        }
+
+        if (availableBalance < cost) {
+          await admin
+            .from(table)
+            .update({
+              status: "pending",
+              provider_deferred_at: new Date().toISOString(),
+              provider_deferred_reason: "insufficient_api_balance",
+              provider_dispatch_attempts:
+                Number(order.provider_dispatch_attempts || 0) + 1,
+            })
+            .eq("id", order.id);
+
+          console.warn("[Dispatch] Provider balance too low, order queued:", {
+            order_id: order.id,
             available_balance: availableBalance,
             required: cost,
-            error:
-              "The provider account needs a top-up before this order can be sent.",
+          });
+
+          return respond(
+            {
+              success: false,
+              deferred: true,
+              reason: "insufficient_api_balance",
+              available_balance: availableBalance,
+              required: cost,
+              error:
+                "The provider account needs a top-up before this order can be sent.",
+            },
+            202,
+          );
+        }
+      }
+
+      let providerResponse: Response;
+      try {
+        providerResponse = providerName === "bisdel"
+          ? await submitBisdelOrder(
+              providerPackageId,
+              cleanPhone,
+              `mysti-${orderType}-${order.id}`,
+              providerHeaders,
+            )
+          : await fetch(JEHUCA_ORDERS_URL, {
+            method: "POST",
+            headers: {
+              ...providerHeaders,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              packages: [
+                {
+                  packageId: providerPackageId,
+                  size: toMilliGb(providerSize),
+                  network,
+                  type: providerType,
+                  phone: cleanPhone,
+                },
+              ],
+            }),
+          });
+      } catch (error) {
+        if (providerName !== "bisdel") throw error;
+
+        console.error("[Dispatch] Bisdel order request failed:", {
+          order_id: order.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await admin
+          .from(table)
+          .update({
+            status: "pending",
+            provider_deferred_at: new Date().toISOString(),
+            provider_deferred_reason: "provider_unreachable",
+            provider_dispatch_attempts:
+              Number(order.provider_dispatch_attempts || 0) + 1,
+          })
+          .eq("id", order.id);
+        return respond(
+          {
+            success: false,
+            deferred: true,
+            reason: "provider_unreachable",
+            error: "Bisdel could not be reached. The order was queued for retry.",
           },
           202,
         );
       }
-
-      const providerResponse = await fetch(JEHUCA_ORDERS_URL, {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          packages: [
-            {
-              packageId: providerPackageId,
-              size: toMilliGb(providerSize),
-              network,
-              type: providerType,
-              phone: cleanPhone,
-            },
-          ],
-        }),
-      });
       const providerData = await providerResponse.json().catch(() => null);
-      const accepted = providerResponse.ok && providerData?.status === true;
+      const accepted =
+        providerResponse.ok &&
+        (providerName === "bisdel"
+          ? providerData?.success === true
+          : providerData?.status === true);
 
       if (!accepted) {
         await admin
@@ -875,26 +970,37 @@ Deno.serve((req) =>
       // Every later status check then skipped the row entirely, and any order
       // that did get an id was checked against a 404-prone value.
       const providerPayload = providerData?.payload;
-      const jehucaOrderId =
-        providerPayload?.orderId ??
-        providerData?.orderId ??
-        providerPayload?.id ??
-        (Array.isArray(providerPayload) ? providerPayload[0]?.orderId : null) ??
-        (Array.isArray(providerPayload) ? providerPayload[0]?.id : null) ??
-        null;
+      const bisdelOrder = providerData?.data || {};
+      const providerOrderId = providerName === "bisdel"
+        ? bisdelOrder.order_id
+        : (
+            providerPayload?.orderId ??
+            providerData?.orderId ??
+            providerPayload?.id ??
+            (Array.isArray(providerPayload)
+              ? providerPayload[0]?.orderId
+              : null) ??
+            (Array.isArray(providerPayload) ? providerPayload[0]?.id : null)
+          );
+      const jehucaOrderId = providerName === "bisdel"
+        ? (bisdelOrder.order_reference ?? null)
+        : providerOrderId;
 
       // The status is at `payload.packages[0].status`, NOT at the top level -
       // the top-level `status` is the boolean. Writing the boolean here is
       // exactly how six rows came to hold the literal string "true" and
       // rendered as "True" in the transaction history.
-      const jehucaOrderStatus =
-        (Array.isArray(providerPayload)
-          ? providerPayload[0]?.packages?.[0]?.status
-          : providerPayload?.packages?.[0]?.status) ??
-        (Array.isArray(providerPayload)
-          ? providerPayload[0]?.status
-          : providerPayload?.status) ??
-        "accepted";
+      const jehucaOrderStatus = providerName === "bisdel"
+        ? String(bisdelOrder.status || "accepted")
+        : (
+            (Array.isArray(providerPayload)
+              ? providerPayload[0]?.packages?.[0]?.status
+              : providerPayload?.packages?.[0]?.status) ??
+            (Array.isArray(providerPayload)
+              ? providerPayload[0]?.status
+              : providerPayload?.status) ??
+            "accepted"
+          );
 
       if (!jehucaOrderId) {
         // The provider accepted the order (this branch is only reached when
@@ -937,6 +1043,10 @@ Deno.serve((req) =>
                 jehuca_order_id: jehucaOrderId,
                 jehuca_order_status: jehucaOrderStatus,
                 jehuca_response: providerData ?? null,
+                provider_name: providerName,
+                provider_order_id: providerOrderId == null
+                  ? null
+                  : String(providerOrderId),
                 provider_deferred_at: null,
                 provider_deferred_reason: null,
                 provider_dispatch_attempts:
@@ -984,6 +1094,10 @@ Deno.serve((req) =>
                   jehuca_order_id: jehucaOrderId,
                   jehuca_order_status: jehucaOrderStatus,
                   jehuca_response: providerData ?? null,
+                  provider_name: providerName,
+                  provider_order_id: providerOrderId == null
+                    ? null
+                    : String(providerOrderId),
                   // Agent-only, for the same reason as above: a normal-user order is
                   // already written as 'settled' by verify-payment and a wallet order
                   // as 'settled' too, so re-writing it would be a no-op. Restricting
@@ -1003,6 +1117,8 @@ Deno.serve((req) =>
         success: true,
         deferred: false,
         status: "processing",
+        provider_name: providerName,
+        provider_order_id: providerOrderId ?? null,
         jehuca_order_id: jehucaOrderId,
         jehuca_order_status: jehucaOrderStatus,
       });

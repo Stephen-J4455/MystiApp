@@ -29,7 +29,6 @@ import {
   resolveOrderStatus,
 } from "../lib/orderStatus";
 import {
-  fetchNamedTopups,
   updateSubAgentOrderStatus,
   SUPER_AGENT_WRITABLE_STATUSES,
 } from "../lib/superAgentRoster";
@@ -237,43 +236,41 @@ const refreshProviderStatuses = async (orders, table) => {
   // The same provider id can appear on more than one row (a wallet order
   // mirrored onto `orders` and `agent_orders`, for instance). Asking the
   // provider about it twice is pure waste.
-  const orderIds = Array.from(
-    new Set(
-      needsRefresh
-        .map((order) => String(order.jehuca_order_id).trim())
-        .filter(Boolean),
-    ),
-  );
+  const providerGroups = new Map();
+  needsRefresh.forEach((order) => {
+    const providerName = String(order.provider_name || "jehuca").toLowerCase();
+    const orderId = String(order.jehuca_order_id || "").trim();
+    if (!orderId) return;
+    const ids = providerGroups.get(providerName) || new Set();
+    ids.add(orderId);
+    providerGroups.set(providerName, ids);
+  });
 
-  if (orderIds.length === 0) return rows;
+  if (providerGroups.size === 0) return rows;
 
   let results = [];
   try {
     const functionName = getEdgeFunctionName("check-order-status");
-    const { data, error } = await supabase.functions.invoke(functionName, {
-      body: { orderIds },
-    });
-
-    if (error) {
-      // The deployed build may be the OLD one, which only understands a
-      // single `orderId`. Fall back to the unsuffixed production name, and
-      // then to the per-order path, so a stale deployment degrades to "slow"
-      // rather than to "broken".
-      if (functionName !== "check-order-status") {
-        const fallback = await supabase.functions.invoke(
-          "check-order-status",
-          { body: { orderIds } },
-        );
-        if (!fallback.error) {
-          results = fallback.data?.results || [];
-        } else {
-          return await refreshProviderStatusesOneByOne(needsRefresh, table);
-        }
-      } else {
+    for (const [providerName, idSet] of providerGroups) {
+      const body = {
+        orderIds: Array.from(idSet),
+        provider_name: providerName,
+      };
+      let response = await supabase.functions.invoke(functionName, { body });
+      if (response.error && functionName !== "check-order-status") {
+        response = await supabase.functions.invoke("check-order-status", {
+          body,
+        });
+      }
+      if (response.error) {
         return await refreshProviderStatusesOneByOne(needsRefresh, table);
       }
-    } else {
-      results = data?.results || [];
+      results.push(
+        ...(response.data?.results || []).map((result) => ({
+          ...result,
+          providerName,
+        })),
+      );
     }
   } catch (error) {
     console.warn("Unable to refresh Jehuca status:", error);
@@ -305,7 +302,12 @@ const refreshProviderStatuses = async (orders, table) => {
       result.orderStatus ||
       result.providerOrderStatus ||
       (typeof result.status === "string" ? result.status : null);
-    if (isRealStatus(status)) statusById.set(String(result.orderId), status);
+    if (isRealStatus(status)) {
+      statusById.set(
+        `${result.providerName || "jehuca"}::${String(result.orderId)}`,
+        status,
+      );
+    }
   });
 
   // THE WRITE-BACK FALLBACK.
@@ -317,11 +319,15 @@ const refreshProviderStatuses = async (orders, table) => {
   // came from the OLD build, which has no server-side sync, so the write-back
   // below is the only persistence path there.
   const writeBack = async (order) => {
-    const providerStatus = statusById.get(String(order.jehuca_order_id));
+    const providerName = String(order.provider_name || "jehuca").toLowerCase();
+    const statusKey = `${providerName}::${String(order.jehuca_order_id)}`;
+    const providerStatus = statusById.get(statusKey);
     if (!providerStatus) return order;
 
     const result = (results || []).find(
-      (r) => String(r?.orderId) === String(order.jehuca_order_id),
+      (r) =>
+        String(r?.providerName || "jehuca").toLowerCase() === providerName &&
+        String(r?.orderId) === String(order.jehuca_order_id),
     );
 
     if (result?.synced !== true && providerStatus !== order.jehuca_order_status) {
@@ -377,7 +383,12 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
       try {
         const { data, error } = await supabase.functions.invoke(
           getEdgeFunctionName("check-order-status"),
-          { body: { orderId: order.jehuca_order_id } },
+          {
+            body: {
+              orderId: order.jehuca_order_id,
+              provider_name: order.provider_name || "jehuca",
+            },
+          },
         );
         if (error) {
           if (
@@ -385,7 +396,12 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
           ) {
             const fallback = await supabase.functions.invoke(
               "check-order-status",
-              { body: { orderId: order.jehuca_order_id } },
+              {
+                body: {
+                  orderId: order.jehuca_order_id,
+                  provider_name: order.provider_name || "jehuca",
+                },
+              },
             );
             if (!fallback.error) {
               const fallbackStatus =
@@ -733,40 +749,6 @@ export default function HistoryScreen({ navigation }) {
         }
 
         if (isSuperAgentProfile) {
-          // Wallet top-ups, named.
-          //
-          // "My sub-agents' activity" was orders only, so the one movement that
-          // is unambiguously about MONEY IN was missing from the list a super
-          // agent uses to check money in. A top-up is also the only roster event
-          // with no `agent_orders` row, so it cannot appear through any of the
-          // order branches above.
-          //
-          // Named rows rather than raw ones: `wallet_topups` is keyed on the
-          // payer's uuid, and an unnamed top-up renders as a uuid in the middle
-          // of a financial list.
-          try {
-            const namedTopups = await fetchNamedTopups({
-              superAgentId: user.id,
-              from,
-              to,
-            });
-
-            markExhausted(namedTopups.length);
-
-            const topupTransactions = namedTopups.map((topup) => ({
-              ...topup,
-              orderType: "topup",
-              source: "wallet_topup",
-            }));
-            allTransactions = [...allTransactions, ...topupTransactions];
-          } catch (topupError) {
-            // Non-fatal by design. A denied `wallet_topups` read returns HTTP
-            // 200 with zero rows rather than an error, so this catch only fires
-            // on a transport failure - but it must not blank the orders already
-            // loaded, which are the primary content of this screen.
-            console.error("Error fetching wallet top-ups:", topupError);
-          }
-
           // Declared OUTSIDE the `else` below, and mutated rather than shadowed.
                     //
                     // The wallet-order branch that follows needs this same map, and it must
@@ -850,8 +832,7 @@ export default function HistoryScreen({ navigation }) {
                       // "regular" correctly, so tagging them "agent" would offer controls that
                       // act on the wrong table.
                       //
-                      // Per-source try/catch, like the top-up branch above: one denied read
-                      // must not blank the orders already loaded.
+                      // A denied read must not blank the orders already loaded.
                       try {
                         const { data: walletOrders, error: walletOrdersError } = await supabase
                           .from("orders")
@@ -1255,7 +1236,11 @@ export default function HistoryScreen({ navigation }) {
           refresh and the "load more" trigger all belong to the same
           scrollable - the list itself. */}
       <FlatList
-        data={transactions}
+        data={transactions.filter(
+          (transaction) =>
+            transaction?.source !== "wallet_topup" &&
+            transaction?.orderType !== "topup",
+        )}
         keyExtractor={(transaction) =>
           `${transaction.source || transaction.orderType || "order"}-${transaction.id}`
         }
@@ -1292,7 +1277,7 @@ export default function HistoryScreen({ navigation }) {
                                           // ("true") can never become a status.
                                           //
                                           // `displayStatus` below is the RESOLVED status
-                                          // (provider preferred) and is what the card's
+                                          // (internal lifecycle preferred) and is what the card's
                                           // SPINE is coloured from. `DualStatus` resolves
                                           // the same way, so the spine and the pill can
                                           // never show different words.
@@ -1565,9 +1550,9 @@ export default function HistoryScreen({ navigation }) {
                     <View style={s.cardFoot}>
                                           {/* THE STATUS.
 
-                                              ONE status, and it is the RESOLVED one - the
-                                              provider's value when it is real, ours
-                                              otherwise. That is the right answer to "what
+                                              ONE status, and it is the RESOLVED one - our
+                                              internal lifecycle value when it is real,
+                                              provider otherwise. That is the right answer to "what
                                               state is this?", and it is the SAME value the
                                               card's status SPINE is coloured from, so the
                                               pill and the edge rule can never disagree.
@@ -1578,7 +1563,7 @@ export default function HistoryScreen({ navigation }) {
                                               cannot tell which of the two systems is right.
                                               Showing both made a settled order look
                                               undecided. The provider status is still fetched
-                                              and still drives the spine - it is simply not
+                                              and is persisted separately - it is simply not
                                               narrated.
 
                                               Rendered by `DualStatus`, the same component the
@@ -1909,8 +1894,8 @@ export default function HistoryScreen({ navigation }) {
  *
  * The two columns are genuinely different facts - our internal state and the
  * provider's mirrored one - and they can disagree. Collapsing them via
- * `resolveOrderStatus` picks the provider's value whenever it is real, so a
- * card can only ever show one status, and the disagreement disappears:
+ * `resolveOrderStatus` picks the internal lifecycle state whenever it is real,
+ * so a card can only ever show one status:
  *
  *     ours = completed, provider = processing
  *
@@ -1933,14 +1918,14 @@ export default function HistoryScreen({ navigation }) {
  * call Jehucal, and they certainly cannot tell which of the two is "right".
  * Showing them side by side made a settled order look undecided.
  *
- * So the card shows ONE status: the RESOLVED one, which is the provider's
- * value when it is real and ours otherwise. That is the same value the card's
- * status SPINE is coloured from, so the pill and the edge rule can never
+ * So the card shows ONE status: the RESOLVED one, which is our internal
+ * lifecycle value when it is real and the provider value otherwise. That is
+ * the same value the card's status SPINE is coloured from, so the pill and the edge rule can never
  * disagree - which was the whole reason the two columns were ever shown side
  * by side.
  *
- * The provider status is still fetched, still persisted, and still drives
- * the spine. Hiding it is a display decision, not a data decision.
+ * The provider status is still fetched and persisted separately. Hiding it is
+ * a display decision, not a data decision.
  */
 function DualStatus({
   s,
@@ -1953,13 +1938,13 @@ function DualStatus({
   // settlement panel (it owns the line).
   fill = false,
 }) {
-  // THE RESOLVED STATUS: the provider's when it is real, ours otherwise.
+  // THE RESOLVED STATUS: our internal lifecycle state when real, provider otherwise.
   //
   // This is exactly `resolveOrderStatus`'s rule, applied here so the pill and
   // the card's spine colour cannot disagree. The spine is coloured from
   // `resolveOrderStatus(transaction)`, and if the pill resolved the status a
   // different way the two could show different words.
-  const resolved = providerStatus || internalStatus;
+  const resolved = internalStatus || providerStatus;
 
   return (
     <View style={[s.statusPair, fill ? { flex: 1 } : null]}>

@@ -897,31 +897,9 @@ export const fetchSubAgentActivity = async ({
     });
   });
 
-  topups.forEach((topup) => {
-    const payerId = topup.funder_user_id || topup.agent_id;
-    // A super agent's OWN top-up is included deliberately - `agent_id` is one of
-    // the two branches in `fetchSubAgentTopups` - because Home previously showed
-    // a super agent no wallet activity whatsoever, not even their own funding.
-    // Naming is the only thing that differs, since there is no second person to
-    // attribute it to.
-    const isOwn = payerId === userId;
-    rows.push({
-      ...topup,
-      orderType: "topup",
-      source: "sub_agent_topup",
-      isSubAgentTransaction: !isOwn,
-      subAgentId: payerId,
-      // `funder_user_id`/`wallet_owner_id` arrived in 20260928_007 and may be
-      // NULL on rows written before it, so `agent_id` is the fallback. A payer
-      // outside the roster is a real event - a super agent funding their own
-      // wallet - and must not be dropped or mislabelled as somebody else's.
-      // `resolvePayerName` is the shared resolver, so a top-up is named the same
-      // way on Home, in History and on the ledger regardless of which screen
-      // loaded it.
-      subAgentName: resolvePayerName(payerId, nameForAgent, userId),
-    });
-  });
-
+  // Wallet top-ups are intentionally excluded from the activity feed. They are
+  // funding events, not transaction rows, and the main app's transaction list
+  // should show orders and wallet movements without the top-up noise.
   ledger.forEach((entry) => {
     rows.push({
       ...entry,

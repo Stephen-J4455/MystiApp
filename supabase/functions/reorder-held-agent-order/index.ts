@@ -250,23 +250,46 @@ const respond = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
 
-Deno.serve(async (req) => {
-  const apiKey = Deno.env.get("JEHUCA_API_KEY");
-  console.log(
-    "[Reorder] Startup check - JEHUCA_API_KEY:",
-    apiKey ? "configured" : "MISSING",
-  );
-  const appEnv = (Deno.env.get("APP_ENV") || "development")
-    .toLowerCase()
-    .trim();
-  console.log("[Reorder] APP_ENV:", appEnv);
-  if (!apiKey) {
-    console.error(
-      "[Reorder] JEHUCA_API_KEY is not configured in function secrets",
+const fetchProviderPackages = async (
+  providerName: string,
+  headers: Record<string, string>,
+) => {
+  if (providerName === "bisdel") {
+    const response = await fetch(
+      "https://api.bisdelgh.com/api/xx1/products.php",
+      { headers },
     );
-    return respond({ error: "Provider API is not configured" }, 500);
+    const data = await response.json();
+    if (!response.ok || data?.success !== true) {
+      throw new Error(data?.error || "Bisdel package request failed");
+    }
+    return (Array.isArray(data?.data?.products) ? data.data.products : []).map(
+      (product: Record<string, unknown>) => {
+        const volume = String(product.data_volume || "");
+        return {
+          id: String(product.product_id ?? ""),
+          network: String(product.network || "").trim().toUpperCase(),
+          type: String(product.name || volume).trim().toUpperCase(),
+          size: Number(volume.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0),
+          price: Number(product.api_price || 0) * 100,
+        };
+      },
+    );
   }
 
+  const response = await fetch(
+    "https://backend.jehucale-business.com/api/packages",
+    { headers },
+  );
+  const data = await response.json();
+  return Array.isArray(data?.payload)
+    ? data.payload
+    : Array.isArray(data)
+      ? data
+      : [];
+};
+
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS")
     return new Response("ok", { headers: corsHeaders });
 
@@ -346,6 +369,31 @@ Deno.serve(async (req) => {
     if (orderError || !order)
       return respond({ error: "Held order not found" }, 404);
 
+    const providerName = String(order.provider_name || "jehuca").toLowerCase();
+    if (providerName !== "jehuca" && providerName !== "bisdel") {
+      return respond({ error: "Order has an unsupported data provider" }, 500);
+    }
+    const providerHeaders: Record<string, string> =
+      providerName === "bisdel"
+        ? {
+            "X-API-Key": (Deno.env.get("BISDEL_DB") ?? "")
+              .replace(/\0/g, "")
+              .trim(),
+            "X-API-Secret": (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
+              .replace(/\0/g, "")
+              .trim(),
+          }
+        : { "X-API-Key": Deno.env.get("JEHUCA_API_KEY") || "" };
+    if (
+      !providerHeaders["X-API-Key"] ||
+      (providerName === "bisdel" && !providerHeaders["X-API-Secret"])
+    ) {
+      return respond(
+        { error: `${providerName} API credentials are not configured` },
+        500,
+      );
+    }
+
     let providerPackageId = String(order.provider_package_id || "");
     const title = String(order.offer_title || "").toUpperCase();
     const inferredSize = Number(title.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0);
@@ -385,16 +433,10 @@ Deno.serve(async (req) => {
         const offerNetwork = String(localOffer.network || network)
           .trim()
           .toUpperCase();
-        const catalogResponse = await fetch(
-          "https://backend.jehucale-business.com/api/packages",
-          { headers: { "X-API-Key": apiKey } },
+        const catalog = await fetchProviderPackages(
+          providerName,
+          providerHeaders,
         );
-        const catalogPayload = await catalogResponse.json();
-        const catalog = Array.isArray(catalogPayload?.payload)
-          ? catalogPayload.payload
-          : Array.isArray(catalogPayload)
-            ? catalogPayload
-            : [];
         const catalogMatch = catalog.find((item: any) => {
           const itemNetwork = String(item?.network || "")
             .trim()
@@ -428,10 +470,15 @@ Deno.serve(async (req) => {
       }
     }
 
-    if (!providerPackageId || !providerSize || !providerType || !phone) {
+    if (
+      !providerPackageId ||
+      !phone ||
+      (providerName === "jehuca" && (!providerSize || !providerType))
+    ) {
       const { data: pricingRows, error: pricingError } = await admin
         .from("package_pricing")
         .select("package_id, network, type, size, base_price")
+        .eq("provider", providerName)
         .eq("is_active", true)
         .ilike("network", network);
 
@@ -473,16 +520,10 @@ Deno.serve(async (req) => {
     }
 
     if (!providerPackageId) {
-      const catalogResponse = await fetch(
-        "https://backend.jehucale-business.com/api/packages",
-        { headers: { "X-API-Key": apiKey } },
+      const catalog = await fetchProviderPackages(
+        providerName,
+        providerHeaders,
       );
-      const catalogPayload = await catalogResponse.json();
-      const catalog = Array.isArray(catalogPayload?.payload)
-        ? catalogPayload.payload
-        : Array.isArray(catalogPayload)
-          ? catalogPayload
-          : [];
       const catalogMatch = catalog.find((item: any) => {
         const sameNetwork =
           String(item?.network || "")
@@ -567,31 +608,51 @@ Deno.serve(async (req) => {
       );
     }
 
-    const providerResponse = await fetch(
-      "https://backend.jehucale-business.com/api/orders",
-      {
-        method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          packages: [
-            {
-              packageId: providerPackageId,
-              size: providerSizeInMilliGb,
-              network: String(order.network || "").toUpperCase(),
-              type: providerType,
-              phone,
-            },
-          ],
-        }),
-      },
-    );
+    const providerResponse = providerName === "bisdel"
+      ? await fetch("https://api.bisdelgh.com/api/xx1/order.php", {
+          method: "POST",
+          headers: {
+            ...providerHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            product_id: providerPackageId,
+            phone,
+            quantity: 1,
+            external_order_id: `mysti-agent-order-${order.id}`,
+          }),
+        })
+      : await fetch("https://backend.jehucale-business.com/api/orders", {
+          method: "POST",
+          headers: {
+            ...providerHeaders,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            packages: [
+              {
+                packageId: providerPackageId,
+                size: providerSizeInMilliGb,
+                network: String(order.network || "").toUpperCase(),
+                type: providerType,
+                phone,
+              },
+            ],
+          }),
+        });
     const providerData = await providerResponse.json();
-    const accepted = providerResponse.ok && providerData?.status === true;
+    const accepted =
+      providerResponse.ok &&
+      (providerName === "bisdel"
+        ? providerData?.success === true
+        : providerData?.status === true);
     console.log("[Reorder] Provider response", {
       order_id: order.id,
       http_status: providerResponse.status,
       accepted,
-      provider_status: providerData?.status,
+      provider_status: providerName === "bisdel"
+        ? providerData?.data?.status
+        : providerData?.status,
       message: providerData?.message,
     });
     if (!accepted) {
@@ -608,14 +669,23 @@ Deno.serve(async (req) => {
       );
     }
 
-    const providerOrderId =
-      providerData?.payload?.orderId ||
-      providerData?.payload?.orders?.[0]?.id ||
-      null;
-    const providerStatus =
-      providerData?.payload?.orders?.[0]?.status ||
-      providerData?.status ||
-      "accepted";
+    const providerRecord = providerName === "bisdel"
+      ? providerData?.data || {}
+      : providerData?.payload || {};
+    const rawProviderOrderId = providerName === "bisdel"
+      ? providerRecord.order_id
+      : providerRecord.orderId || providerRecord.id;
+    const providerOrderId = providerName === "bisdel"
+      ? providerRecord.order_reference || null
+      : rawProviderOrderId || null;
+    const providerStatus = providerName === "bisdel"
+      ? String(providerRecord.status || "accepted")
+      : String(
+          providerRecord.packages?.[0]?.status ||
+            providerRecord.status ||
+            providerData?.status ||
+            "accepted",
+        );
     const { error: orderUpdateError } = await admin
       .from("agent_orders")
       .update({
@@ -631,6 +701,10 @@ Deno.serve(async (req) => {
         jehuca_order_id: providerOrderId,
         jehuca_order_status: providerStatus,
         jehuca_response: providerData,
+        provider_name: providerName,
+        provider_order_id: rawProviderOrderId == null
+          ? null
+          : String(rawProviderOrderId),
         settlement_status: "settled",
       })
       .eq("id", order.id);
@@ -645,6 +719,10 @@ Deno.serve(async (req) => {
         jehuca_order_id: providerOrderId,
         jehuca_order_status: providerStatus,
         jehuca_response: providerData,
+        provider_name: providerName,
+        provider_order_id: rawProviderOrderId == null
+          ? null
+          : String(rawProviderOrderId),
         settlement_status: "settled",
       })
       .eq("order_id", order.id)

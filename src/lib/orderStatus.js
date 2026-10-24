@@ -53,19 +53,20 @@ export const isRealStatus = (status) => {
 /**
  * Picks the status to show for an order row.
  *
- * The provider status wins when it is real, because it is the more current
- * and more specific signal. Otherwise the internal `status` is used, which is
- * why this is not a plain `||` chain.
+ * The internal status wins when it is real. It represents Mysti's order
+ * lifecycle (for example, processing once a provider accepts an order), while
+ * the provider status is kept separately as the provider's fulfillment state.
+ * The provider value is only a fallback when the internal status is absent.
  *
  * @param {object|null} order an `orders` or `agent_orders` row
  * @returns {string|null} a status string, or null when neither field is real
  */
 export const resolveOrderStatus = (order) => {
-  const provider = order?.jehuca_order_status;
-  if (isRealStatus(provider)) return provider.trim();
-
   const internal = order?.status;
   if (isRealStatus(internal)) return internal.trim();
+
+  const provider = order?.jehuca_order_status;
+  if (isRealStatus(provider)) return provider.trim();
 
   return null;
 };

@@ -217,10 +217,24 @@ const json = (body: unknown, status = 200) =>
 // Keep in sync with the CHECK constraint on public.api_cost_settings.audience.
 const API_COST_AUDIENCES = ["super_agent", "normal_user"];
 
+const resolvePaystackSecret = (request: Request) => {
+  let deployedName = "";
+  try {
+    deployedName = new URL(request.url).pathname.split("/").filter(Boolean).pop() || "";
+  } catch {
+    deployedName = "";
+  }
+  const isTest = deployedName.endsWith("-test");
+  return Deno.env.get(
+    isTest ? "TEST_PAYSTACK_SECRET_KEY" : "PAYSTACK_SECRET_KEY",
+  ) || null;
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS")
     return new Response("ok", { headers: corsHeaders });
 
+  let requestAction = "unknown";
   try {
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) return json({ error: "Missing authorization token" }, 401);
@@ -282,6 +296,7 @@ Deno.serve(async (req) => {
     const body =
       req.method === "POST" ? await req.json().catch(() => ({})) : {};
     const action = String(body.action || "listUsers");
+    requestAction = action;
 
     if (action === "listUsers") {
       const page = Math.max(1, Number(body.page) || 1);
@@ -790,28 +805,73 @@ Deno.serve(async (req) => {
       });
     }
 
+    if (action === "getDataProvider") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+      const { data, error } = await admin
+        .from("data_provider_settings")
+        .select("provider")
+        .eq("id", true)
+        .single();
+      if (error) throw error;
+      return json({ provider: data.provider });
+    }
+
+    if (action === "setDataProvider") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+      const provider = String(body.provider || "").trim().toLowerCase();
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return json({ error: "Provider must be jehuca or bisdel" }, 400);
+      }
+      const { data, error } = await admin
+        .from("data_provider_settings")
+        .upsert(
+          {
+            id: true,
+            provider,
+            updated_by: user.id,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "id" },
+        )
+        .select("provider")
+        .single();
+      if (error) throw error;
+      return json({ provider: data.provider });
+    }
+
     if (action === "listPackagePricing") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
       const table = String(body.table || "package_pricing");
+      const provider = String(body.provider || "jehuca").trim().toLowerCase();
       if (!["package_pricing", "normal_user_package_pricing"].includes(table)) {
         return json({ error: "Unsupported pricing table" }, 400);
+      }
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return json({ error: "Unsupported provider" }, 400);
       }
       const { data, error } = await admin
         .from(table)
         .select("*")
+        .eq("provider", provider)
         .order("network", { ascending: true });
       if (error) throw error;
-      return json({ pricing: data || [] });
+      return json({ pricing: data || [], provider });
     }
 
     if (action === "savePackagePricing") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
       const table = String(body.table || "package_pricing");
+      const provider = String(body.provider || "jehuca").trim().toLowerCase();
       const rows = Array.isArray(body.rows) ? body.rows : [];
       if (!["package_pricing", "normal_user_package_pricing"].includes(table)) {
         return json({ error: "Unsupported pricing table" }, 400);
+      }
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return json({ error: "Unsupported provider" }, 400);
       }
       if (rows.length === 0) {
         return json({ error: "At least one pricing row is required" }, 400);
@@ -833,6 +893,7 @@ Deno.serve(async (req) => {
           throw new Error("Package base price must be zero or greater");
         }
         return {
+          provider,
           package_id: row.package_id ? String(row.package_id) : null,
           network,
           type,
@@ -846,34 +907,43 @@ Deno.serve(async (req) => {
 
       const { data, error } = await admin
         .from(table)
-        .upsert(normalizedRows, { onConflict: "network, type" })
+        .upsert(normalizedRows, { onConflict: "provider,network,type" })
         .select();
       if (error) throw error;
-      return json({ pricing: data || [] });
+      return json({ pricing: data || [], provider });
     }
 
     if (action === "listApiCostSettings") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
       const audience = String(body.audience || "super_agent").trim();
+      const provider = String(body.provider || "jehuca").trim().toLowerCase();
       if (!API_COST_AUDIENCES.includes(audience)) {
         return json({ error: "Unsupported audience" }, 400);
+      }
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return json({ error: "Unsupported provider" }, 400);
       }
       const { data, error } = await admin
         .from("api_cost_settings")
         .select("*")
         .eq("audience", audience)
+        .eq("provider", provider)
         .order("network", { ascending: true });
       if (error) throw error;
-      return json({ settings: data || [] });
+      return json({ settings: data || [], provider });
     }
 
     if (action === "saveApiCostSettings") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
       const audience = String(body.audience || "super_agent").trim();
+      const provider = String(body.provider || "jehuca").trim().toLowerCase();
       if (!API_COST_AUDIENCES.includes(audience)) {
         return json({ error: "Unsupported audience" }, 400);
+      }
+      if (!["jehuca", "bisdel"].includes(provider)) {
+        return json({ error: "Unsupported provider" }, 400);
       }
       const rows = Array.isArray(body.rows) ? body.rows : [];
       if (rows.length === 0) {
@@ -897,6 +967,7 @@ Deno.serve(async (req) => {
         }
         return {
           audience,
+          provider,
           package_id: row.package_id ? String(row.package_id) : null,
           network,
           type,
@@ -912,10 +983,12 @@ Deno.serve(async (req) => {
 
       const { data, error } = await admin
         .from("api_cost_settings")
-        .upsert(normalizedRows, { onConflict: "audience,network,type" })
+        .upsert(normalizedRows, {
+          onConflict: "audience,provider,network,type",
+        })
         .select();
       if (error) throw error;
-      return json({ settings: data || [] });
+      return json({ settings: data || [], provider });
     }
 
     if (action === "updateSuperAgentBadge") {
@@ -1169,6 +1242,237 @@ Deno.serve(async (req) => {
       });
     }
 
+    if (action === "verifyPendingWalletTopup") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+
+      const reference = String(body.reference || "").trim();
+      if (!reference) return json({ error: "Payment reference is required" }, 400);
+
+      const { data: topup, error: topupError } = await admin
+        .from("wallet_topups")
+        .select("*")
+        .eq("reference", reference)
+        .maybeSingle();
+      if (topupError) throw topupError;
+      if (!topup) return json({ error: "Wallet top-up was not found" }, 404);
+      if (topup.status !== "pending" && topup.status !== "success") {
+        return json(
+          { error: `This top-up is already ${String(topup.status || "processed")}` },
+          409,
+        );
+      }
+
+      const paystackSecret = resolvePaystackSecret(req);
+      if (!paystackSecret) {
+        return json({ error: "Paystack verification is not configured" }, 500);
+      }
+
+      const paystackResponse = await fetch(
+        `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+        { headers: { Authorization: `Bearer ${paystackSecret}` } },
+      );
+      const paystackResult = await paystackResponse.json();
+      if (
+        !paystackResponse.ok ||
+        paystackResult?.status !== true ||
+        paystackResult?.data?.status !== "success"
+      ) {
+        return json({
+          success: false,
+          payment_status: paystackResult?.data?.status || "unverified",
+          message: "Paystack has not confirmed a successful payment.",
+        }, 409);
+      }
+      if (String(paystackResult.data.currency || "").toUpperCase() !== "GHS") {
+        return json({ error: "Paystack payment currency does not match GHS" }, 400);
+      }
+
+      const netAmount = Number(topup.amount);
+      if (!Number.isFinite(netAmount) || netAmount <= 0) {
+        return json({ error: "Recorded top-up amount is invalid" }, 400);
+      }
+      const { data: chargeSettings, error: chargeSettingsError } = await admin
+        .from("payment_charge_settings")
+        .select("wallet_topup_percent")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (chargeSettingsError) throw chargeSettingsError;
+      const recordedChargePercent =
+        topup.charge_percent == null ? null : Number(topup.charge_percent);
+      const chargePercent = Number(
+        recordedChargePercent ?? chargeSettings?.wallet_topup_percent ?? 1.95,
+      );
+      if (!Number.isFinite(chargePercent) || chargePercent < 0) {
+        return json({ error: "Wallet top-up charge setting is invalid" }, 500);
+      }
+      const recordedGross =
+        topup.gross_amount == null ? null : Number(topup.gross_amount);
+      if (
+        recordedGross !== null &&
+        (!Number.isFinite(recordedGross) || recordedGross <= 0)
+      ) {
+        return json({ error: "Recorded Paystack gross amount is invalid" }, 400);
+      }
+      const recordedChargeAmount =
+        topup.charge_amount == null ? null : Number(topup.charge_amount);
+      if (
+        recordedChargeAmount !== null &&
+        (!Number.isFinite(recordedChargeAmount) || recordedChargeAmount < 0)
+      ) {
+        return json({ error: "Recorded Paystack charge amount is invalid" }, 400);
+      }
+      const expectedGross =
+        recordedGross ??
+        Number(
+          (
+            netAmount +
+            Number(((netAmount * chargePercent) / 100).toFixed(2))
+          ).toFixed(2),
+        );
+      if (!Number.isFinite(expectedGross) || expectedGross < netAmount) {
+        return json({ error: "Expected Paystack gross amount is invalid" }, 400);
+      }
+      const receivedGross = Number(paystackResult.data.amount) / 100;
+      if (
+        !Number.isFinite(receivedGross) ||
+        Math.abs(receivedGross - expectedGross) > 0.01
+      ) {
+        return json(
+          {
+            error: "Paystack amount does not match this wallet top-up",
+            expected: expectedGross,
+            received: receivedGross,
+          },
+          400,
+        );
+      }
+
+      const payerId = String(topup.funder_user_id || topup.agent_id || "").trim();
+      if (!payerId) return json({ error: "Top-up payer could not be identified" }, 400);
+      const { data: payerProfile, error: payerProfileError } = await admin
+        .from("user_profiles")
+        .select("id, role, super_agent_id")
+        .eq("id", payerId)
+        .maybeSingle();
+      if (payerProfileError) throw payerProfileError;
+      const payerRole = normalizeRole(payerProfile?.role);
+      let walletOwnerId: string;
+      if (payerRole === "super_agent") {
+        walletOwnerId = payerId;
+      } else if (payerRole === "sub_agent") {
+        walletOwnerId = String(
+          topup.wallet_owner_id || payerProfile?.super_agent_id || "",
+        ).trim();
+        if (!walletOwnerId) {
+          return json(
+            { error: "Sub-agent has no assigned Super Agent wallet to fund" },
+            400,
+          );
+        }
+      } else {
+        return json({ error: "This account cannot fund an operational wallet" }, 400);
+      }
+
+      const topupId = String(topup.id);
+      const paystackTransactionId = String(paystackResult.data.id);
+      const creditWallet = async (
+        walletId: string,
+        referenceSuffix: string,
+        reason: string,
+      ) => {
+        const result = await admin.rpc("credit_super_agent_wallet", {
+          p_super_agent_id: walletId,
+          p_amount: netAmount,
+          p_reference: `wallet-topup-${topupId}${referenceSuffix}`,
+          p_reason: reason,
+          p_metadata: {
+            topup_id: topup.id,
+            paystack_transaction_id: paystackTransactionId,
+            funded_by: payerId,
+            funded_by_role: payerRole,
+            wallet_side: reason,
+            reconciled_by: identity.id,
+            reconciled_by_email: identity.email,
+          },
+        });
+        if (result.error) throw result.error;
+        if (!result.data?.success) {
+          throw new Error("Wallet credit could not be completed");
+        }
+        return result.data;
+      };
+
+      const ownerCredit = await creditWallet(
+        walletOwnerId,
+        "",
+        payerRole === "super_agent"
+          ? "wallet_topup"
+          : "sub_agent_wallet_topup_super_agent_side",
+      );
+      let subAgentBalance: number | null = null;
+      if (payerRole === "sub_agent") {
+        const mirrorCredit = await creditWallet(
+          payerId,
+          `:sub:${payerId}`,
+          "sub_agent_wallet_topup_sub_agent_side",
+        );
+        subAgentBalance = Number(mirrorCredit.balance || 0);
+      }
+
+      const updateData: Record<string, unknown> = {
+        status: "success",
+        paystack_transaction_id: paystackTransactionId,
+        paystack_transaction_status: paystackResult.data.status,
+        paid_at: paystackResult.data.paid_at || new Date().toISOString(),
+        channel: paystackResult.data.channel || null,
+        bank: paystackResult.data.authorization?.bank || null,
+        gross_amount: expectedGross,
+        charge_amount:
+          recordedChargeAmount === null
+            ? Number((expectedGross - netAmount).toFixed(2))
+            : recordedChargeAmount,
+        funder_user_id: payerId,
+        wallet_owner_id: walletOwnerId,
+      };
+      if (recordedChargePercent !== null) {
+        updateData.charge_percent = recordedChargePercent;
+      }
+      const optionalTopupColumns = new Set([
+        "gross_amount",
+        "charge_amount",
+        "charge_percent",
+        "funder_user_id",
+        "wallet_owner_id",
+      ]);
+      for (;;) {
+        const { error: updateError } = await admin
+          .from("wallet_topups")
+          .update(updateData)
+          .eq("id", topup.id)
+          .in("status", ["pending", "success"]);
+        if (!updateError) break;
+        if (updateError.code !== "42703") throw updateError;
+        const missingColumn =
+          /column\s+"?(\w+)"?\s+of relation\s+"?wallet_topups"?\s+does not exist/i.exec(
+            updateError.message || "",
+          )?.[1];
+        if (!missingColumn || !optionalTopupColumns.has(missingColumn)) {
+          throw updateError;
+        }
+        delete updateData[missingColumn];
+      }
+
+      return json({
+        success: true,
+        credited_amount: netAmount,
+        new_balance: Number(ownerCredit.balance || 0),
+        sub_agent_balance: subAgentBalance,
+        already_processed: Boolean(ownerCredit.already_processed),
+      });
+    }
+
     if (action === "initializeSuperAgentWallet") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
@@ -1351,6 +1655,76 @@ Deno.serve(async (req) => {
       return json({ result: data, reference, amount: roundedAmount });
     }
 
+    if (action === "adjustSubAgentWallet") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+      const subAgentId = String(body.subAgentId || "").trim();
+      const direction = String(body.direction || "").trim().toLowerCase();
+      const amount = Number(body.amount);
+      const note = String(body.note || "")
+        .trim()
+        .slice(0, 500);
+      if (!subAgentId) return json({ error: "Sub-agent is required" }, 400);
+      if (direction !== "credit" && direction !== "debit") {
+        return json({ error: "Choose credit or debit" }, 400);
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return json({ error: "Enter an amount greater than zero" }, 400);
+      }
+      const roundedAmount = Number(amount.toFixed(2));
+      if (roundedAmount <= 0) {
+        return json({ error: "Enter a valid amount" }, 400);
+      }
+
+      const { data: targetProfile, error: targetProfileError } = await admin
+        .from("user_profiles")
+        .select("id, role, super_agent_id")
+        .eq("id", subAgentId)
+        .maybeSingle();
+      if (targetProfileError) throw targetProfileError;
+      if (
+        !targetProfile ||
+        normalizeRole(targetProfile.role) !== "sub_agent" ||
+        !targetProfile.super_agent_id
+      ) {
+        return json(
+          { error: "Selected account is not an assigned sub-agent" },
+          400,
+        );
+      }
+
+      const reference = `admin-sub-agent-${direction}-${crypto.randomUUID()}`;
+      const { data, error } = await admin.rpc("admin_adjust_sub_agent_wallet", {
+        p_sub_agent_id: subAgentId,
+        p_amount: roundedAmount,
+        p_direction: direction,
+        p_reference: reference,
+        p_metadata: {
+          ...(direction === "credit"
+            ? { credited_by: user.id, credited_by_email: user.email || null }
+            : { debited_by: user.id, debited_by_email: user.email || null }),
+          note: note || null,
+        },
+      });
+      if (error) throw error;
+      if (data?.success === false) {
+        return json(
+          {
+            error: "Insufficient sub-agent wallet balance",
+            balance: Number(data.balance || 0),
+            required: roundedAmount,
+          },
+          400,
+        );
+      }
+      return json({
+        result: data,
+        reference,
+        amount: roundedAmount,
+        direction,
+      });
+    }
+
     if (action === "listDeferredOrders") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
@@ -1490,8 +1864,28 @@ Deno.serve(async (req) => {
 
     return json({ error: "Unsupported action" }, 400);
   } catch (error) {
+    const errorDetails =
+      error && typeof error === "object"
+        ? (error as {
+            code?: unknown;
+            details?: unknown;
+            hint?: unknown;
+            message?: unknown;
+          })
+        : null;
     const message =
-      error instanceof Error ? error.message : "Unexpected server error";
+      error instanceof Error
+        ? error.message
+        : typeof errorDetails?.message === "string"
+          ? errorDetails.message
+          : "Unexpected server error";
+    console.error("[admin-users] Request failed:", {
+      action: requestAction,
+      code: errorDetails?.code,
+      message,
+      details: errorDetails?.details,
+      hint: errorDetails?.hint,
+    });
     return json({ error: message }, 500);
   }
 });

@@ -201,6 +201,7 @@ const isRealStatus = (value: unknown): value is string => {
 interface SyncArgs {
   admin: AdminClient;
   identity: Identity;
+  providerName: string;
   orderId: string;
   providerOrderStatus: string | null;
   providerResponse: unknown;
@@ -222,6 +223,7 @@ interface SyncArgs {
 const syncProviderStatus = async ({
   admin,
   identity,
+  providerName,
   orderId,
   providerOrderStatus,
   providerResponse,
@@ -236,15 +238,20 @@ const syncProviderStatus = async ({
     admin
       .from("agent_orders")
       .select("id, agent_id, jehuca_order_status")
-      .eq("jehuca_order_id", orderId),
+      .eq("jehuca_order_id", orderId)
+      .eq("provider_name", providerName),
+      // Provider selection is snapshotted on the order, so status remains
+      // routable after the administrator switches the active catalog.
     admin
       .from("orders")
       .select("id, user_id, jehuca_order_status")
-      .eq("jehuca_order_id", orderId),
+      .eq("jehuca_order_id", orderId)
+      .eq("provider_name", providerName),
     admin
       .from("payment_transactions")
       .select("id, user_id, jehuca_order_status")
-      .eq("jehuca_order_id", orderId),
+      .eq("jehuca_order_id", orderId)
+      .eq("provider_name", providerName),
   ]);
 
   const agentMatches = agentRows.data ?? [];
@@ -258,9 +265,7 @@ const syncProviderStatus = async ({
   ];
 
   if (allMatches.length === 0) {
-    // A provider order we have no local record of. Not an error - the status
-    // is still returned to the caller - but there is nothing to write.
-    return { updated: false, rows: 0, forbidden: false };
+    return { updated: false, rows: 0, forbidden: true };
   }
 
   // Authorization. `payment_transactions.user_id` is the BUYER, which for a
@@ -306,6 +311,7 @@ const syncProviderStatus = async ({
 
   const patch: Record<string, unknown> = {
     jehuca_order_status: providerOrderStatus,
+    provider_name: providerName,
     // The scrubbed payload, NOT the raw provider body: `jehuca_response` is
     // read by the admin app, so storing the raw response would write the
     // agent's credential hashes into the database.
@@ -392,12 +398,14 @@ const syncProviderStatus = async ({
 const syncProviderStatusesBatch = async ({
   admin,
   identity,
+  providerName,
   orderIds,
   statusByOrderId,
   responseByOrderId,
 }: {
   admin: AdminClient;
   identity: Identity;
+  providerName: string;
   orderIds: string[];
   statusByOrderId: Map<string, string | null>;
   responseByOrderId: Map<string, unknown>;
@@ -414,15 +422,18 @@ const syncProviderStatusesBatch = async ({
     admin
       .from("agent_orders")
       .select("id, agent_id, jehuca_order_id, jehuca_order_status")
-      .in("jehuca_order_id", orderIds),
+      .in("jehuca_order_id", orderIds)
+      .eq("provider_name", providerName),
     admin
       .from("orders")
       .select("id, user_id, jehuca_order_id, jehuca_order_status")
-      .in("jehuca_order_id", orderIds),
+      .in("jehuca_order_id", orderIds)
+      .eq("provider_name", providerName),
     admin
       .from("payment_transactions")
       .select("id, user_id, jehuca_order_id, jehuca_order_status")
-      .in("jehuca_order_id", orderIds),
+      .in("jehuca_order_id", orderIds)
+      .eq("provider_name", providerName),
   ]);
 
   // Group the rows by the provider id they carry.
@@ -496,9 +507,7 @@ const syncProviderStatusesBatch = async ({
     ];
 
     if (allMatches.length === 0) {
-      // A provider order we have no local record of. Not an error - there is
-      // simply nothing to write.
-      outcomes.set(orderId, { updated: false, rows: 0, forbidden: false });
+      outcomes.set(orderId, { updated: false, rows: 0, forbidden: true });
       continue;
     }
 
@@ -529,6 +538,7 @@ const syncProviderStatusesBatch = async ({
 
     const patch: Record<string, unknown> = {
       jehuca_order_status: providerOrderStatus,
+      provider_name: providerName,
       // The scrubbed payload, NOT the raw provider body: `jehuca_response` is
       // read by the admin app, so storing the raw response would write the
       // agent's credential hashes into the database.
@@ -626,6 +636,52 @@ const syncProviderStatusesBatch = async ({
   return outcomes;
 };
 
+const fetchProviderStatus = async (providerName: string, orderId: string) => {
+  if (providerName === "bisdel") {
+    const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+    const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
+      .replace(/\0/g, "")
+      .trim();
+    if (!apiKey || !apiSecret) {
+      throw new Error("Bisdel API credentials are not configured");
+    }
+    const url = new URL("https://api.bisdelgh.com/api/xx1/status.php");
+    url.searchParams.set("order_reference", orderId);
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+    });
+    const data = await response.json();
+    const order = data?.data || {};
+    return {
+      response,
+      data,
+      status: order.status ?? order.order_status ?? null,
+      failed: !response.ok || data?.success === false,
+    };
+  }
+
+  const apiKey = Deno.env.get("JEHUCA_API_KEY");
+  if (!apiKey) throw new Error("Jehuca API key is not configured");
+  const response = await fetch(
+    `https://backend.jehucale-business.com/api/orders/${encodeURIComponent(orderId)}`,
+    { method: "GET", headers: { "X-API-Key": apiKey } },
+  );
+  const data = await response.json();
+  const payload = data?.payload;
+  const order = Array.isArray(payload) ? payload[0] : payload;
+  return {
+    response,
+    data,
+    status:
+      order?.status ??
+      order?.packages?.[0]?.status ??
+      order?.packages?.map((item: { status?: string }) => item?.status) ??
+      null,
+    failed: !response.ok || data?.success === false || data?.status === false,
+  };
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -695,22 +751,15 @@ Deno.serve(async (req) => {
       );
     }
 
-    const apiKey = Deno.env.get("JEHUCA_API_KEY");
-    if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          success: false,
-          error: "Jehuca API key not configured on server",
-        }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        },
-      );
-    }
-
     const url = new URL(req.url);
     const body = await req.json().catch(() => ({}));
+    const providerName = String(body?.provider_name || "jehuca").toLowerCase();
+    if (providerName !== "jehuca" && providerName !== "bisdel") {
+      return new Response(
+        JSON.stringify({ success: false, error: "Unsupported provider" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
     // Accept a few key spellings. Clients have historically sent `orderId`,
     // and a mismatch here used to be invisible: the fallback below then took
     // the LAST PATH SEGMENT of the function URL, which is the function's own
@@ -819,27 +868,36 @@ Deno.serve(async (req) => {
 
       await Promise.all(
         capped.map(async (orderId) => {
+          const access = await syncProviderStatus({
+            admin,
+            identity,
+            providerName,
+            orderId,
+            providerOrderStatus: null,
+            providerResponse: null,
+          });
+          if (access.forbidden) {
+            failures.set(orderId, { error: "Order belongs to another account" });
+          }
+        }),
+      );
+
+      await Promise.all(
+        capped.filter((orderId) => !failures.has(orderId)).map(async (orderId) => {
           try {
-            const providerResponse = await fetch(
-              `https://backend.jehucale-business.com/api/orders/${orderId}`,
-              {
-                method: "GET",
-                headers: { "X-API-Key": apiKey },
-              },
+            const providerResult = await fetchProviderStatus(
+              providerName,
+              orderId,
             );
+            const providerResponse = providerResult.response;
+            const providerData = providerResult.data;
 
-            const providerData = await providerResponse.json();
-
-            if (
-              !providerResponse.ok ||
-              providerData?.success === false ||
-              providerData?.status === false
-            ) {
+            if (providerResult.failed) {
               failures.set(orderId, {
                 error:
                   providerData?.error ||
                   providerData?.message ||
-                  "Jehucal status request failed",
+                  `${providerName} status request failed`,
                 providerStatusCode: providerResponse.status,
                 notFound:
                   providerResponse.status === 404 &&
@@ -850,18 +908,11 @@ Deno.serve(async (req) => {
               return;
             }
 
-            const payload = providerData?.payload;
-            const providerOrder = Array.isArray(payload)
-              ? payload[0]
-              : payload;
-            const rawStatus =
-              providerOrder?.status ??
-              providerOrder?.packages?.[0]?.status ??
-              null;
-
             statusByOrderId.set(
               orderId,
-              isRealStatus(rawStatus) ? rawStatus.trim() : null,
+              isRealStatus(providerResult.status)
+                ? String(providerResult.status).trim()
+                : null,
             );
             responseByOrderId.set(orderId, providerData);
           } catch (error) {
@@ -874,6 +925,7 @@ Deno.serve(async (req) => {
       const outcomes = await syncProviderStatusesBatch({
         admin,
         identity,
+        providerName,
         orderIds: capped,
         statusByOrderId,
         responseByOrderId,
@@ -955,25 +1007,42 @@ Deno.serve(async (req) => {
       );
     }
 
-    const requestUrl = `https://backend.jehucale-business.com/api/orders/${orderId}`;
-
-    console.log("Fetching order status for:", orderId);
-
-    const response = await fetch(requestUrl, {
-      method: "GET",
-      headers: {
-        "X-API-Key": apiKey,
-      },
+    const access = await syncProviderStatus({
+      admin,
+      identity,
+      providerName,
+      orderId,
+      providerOrderStatus: null,
+      providerResponse: null,
     });
+    if (access.forbidden) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: "Order not found or access denied",
+        }),
+        {
+          status: 403,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          },
+        },
+      );
+    }
 
-    const data = await response.json();
+    console.log(`Fetching ${providerName} order status for:`, orderId);
+    const providerResult = await fetchProviderStatus(providerName, orderId);
+    const response = providerResult.response;
+    const data = providerResult.data;
 
-    if (!response.ok || data?.success === false || data?.status === false) {
+    if (providerResult.failed) {
       return new Response(
         JSON.stringify({
           success: false,
           error:
-            data?.error || data?.message || "Jehucal status request failed",
+            data?.error || data?.message || `${providerName} status request failed`,
           providerStatusCode: response.status,
           // Scrubbed for the same reason as the success path: the provider
           // error body has been observed to echo the agent `identity` object.
@@ -1015,13 +1084,7 @@ Deno.serve(async (req) => {
     // Check every shape defensively: the provider has been known to add
     // fields, and a status that silently comes back null is far worse than a
     // slightly wider lookup.
-    const payload = data?.payload;
-    const providerOrder = Array.isArray(payload) ? payload[0] : payload;
-    const rawStatus =
-      providerOrder?.status ??
-      providerOrder?.packages?.[0]?.status ??
-      providerOrder?.packages?.map((p: { status?: string }) => p?.status) ??
-      null;
+    const rawStatus = providerResult.status;
 
     // Never let the provider's success boolean become an order status.
     const providerOrderStatus = isRealStatus(rawStatus)
@@ -1044,6 +1107,7 @@ Deno.serve(async (req) => {
     const syncResult = await syncProviderStatus({
       admin,
       identity,
+      providerName,
       orderId,
       providerOrderStatus,
       providerResponse: data,

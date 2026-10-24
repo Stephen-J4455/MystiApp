@@ -45,7 +45,7 @@ const getPackageDescriptor = (pkg) => {
 const getPackageKey = (pkg) => {
   if (!pkg) return "";
   if (typeof pkg === "string") return pkg;
-  if (pkg.id) return String(pkg.id);
+  if (pkg.id) return `${String(pkg.provider || "jehuca").toLowerCase()}::${pkg.id}`;
   const net = String(pkg.network || "").toUpperCase();
   const desc = getPackageDescriptor(pkg).toUpperCase();
   return `${net}::${desc}`;
@@ -65,7 +65,11 @@ const findPricingRowForPackage = (rows, pkg) => {
 
   return (
     rows.find((row) => {
-      if (String(row.network || "").toUpperCase() !== net) return false;
+      if (
+        String(row.provider || "jehuca").toLowerCase() !==
+          String(pkg.provider || "jehuca").toLowerCase() ||
+        String(row.network || "").toUpperCase() !== net
+      ) return false;
       const rowType = String(row.type || "")
         .trim()
         .toUpperCase();
@@ -86,11 +90,11 @@ const findPricingRowForPackage = (rows, pkg) => {
   );
 };
 
-const packageKey = (network, type) =>
-  `${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
+const packageKey = (provider, network, type) =>
+  `${String(provider || "jehuca").toLowerCase()}::${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
 
-const offerKey = (tierName, network, type) =>
-  `${String(tierName || "")}::${packageKey(network, type)}`;
+const offerKey = (tierName, provider, network, type) =>
+  `${String(tierName || "")}::${packageKey(provider, network, type)}`;
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 
@@ -148,7 +152,14 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
     const offersByKey = {};
     (offers || []).forEach((offer) => {
-      offersByKey[offerKey(offer.tier_name, offer.network, offer.data_value)] =
+      offersByKey[
+        offerKey(
+          offer.tier_name,
+          offer.provider,
+          offer.network,
+          offer.data_value,
+        )
+      ] =
         offer;
     });
 
@@ -159,12 +170,18 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         const key = `${tier.id}::${pkgKey}`;
         const desc = getPackageDescriptor(pkg);
         const existing =
-          offersByKey[offerKey(tier.name, pkg.network, desc)] ||
-          offersByKey[offerKey(tier.name, pkg.network, pkg.type)];
+          offersByKey[offerKey(tier.name, pkg.provider, pkg.network, desc)] ||
+          offersByKey[
+            offerKey(tier.name, pkg.provider, pkg.network, pkg.type)
+          ];
         // Default to the admin base price until the super agent sets their own.
         const basePrice = usableBasePrice(basePrices[pkgKey]);
         inputs[key] = existing
-          ? String(existing.price)
+          ? String(
+              existing.uses_admin_base_price && basePrice !== null
+                ? basePrice
+                : existing.price,
+            )
           : basePrice !== null
             ? formatPriceInput(basePrice)
             : "";
@@ -210,13 +227,12 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
         setCurrentUser(user);
 
-        const [tiersResult, packagesResult, pricingResult, offersResult] =
+        const [tiersResult, pricingResult, offersResult] =
           await Promise.all([
             supabase.functions.invoke(
               getEdgeFunctionName("super-agent-tier-management"),
               { body: { action: "listTiers" } },
             ),
-            supabase.functions.invoke(getEdgeFunctionName("get-packages")),
             supabase.functions.invoke(
               getEdgeFunctionName("super-agent-offers"),
               { body: { action: "getPackageBasePrices" } },
@@ -233,9 +249,6 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
             await getEdgeFunctionErrorMessage(tiersResult.error),
           );
         }
-        if (packagesResult.error) {
-          console.error("Error loading packages:", packagesResult.error);
-        }
         if (pricingResult.error) {
           console.error(
             "Error loading base prices:",
@@ -249,10 +262,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           );
         }
 
-        let catalog = packagesResult.data?.payload || [];
-        if (!Array.isArray(catalog) || catalog.length === 0) {
-          catalog = await fetchCatalogPackages();
-        }
+        const catalog = await fetchCatalogPackages();
 
         const pricingRows = pricingResult.data?.pricing || [];
         const myOffers = offersResult.data?.offers || [];
@@ -323,9 +333,21 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         if (!Number.isFinite(value) || value <= 0) return;
         const desc = getPackageDescriptor(pkg);
         const existing =
-          offerMap[offerKey(tier.name, pkg.network, desc)] ||
-          offerMap[offerKey(tier.name, pkg.network, pkg.type)];
-        if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
+          offerMap[offerKey(tier.name, pkg.provider, pkg.network, desc)] ||
+          offerMap[
+            offerKey(tier.name, pkg.provider, pkg.network, pkg.type)
+          ];
+        const usesAdminBasePrice =
+          basePrice !== null && Math.abs(basePrice - value) <= 0.0001;
+        const existingPrice =
+          existing?.uses_admin_base_price && basePrice !== null
+            ? basePrice
+            : Number(existing?.price);
+        if (
+          !existing ||
+          Math.abs(existingPrice - value) > 0.0001 ||
+          Boolean(existing.uses_admin_base_price) !== usesAdminBasePrice
+        ) {
           count += 1;
         }
       });
@@ -371,10 +393,27 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
       const desc = getPackageDescriptor(pkg);
       const existing =
-        offerMap[offerKey(tier.name, pkg.network, desc)] ||
-        offerMap[offerKey(tier.name, pkg.network, pkg.type)];
-      if (!existing || Math.abs(Number(existing.price) - value) > 0.0001) {
-        updates.push({ pkg, value, descriptor: desc });
+        offerMap[offerKey(tier.name, pkg.provider, pkg.network, desc)] ||
+        offerMap[
+          offerKey(tier.name, pkg.provider, pkg.network, pkg.type)
+        ];
+      const usesAdminBasePrice =
+        basePrice !== null && Math.abs(basePrice - value) <= 0.0001;
+      const existingPrice =
+        existing?.uses_admin_base_price && basePrice !== null
+          ? basePrice
+          : Number(existing?.price);
+      if (
+        !existing ||
+        Math.abs(existingPrice - value) > 0.0001 ||
+        Boolean(existing.uses_admin_base_price) !== usesAdminBasePrice
+      ) {
+        updates.push({
+          pkg,
+          value,
+          descriptor: desc,
+          usesAdminBasePrice,
+        });
       }
     });
 
@@ -398,15 +437,17 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
       setSavingTierId(tier.id);
 
       const results = await Promise.all(
-        updates.map(async ({ pkg, value, descriptor }) => {
+        updates.map(async ({ pkg, value, descriptor, usesAdminBasePrice }) => {
           try {
             await upsertTierOffer({
               superAgentId: currentUser.id,
               offer: {
+                provider: pkg.provider || "jehuca",
                 network: pkg.network,
                 data_value: descriptor,
                 tier_name: tier.name,
                 price: value,
+                uses_admin_base_price: usesAdminBasePrice,
               },
             });
             return { error: null };
@@ -512,19 +553,29 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     const basePrice = basePriceMap[pkgKey];
     const desc = getPackageDescriptor(pkg);
     const existing =
-      offerMap[offerKey(tier.name, pkg.network, desc)] ||
-      offerMap[offerKey(tier.name, pkg.network, pkg.type)];
+      offerMap[offerKey(tier.name, pkg.provider, pkg.network, desc)] ||
+      offerMap[
+        offerKey(tier.name, pkg.provider, pkg.network, pkg.type)
+      ];
 
     return (
       <View key={inputKey} style={styles.packageRow}>
         <View style={styles.packageInfo}>
           <Text style={styles.packageName}>
-            {String(pkg.network || "").toUpperCase()} — {desc}
+            {String(pkg.network || "").toUpperCase()} — {desc} ·{" "}
+            {String(pkg.provider || "jehuca").toUpperCase()}
           </Text>
           <Text style={styles.packageMeta}>
             {pkg.size ? `${pkg.size} GB · ` : ""}Base:{" "}
             {basePrice !== undefined ? formatGhc(basePrice) : "not set"}
-            {existing ? ` · Yours: ${formatGhc(existing.price)}` : ""}
+            {existing
+              ? ` · Yours: ${formatGhc(
+                  existing.uses_admin_base_price &&
+                    usableBasePrice(basePrice) !== null
+                    ? basePrice
+                    : existing.price,
+                )}${existing.uses_admin_base_price ? " · Linked" : ""}`
+              : ""}
           </Text>
         </View>
         <View style={styles.priceInputWrap}>

@@ -184,8 +184,8 @@ export default function ReceiptScreen({ navigation, route }) {
   };
 
   // A card tap passes a History row, which carries both status columns. The
-  // shared resolver picks the provider status when it is real and falls back to
-  // our internal `status` otherwise - NOT a plain `||` chain, which would let the
+  // shared resolver picks our internal lifecycle status when it is real and
+  // falls back to provider status otherwise - NOT a plain `||` chain, which would let the
   // corrupt boolean string "true" win and then render "Unknown" for an order we
   // knew was completed. See lib/orderStatus.js.
   const rawStatus = resolveOrderStatus(transaction);
@@ -304,10 +304,10 @@ export default function ReceiptScreen({ navigation, route }) {
     // cannot tell which of the two is "right"; showing them that two systems
     // disagree about their own order makes a settled purchase look undecided.
     //
-    // So the panel shows ONE status: the resolved one, which is the provider's
-    // value when it is real and ours otherwise. That is the same value the
-    // history card shows and the same value its status spine is coloured from,
-    // so the receipt and the list can never disagree.
+    // So the panel shows ONE status: the resolved one, which is our internal
+    // lifecycle value when it is real and the provider value otherwise. That
+    // is the same value the history card shows and the same value its status
+    // spine is coloured from, so the receipt and the list can never disagree.
     //
     // The provider status is still fetched, still persisted, and still what the
     // platform uses internally. It is simply not narrated to the customer.
@@ -465,8 +465,8 @@ export default function ReceiptScreen({ navigation, route }) {
                               )?.color
                               // THE RESOLVED STATUS.
                               //
-                              // `rawStatus` is the resolved status - the provider's
-                              // value when it is real, ours otherwise. That is the
+                              // `rawStatus` is the resolved status - our internal
+                              // value when it is real, the provider's otherwise. That is the
                               // SAME value the history card shows and the SAME value
                               // its status spine is coloured from, so the receipt and
                               // the list can never disagree about an order.

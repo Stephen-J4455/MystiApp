@@ -39,6 +39,8 @@ CREATE TABLE public.orders (
   provider_package_id text,
   provider_type text,
   provider_size numeric,
+  provider_name text NOT NULL DEFAULT 'jehuca'::text CHECK (provider_name = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
+  provider_order_id text,
   base_amount numeric DEFAULT 0,
   agent_markup numeric DEFAULT 0,
   transaction_fee numeric DEFAULT 0,
@@ -94,6 +96,8 @@ CREATE TABLE public.agent_orders (
   provider_package_id text,
   provider_type text,
   provider_size numeric,
+  provider_name text NOT NULL DEFAULT 'jehuca'::text CHECK (provider_name = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
+  provider_order_id text,
   buyer_type text CHECK (buyer_type IS NULL OR (buyer_type = ANY (ARRAY['normal_user'::text, 'sub_agent'::text, 'super_agent'::text]))),
   provider_deferred_at timestamp with time zone,
   provider_deferred_reason text,
@@ -223,6 +227,7 @@ CREATE TABLE public.ussd_agents (
 CREATE TABLE public.super_agent_offers (
   id bigint NOT NULL DEFAULT nextval('super_agent_offers_id_seq'::regclass),
   super_agent_id uuid NOT NULL,
+  provider text NOT NULL DEFAULT 'jehuca'::text CHECK (provider = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
   title text NOT NULL,
   network text NOT NULL,
   data_value text NOT NULL,
@@ -313,6 +318,7 @@ CREATE TABLE public.user_profiles (
 );
 CREATE TABLE public.package_pricing (
   id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  provider text NOT NULL DEFAULT 'jehuca'::text CHECK (provider = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
   network text NOT NULL,
   type text NOT NULL,
   base_price numeric NOT NULL DEFAULT 0 CHECK (base_price >= 0::numeric),
@@ -323,6 +329,7 @@ CREATE TABLE public.package_pricing (
   package_id text,
   size numeric,
   CONSTRAINT package_pricing_pkey PRIMARY KEY (id),
+  CONSTRAINT package_pricing_provider_network_type_unique UNIQUE (provider, network, type),
   CONSTRAINT package_pricing_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id)
 );
 CREATE TABLE public.payment_transactions (
@@ -353,6 +360,8 @@ CREATE TABLE public.payment_transactions (
   jehuca_order_id text,
   jehuca_order_status text,
   jehuca_response jsonb,
+  provider_name text NOT NULL DEFAULT 'jehuca'::text CHECK (provider_name = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
+  provider_order_id text,
   buyer_type text CHECK (buyer_type IS NULL OR (buyer_type = ANY (ARRAY['normal_user'::text, 'sub_agent'::text, 'super_agent'::text]))),
   CONSTRAINT payment_transactions_pkey PRIMARY KEY (id),
   CONSTRAINT payment_transactions_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id),
@@ -394,6 +403,7 @@ CREATE TABLE public.payment_charge_settings (
 );
 CREATE TABLE public.normal_user_package_pricing (
   id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  provider text NOT NULL DEFAULT 'jehuca'::text CHECK (provider = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
   package_id text,
   network text NOT NULL,
   type text NOT NULL,
@@ -404,6 +414,7 @@ CREATE TABLE public.normal_user_package_pricing (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT normal_user_package_pricing_pkey PRIMARY KEY (id),
+  CONSTRAINT normal_user_package_pricing_provider_network_type_unique UNIQUE (provider, network, type),
   CONSTRAINT normal_user_package_pricing_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id)
 );
 CREATE TABLE public.afa_registration_settings (
@@ -472,6 +483,7 @@ CREATE TABLE public.afa_payment_ledger (
 );
 CREATE TABLE public.api_cost_settings (
   id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  provider text NOT NULL DEFAULT 'jehuca'::text CHECK (provider = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
   audience text NOT NULL DEFAULT 'super_agent'::text CHECK (audience = ANY (ARRAY['super_agent'::text, 'normal_user'::text])),
   package_id text,
   network text NOT NULL,
@@ -483,7 +495,18 @@ CREATE TABLE public.api_cost_settings (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT api_cost_settings_pkey PRIMARY KEY (id),
+  CONSTRAINT api_cost_settings_audience_provider_network_type_unique UNIQUE (audience, provider, network, type),
   CONSTRAINT api_cost_settings_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id)
+);
+CREATE TABLE public.data_provider_settings (
+  id boolean NOT NULL DEFAULT true CHECK (id),
+  provider text NOT NULL DEFAULT 'jehuca'::text CHECK (provider = ANY (ARRAY['jehuca'::text, 'bisdel'::text])),
+  jehuca_enabled boolean NOT NULL DEFAULT true,
+  bisdel_enabled boolean NOT NULL DEFAULT false,
+  updated_by uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT data_provider_settings_pkey PRIMARY KEY (id),
+  CONSTRAINT data_provider_settings_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES auth.users(id)
 );
 CREATE TABLE public.super_agent_afa_pricing (
   super_agent_id uuid NOT NULL,

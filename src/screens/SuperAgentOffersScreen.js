@@ -45,7 +45,7 @@ const getPackageDescriptor = (pkg) => {
 const getPackageKey = (pkg) => {
   if (!pkg) return "";
   if (typeof pkg === "string") return pkg;
-  if (pkg.id) return String(pkg.id);
+  if (pkg.id) return `${String(pkg.provider || "jehuca").toLowerCase()}::${pkg.id}`;
   const net = String(pkg.network || "").toUpperCase();
   const desc = getPackageDescriptor(pkg).toUpperCase();
   return `${net}::${desc}`;
@@ -65,7 +65,11 @@ const findPricingRowForPackage = (rows, pkg) => {
 
   return (
     rows.find((row) => {
-      if (String(row.network || "").toUpperCase() !== net) return false;
+      if (
+        String(row.provider || "jehuca").toLowerCase() !==
+          String(pkg.provider || "jehuca").toLowerCase() ||
+        String(row.network || "").toUpperCase() !== net
+      ) return false;
       const rowType = String(row.type || "")
         .trim()
         .toUpperCase();
@@ -86,8 +90,8 @@ const findPricingRowForPackage = (rows, pkg) => {
   );
 };
 
-const packageKey = (network, type) =>
-  `${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
+const packageKey = (provider, network, type) =>
+  `${String(provider || "jehuca").toLowerCase()}::${String(network || "").toUpperCase()}::${String(type || "").toUpperCase()}`;
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 
@@ -103,6 +107,31 @@ const usableBasePrice = (value) => {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 };
 
+const getBundleFamily = (item) => {
+  const type = [
+    item?.type,
+    item?.data_value,
+    item?.title,
+    item?.name,
+    item?.category,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toUpperCase()
+    .replace(/[\s_-]+/g, "");
+  if (type.includes("ISHARE")) return "ishare";
+  if (type.includes("BIGTIME")) return "big_time";
+  return "everyday";
+};
+
+const matchesFamily = (item, family) =>
+  family === "all" || getBundleFamily(item) === family;
+
+const normalizeNetwork = (network) => {
+  const value = String(network || "").trim().toUpperCase();
+  return value === "VODAFONE" || value === "VOD" ? "TELECEL" : value;
+};
+
 export default function SuperAgentOffersScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -115,10 +144,15 @@ export default function SuperAgentOffersScreen({ navigation }) {
   const [togglingOfferId, setTogglingOfferId] = useState(null);
   const [confirmDeleteOfferId, setConfirmDeleteOfferId] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [selectedProvider, setSelectedProvider] = useState("all");
+  const [selectedFamily, setSelectedFamily] = useState("all");
+  const [createExpanded, setCreateExpanded] = useState(false);
 
   // New offer form
+  const [createProvider, setCreateProvider] = useState("jehuca");
   const [formNetwork, setFormNetwork] = useState("");
   const [formPackageKey, setFormPackageKey] = useState("");
+  const [formUsesAdminBasePrice, setFormUsesAdminBasePrice] = useState(true);
   const [formTierName, setFormTierName] = useState("");
   const [formPrice, setFormPrice] = useState("");
   const [creatingOffer, setCreatingOffer] = useState(false);
@@ -167,7 +201,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
           return;
         }
 
-        const [offersResult, tiersResult, packagesResult, pricingResult] =
+        const [offersResult, tiersResult, pricingResult] =
           await Promise.all([
             supabase.functions.invoke(
               getEdgeFunctionName("super-agent-offers"),
@@ -177,7 +211,6 @@ export default function SuperAgentOffersScreen({ navigation }) {
               getEdgeFunctionName("super-agent-tier-management"),
               { body: { action: "listTiers" } },
             ),
-            supabase.functions.invoke(getEdgeFunctionName("get-packages")),
             supabase.functions.invoke(
               getEdgeFunctionName("super-agent-offers"),
               { body: { action: "getPackageBasePrices" } },
@@ -196,12 +229,6 @@ export default function SuperAgentOffersScreen({ navigation }) {
             await getEdgeFunctionErrorMessage(tiersResult.error),
           );
         }
-        if (packagesResult.error) {
-          console.error(
-            "Error loading packages:",
-            await getEdgeFunctionErrorMessage(packagesResult.error),
-          );
-        }
         if (pricingResult.error) {
           console.error(
             "Error loading base prices:",
@@ -211,13 +238,9 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
         const offerRows = offersResult.data?.offers || [];
         const tierRows = tiersResult.data?.tiers || [];
-        let catalog = packagesResult.data?.payload || [];
-        if (!Array.isArray(catalog) || catalog.length === 0) {
-          catalog = await fetchCatalogPackages();
-        }
+        const catalog = await fetchCatalogPackages();
         const pricingRows = pricingResult.data?.pricing || [];
 
-        setOffers(offerRows);
         setTiers(tierRows);
         setPackages(Array.isArray(catalog) ? catalog : []);
 
@@ -236,12 +259,37 @@ export default function SuperAgentOffersScreen({ navigation }) {
         });
         setBasePriceMap(basePrices);
 
+        const resolvedOffers = offerRows.map((offer) => {
+          if (!offer.uses_admin_base_price) return offer;
+          const pkg = (catalog || []).find((item) => {
+            const sameProvider =
+              String(item.provider || "jehuca").toLowerCase() ===
+              String(offer.provider || "jehuca").toLowerCase();
+            const sameNetwork =
+              normalizeNetwork(item.network) ===
+              normalizeNetwork(offer.network);
+            const dataValue = String(offer.data_value || "").toUpperCase();
+            return (
+              sameProvider &&
+              sameNetwork &&
+              (getPackageDescriptor(item).toUpperCase() === dataValue ||
+                String(item.type || "").toUpperCase() === dataValue)
+            );
+          });
+          const basePrice = pkg
+            ? usableBasePrice(basePrices[getPackageKey(pkg)])
+            : null;
+          return basePrice === null ? offer : { ...offer, price: basePrice };
+        });
+        setOffers(resolvedOffers);
+
         // Keep any in-progress edits that match loaded offers
         setPriceInputs((prev) => {
           const next = {};
-          offerRows.forEach((offer) => {
-            next[offer.id] =
-              prev[offer.id] !== undefined
+          resolvedOffers.forEach((offer) => {
+            next[offer.id] = offer.uses_admin_base_price
+              ? String(offer.price)
+              : prev[offer.id] !== undefined
                 ? prev[offer.id]
                 : String(offer.price);
           });
@@ -273,6 +321,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
   useEffect(() => {
     if (!formPackageKey) return;
     const basePrice = usableBasePrice(basePriceMap[formPackageKey]);
+    setFormUsesAdminBasePrice(basePrice !== null);
     setFormPrice(basePrice !== null ? formatPriceInput(basePrice) : "");
   }, [formPackageKey, basePriceMap]);
 
@@ -289,31 +338,151 @@ export default function SuperAgentOffersScreen({ navigation }) {
     return map;
   }, [packages]);
 
+  const providerOptions = useMemo(() => {
+    const available = new Set(
+      [...packages, ...offers].map((item) =>
+        String(item.provider || "jehuca").toLowerCase(),
+      ),
+    );
+    return ["jehuca", "bisdel"].filter((provider) => available.has(provider));
+  }, [packages, offers]);
+
+  const createProviderOptions = useMemo(
+    () =>
+      [...new Set(
+        packages.map((pkg) =>
+          String(pkg.provider || "jehuca").toLowerCase(),
+        ),
+      )].sort(),
+    [packages],
+  );
+
+  const familyOptions = useMemo(() => {
+    const available = new Set(
+      packages
+        .filter((pkg) => {
+          const provider = String(pkg.provider || "jehuca").toLowerCase();
+          return selectedProvider === "all" || provider === selectedProvider;
+        })
+        .map(getBundleFamily),
+    );
+    return [
+      { key: "all", label: "All bundles" },
+      { key: "ishare", label: "iShare" },
+      { key: "big_time", label: "Big Time" },
+      { key: "everyday", label: "Everyday" },
+    ].filter((family) => family.key === "all" || available.has(family.key));
+  }, [packages, selectedProvider]);
+
+  useEffect(() => {
+    if (!familyOptions.some((family) => family.key === selectedFamily)) {
+      setSelectedFamily("all");
+    }
+  }, [familyOptions, selectedFamily]);
+
+  const filteredOffers = useMemo(
+    () =>
+      (offers || []).filter((offer) => {
+        const provider = String(offer.provider || "jehuca").toLowerCase();
+        return (
+          (selectedProvider === "all" || provider === selectedProvider) &&
+          (
+            selectedFamily === "all" ||
+            getBundleFamily(
+              packages.find((pkg) => {
+                const sameProvider =
+                  String(pkg.provider || "jehuca").toLowerCase() === provider;
+                const sameNetwork =
+                  normalizeNetwork(pkg.network) ===
+                  normalizeNetwork(offer.network);
+                const samePackage =
+                  offer.package_id &&
+                  String(pkg.id) === String(offer.package_id);
+                const descriptor = getPackageDescriptor(pkg).toUpperCase();
+                const offerValue = String(offer.data_value || "")
+                  .trim()
+                  .toUpperCase();
+                return (
+                  sameProvider &&
+                  (samePackage ||
+                    (sameNetwork &&
+                      (descriptor === offerValue ||
+                        String(pkg.type || "").toUpperCase() === offerValue)))
+                );
+              }) || offer,
+            ) === selectedFamily
+          )
+        );
+      }),
+    [offers, packages, selectedProvider, selectedFamily],
+  );
+
   const networkOptions = useMemo(() => {
     const networks = [];
-    (packages || []).forEach((pkg) => {
-      const value = String(pkg.network || "").toUpperCase();
-      if (value && !networks.includes(value)) networks.push(value);
-    });
+    (packages || [])
+      .filter((pkg) => {
+        return (
+          String(pkg.provider || "jehuca").toLowerCase() === createProvider
+        );
+      })
+      .forEach((pkg) => {
+        const value = String(pkg.network || "").toUpperCase();
+        if (value && !networks.includes(value)) networks.push(value);
+      });
     return networks;
-  }, [packages]);
+  }, [packages, createProvider]);
 
   const formPackages = useMemo(
     () =>
       (packages || []).filter(
-        (pkg) =>
-          String(pkg.network || "").toUpperCase() ===
-          String(formNetwork || "").toUpperCase(),
-      ),
-    [packages, formNetwork],
+        (pkg) => {
+          return (
+            String(pkg.provider || "jehuca").toLowerCase() === createProvider &&
+            String(pkg.network || "").toUpperCase() === String(formNetwork || "").toUpperCase()
+          );
+        },
+      ).sort((first, second) => {
+        const firstBase = usableBasePrice(basePriceMap[getPackageKey(first)]);
+        const secondBase = usableBasePrice(basePriceMap[getPackageKey(second)]);
+        return (
+          (firstBase ?? Number.POSITIVE_INFINITY) -
+          (secondBase ?? Number.POSITIVE_INFINITY)
+        );
+      }),
+    [packages, formNetwork, createProvider, basePriceMap],
   );
+
+  useEffect(() => {
+    if (!createProviderOptions.includes(createProvider)) {
+      setCreateProvider(createProviderOptions[0] || "jehuca");
+      setFormPackageKey("");
+      setFormPrice("");
+      return;
+    }
+    if (!formNetwork || !networkOptions.includes(formNetwork)) {
+      const nextNetwork = networkOptions[0] || "";
+      if (nextNetwork !== formNetwork) setFormNetwork(nextNetwork);
+      setFormPackageKey("");
+      setFormPrice("");
+    }
+  }, [createProvider, createProviderOptions, formNetwork, networkOptions]);
 
   const offerGroups = useMemo(() => {
     const byName = {};
-    (offers || []).forEach((offer) => {
+    filteredOffers.forEach((offer) => {
       const name = offer.tier_name || "";
       if (!byName[name]) byName[name] = [];
       byName[name].push(offer);
+    });
+    Object.values(byName).forEach((items) => {
+      items.sort((first, second) => {
+        const firstPrice = Number(first.price);
+        const secondPrice = Number(second.price);
+        return (
+          (Number.isFinite(firstPrice) ? firstPrice : Number.POSITIVE_INFINITY) -
+          (Number.isFinite(secondPrice) ? secondPrice : Number.POSITIVE_INFINITY)
+        );
+      });
     });
 
     const ordered = [];
@@ -328,7 +497,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
     });
 
     return ordered;
-  }, [offers, tiers]);
+  }, [filteredOffers, tiers]);
 
   const handlePriceChange = (offerId, text) => {
     const cleaned = text.replace(/[^0-9.]/g, "");
@@ -347,7 +516,10 @@ export default function SuperAgentOffersScreen({ navigation }) {
       return;
     }
 
-    if (Math.abs(Number(offer.price) - value) <= 0.0001) {
+    if (
+      !offer.uses_admin_base_price &&
+      Math.abs(Number(offer.price) - value) <= 0.0001
+    ) {
       showInfo("Nothing to save", "This price is already up to date.");
       return;
     }
@@ -357,7 +529,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
       await updateSuperAgentOffer({
         offerId: offer.id,
-        updates: { price: value },
+        updates: { price: value, uses_admin_base_price: false },
       });
 
       showSuccess(
@@ -368,6 +540,42 @@ export default function SuperAgentOffersScreen({ navigation }) {
     } catch (priceError) {
       console.error("Error updating offer price:", priceError);
       showError("Error", "Unable to update this price right now.");
+    } finally {
+      setSavingOfferId(null);
+    }
+  };
+
+  const handleUseAdminBasePrice = async (offer) => {
+    try {
+      setSavingOfferId(offer.id);
+      await updateSuperAgentOffer({
+        offerId: offer.id,
+        updates: { uses_admin_base_price: true },
+      });
+      const matchingPackage = packages.find((pkg) => {
+        const value = String(offer.data_value || "").toUpperCase();
+        return (
+          String(pkg.provider || "jehuca").toLowerCase() ===
+            String(offer.provider || "jehuca").toLowerCase() &&
+          normalizeNetwork(pkg.network) === normalizeNetwork(offer.network) &&
+          (getPackageDescriptor(pkg).toUpperCase() === value ||
+            String(pkg.type || "").toUpperCase() === value)
+        );
+      });
+      const currentBasePrice = matchingPackage
+        ? basePriceMap[getPackageKey(matchingPackage)]
+        : null;
+      if (usableBasePrice(currentBasePrice) !== null) {
+        setPriceInputs((previous) => ({
+          ...previous,
+          [offer.id]: formatPriceInput(currentBasePrice),
+        }));
+      }
+      showSuccess("Base price linked", `${offer.title} now follows the admin base price.`);
+      await loadData({ showSpinner: false });
+    } catch (priceError) {
+      console.error("Error linking admin base price:", priceError);
+      showError("Error", "Unable to link this offer to the admin base price.");
     } finally {
       setSavingOfferId(null);
     }
@@ -422,14 +630,13 @@ export default function SuperAgentOffersScreen({ navigation }) {
     }
 
     // An empty amount falls back to the admin base price when one is set.
-    const rawPrice = (formPrice || "").trim();
     const fallbackBasePrice = usableBasePrice(basePriceMap[formPackageKey]);
-    const value =
-      rawPrice !== ""
+    const rawPrice = (formPrice || "").trim();
+    const value = formUsesAdminBasePrice
+      ? fallbackBasePrice
+      : rawPrice !== ""
         ? Number(rawPrice)
-        : fallbackBasePrice !== null
-          ? fallbackBasePrice
-          : NaN;
+        : NaN;
 
     if (!Number.isFinite(value) || value <= 0) {
       showError("Validation", "Enter an amount greater than 0.");
@@ -448,11 +655,13 @@ export default function SuperAgentOffersScreen({ navigation }) {
       await upsertTierOffer({
         superAgentId: user?.id,
         offer: {
+          provider: selectedPkg.provider || "jehuca",
           network: selectedPkg.network,
           data_value: desc,
           title: `${selectedPkg.network} — ${desc}`,
           tier_name: formTierName || null,
           price: value,
+          uses_admin_base_price: formUsesAdminBasePrice,
         },
       });
 
@@ -462,6 +671,8 @@ export default function SuperAgentOffersScreen({ navigation }) {
       );
       setFormPackageKey("");
       setFormPrice("");
+      setFormUsesAdminBasePrice(true);
+      setCreateExpanded(false);
       await loadData({ showSpinner: false });
     } catch (createError) {
       console.error("Error creating offer:", createError);
@@ -479,7 +690,11 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
     const pkg =
       (packages || []).find((p) => {
-        if (String(p.network || "").toUpperCase() !== offerNet) return false;
+        if (
+          String(p.provider || "jehuca").toLowerCase() !==
+            String(offer.provider || "jehuca").toLowerCase() ||
+          normalizeNetwork(p.network) !== normalizeNetwork(offerNet)
+        ) return false;
         const desc = getPackageDescriptor(p).toUpperCase();
         return (
           desc === offerVal ||
@@ -516,7 +731,17 @@ export default function SuperAgentOffersScreen({ navigation }) {
             {basePrice !== undefined
               ? ` · Admin base: ${formatGhc(basePrice)}`
               : ""}
+            {offer.uses_admin_base_price ? " · Linked to admin base" : ""}
           </Text>
+          {!offer.uses_admin_base_price &&
+          usableBasePrice(basePrice) !== null ? (
+            <TouchableOpacity
+              onPress={() => handleUseAdminBasePrice(offer)}
+              disabled={savingOfferId === offer.id}
+            >
+              <Text style={styles.basePriceLink}>Use admin base price</Text>
+            </TouchableOpacity>
+          ) : null}
           <Text style={styles.offerStatus}>
             {offer.is_active ? "Active" : "Inactive — hidden from agents"}
           </Text>
@@ -642,173 +867,329 @@ export default function SuperAgentOffersScreen({ navigation }) {
         ) : null}
 
         <View style={styles.createCard}>
-          <Text style={styles.createTitle}>New Offer</Text>
-
-          <Text style={styles.fieldLabel}>Network</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chipRow}
+          <TouchableOpacity
+            style={styles.createHeader}
+            onPress={() => setCreateExpanded((expanded) => !expanded)}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: createExpanded }}
           >
-            {networkOptions.map((option) => (
-              <TouchableOpacity
-                key={option}
-                style={[
-                  styles.chip,
-                  formNetwork === option && styles.chipActive,
-                ]}
-                onPress={() => {
-                  setFormNetwork(option);
-                  setFormPackageKey("");
-                  setFormPrice("");
-                }}
-              >
-                <Text
-                  style={[
-                    styles.chipText,
-                    formNetwork === option && styles.chipTextActive,
-                  ]}
-                >
-                  {option}
+            <View>
+              <Text style={styles.createTitle}>
+                {createExpanded ? "New offer" : "Add an offer"}
+              </Text>
+              {!createExpanded ? (
+                <Text style={styles.createSubtitle}>
+                  Choose a bundle and set the price for your agents.
                 </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+              ) : null}
+            </View>
+            <Ionicons
+              name={createExpanded ? "chevron-up" : "add"}
+              size={22}
+              color={c.mint}
+            />
+          </TouchableOpacity>
 
-          {formNetwork ? (
+          {createExpanded ? (
             <>
-              <Text style={styles.fieldLabel}>Bundle</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.chipRow}
-              >
-                {formPackages.map((pkg) => {
-                  const key = getPackageKey(pkg);
-                  return (
-                    <TouchableOpacity
-                      key={key}
+              {createProviderOptions.length > 1 ? (
+                <>
+                  <Text style={styles.fieldLabel}>Provider</Text>
+                  <View style={styles.choiceRow}>
+                    {createProviderOptions.map((provider) => (
+                      <TouchableOpacity
+                        key={provider}
+                        style={[
+                          styles.choiceButton,
+                          createProvider === provider && styles.chipActive,
+                        ]}
+                        onPress={() => {
+                          setCreateProvider(provider);
+                          setFormPackageKey("");
+                          setFormPrice("");
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            createProvider === provider && styles.chipTextActive,
+                          ]}
+                        >
+                          {provider === "bisdel" ? "Bisdel" : "Jehuca"}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              ) : null}
+
+              <Text style={styles.fieldLabel}>Network</Text>
+              <View style={styles.choiceRow}>
+                {networkOptions.map((option) => (
+                  <TouchableOpacity
+                    key={option}
+                    style={[
+                      styles.choiceButton,
+                      formNetwork === option && styles.chipActive,
+                    ]}
+                    onPress={() => {
+                      setFormNetwork(option);
+                      setFormPackageKey("");
+                      setFormPrice("");
+                    }}
+                  >
+                    <Text
                       style={[
-                        styles.chip,
-                        formPackageKey === key && styles.chipActive,
+                        styles.chipText,
+                        formNetwork === option && styles.chipTextActive,
                       ]}
-                      onPress={() => setFormPackageKey(key)}
+                    >
+                      {option}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={styles.fieldLabel}>
+                Bundle · lowest base price first
+              </Text>
+              <ScrollView
+                style={styles.bundleChoices}
+                contentContainerStyle={styles.bundleChoicesContent}
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={false}
+              >
+                {formPackages.length ? (
+                  formPackages.map((pkg) => {
+                    const key = getPackageKey(pkg);
+                    const selected = formPackageKey === key;
+                    const adminBasePrice = usableBasePrice(
+                      basePriceMap[getPackageKey(pkg)],
+                    );
+                    return (
+                      <TouchableOpacity
+                        key={key}
+                        style={[
+                          styles.bundleChoice,
+                          selected && styles.bundleChoiceActive,
+                        ]}
+                        onPress={() => setFormPackageKey(key)}
+                      >
+                        <View style={styles.bundleChoiceText}>
+                          <Text style={styles.bundleChoiceTitle}>
+                            {getPackageDescriptor(pkg).toUpperCase()}
+                          </Text>
+                          <Text style={styles.bundleChoiceMeta}>
+                            {pkg.size ? `${pkg.size} GB · ` : ""}
+                            {String(pkg.provider || "jehuca").toUpperCase()}
+                          </Text>
+                        </View>
+                        <Text style={styles.bundleChoicePrice}>
+                          {adminBasePrice !== null
+                            ? `Admin base ${formatGhc(adminBasePrice)}`
+                            : "Admin base not set"}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })
+                ) : (
+                  <Text style={styles.noBundles}>
+                    No bundles available for this network.
+                  </Text>
+                )}
+              </ScrollView>
+
+              <Text style={styles.fieldLabel}>For tier</Text>
+              <View style={styles.choiceRow}>
+                <TouchableOpacity
+                  style={[
+                    styles.choiceButton,
+                    !formTierName && styles.chipActive,
+                  ]}
+                  onPress={() => setFormTierName("")}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      !formTierName && styles.chipTextActive,
+                    ]}
+                  >
+                    General
+                  </Text>
+                </TouchableOpacity>
+                {(tiers || []).map((tier) => (
+                  <TouchableOpacity
+                    key={`tier-${tier.id}`}
+                    style={[
+                      styles.choiceButton,
+                      formTierName === tier.name && styles.chipActive,
+                    ]}
+                    onPress={() => setFormTierName(tier.name)}
+                  >
+                    <Text
+                      style={[
+                        styles.chipText,
+                        formTierName === tier.name && styles.chipTextActive,
+                      ]}
+                    >
+                      {tier.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {usableBasePrice(basePriceMap[formPackageKey]) !== null ? (
+                <View style={styles.choiceRow}>
+                  {[
+                    { value: true, label: "Admin base" },
+                    { value: false, label: "Custom" },
+                  ].map((choice) => (
+                    <TouchableOpacity
+                      key={choice.label}
+                      style={[
+                        styles.choiceButton,
+                        formUsesAdminBasePrice === choice.value &&
+                          styles.chipActive,
+                      ]}
+                      onPress={() => {
+                        setFormUsesAdminBasePrice(choice.value);
+                        if (choice.value) {
+                          setFormPrice(
+                            formatPriceInput(basePriceMap[formPackageKey]),
+                          );
+                        }
+                      }}
                     >
                       <Text
                         style={[
                           styles.chipText,
-                          formPackageKey === key && styles.chipTextActive,
+                          formUsesAdminBasePrice === choice.value &&
+                            styles.chipTextActive,
                         ]}
                       >
-                        {String(pkg.type || "").toUpperCase()}
-                        {pkg.size ? ` · ${pkg.size}GB` : ""}
+                        {choice.label}
                       </Text>
                     </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+                  ))}
+                </View>
+              ) : null}
+              <View style={styles.createPriceRow}>
+                <View style={[styles.priceInputWrap, styles.newPriceInputWrap]}>
+                  <Text style={styles.currencyPrefix}>Ghc</Text>
+                  <TextInput
+                    style={styles.priceInput}
+                    value={formPrice}
+                    onChangeText={(text) => {
+                      const cleaned = text.replace(/[^0-9.]/g, "");
+                      const parts = cleaned.split(".");
+                      setFormPrice(
+                        parts.length > 2
+                          ? `${parts[0]}.${parts.slice(1).join("")}`
+                          : cleaned,
+                      );
+                    }}
+                    placeholder="Offer price"
+                    placeholderTextColor={c.textMuted}
+                    keyboardType="decimal-pad"
+                    editable={!formUsesAdminBasePrice}
+                  />
+                </View>
+                <TouchableOpacity
+                  style={[
+                    styles.createButton,
+                    creatingOffer && styles.createButtonDisabled,
+                  ]}
+                  onPress={handleCreateOffer}
+                  disabled={creatingOffer}
+                >
+                  {creatingOffer ? (
+                    <ActivityIndicator size="small" color={c.onAccent} />
+                  ) : (
+                    <Text style={styles.createButtonText}>Save offer</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              {formUsesAdminBasePrice ? (
+                <Text style={styles.basePriceHint}>
+                  This offer will follow future admin base-price changes.
+                </Text>
+              ) : null}
             </>
           ) : null}
+        </View>
 
-          <Text style={styles.fieldLabel}>Tier</Text>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.chipRow}
-          >
-            <TouchableOpacity
-              style={[styles.chip, !formTierName && styles.chipActive]}
-              onPress={() => setFormTierName("")}
-            >
-              <Text
-                style={[
-                  styles.chipText,
-                  !formTierName && styles.chipTextActive,
-                ]}
-              >
-                General
-              </Text>
-            </TouchableOpacity>
-            {(tiers || []).map((tier) => (
-              <TouchableOpacity
-                key={`tier-${tier.id}`}
-                style={[
-                  styles.chip,
-                  formTierName === tier.name && styles.chipActive,
-                ]}
-                onPress={() => setFormTierName(tier.name)}
-              >
-                <Text
+        <View style={styles.filterCard}>
+          <Text style={styles.filterTitle}>Your offers</Text>
+          <View style={styles.filterSection}>
+            <Text style={styles.filterLabel}>Provider</Text>
+            <View style={styles.choiceRow}>
+              {[{ key: "all", label: "All" }].concat(
+                providerOptions.map((provider) => ({
+                  key: provider,
+                  label: provider === "bisdel" ? "Bisdel" : "Jehuca",
+                })),
+              ).map((option) => (
+                <TouchableOpacity
+                  key={`filter-provider-${option.key}`}
                   style={[
-                    styles.chipText,
-                    formTierName === tier.name && styles.chipTextActive,
+                    styles.choiceButton,
+                    selectedProvider === option.key && styles.chipActive,
                   ]}
+                  onPress={() => setSelectedProvider(option.key)}
                 >
-                  {tier.name}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-
-          <View style={styles.createPriceRow}>
-            <View style={styles.priceInputWrap}>
-              <Text style={styles.currencyPrefix}>Ghc</Text>
-              <TextInput
-                style={styles.priceInput}
-                value={formPrice}
-                onChangeText={(text) => {
-                  const cleaned = text.replace(/[^0-9.]/g, "");
-                  const parts = cleaned.split(".");
-                  setFormPrice(
-                    parts.length > 2
-                      ? `${parts[0]}.${parts.slice(1).join("")}`
-                      : cleaned,
-                  );
-                }}
-                placeholder="0.00"
-                placeholderTextColor={c.textMuted}
-                keyboardType="decimal-pad"
-              />
+                  <Text
+                    style={[
+                      styles.chipText,
+                      selectedProvider === option.key && styles.chipTextActive,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
             </View>
-            <TouchableOpacity
-              style={[
-                styles.createButton,
-                creatingOffer && styles.createButtonDisabled,
-              ]}
-              onPress={handleCreateOffer}
-              disabled={creatingOffer}
-            >
-              {creatingOffer ? (
-                <ActivityIndicator size="small" color={c.onAccent} />
-              ) : (
-                <>
-                  <Ionicons
-                    name="add-circle-outline"
-                    size={18}
-                    color={c.onAccent}
-                  />
-                  <Text style={styles.createButtonText}>Save Offer</Text>
-                </>
-              )}
-            </TouchableOpacity>
           </View>
-
-          {formPackageKey &&
-          usableBasePrice(basePriceMap[formPackageKey]) !== null ? (
-            <Text style={styles.basePriceHint}>
-              Admin base: {formatGhc(basePriceMap[formPackageKey])} — used by
-              default
-            </Text>
-          ) : null}
+          <View style={styles.filterSection}>
+            <Text style={styles.filterLabel}>Bundle</Text>
+            <View style={styles.choiceRow}>
+              {familyOptions.map((option) => (
+                <TouchableOpacity
+                  key={`filter-family-${option.key}`}
+                  style={[
+                    styles.choiceButton,
+                    selectedFamily === option.key && styles.chipActive,
+                  ]}
+                  onPress={() => setSelectedFamily(option.key)}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      selectedFamily === option.key && styles.chipTextActive,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+          <Text style={styles.resultCount}>
+            {filteredOffers.length} {filteredOffers.length === 1 ? "offer" : "offers"}
+          </Text>
         </View>
 
         {offerGroups.length === 0 ? (
           <View style={styles.emptyCard}>
             <Ionicons name="pricetags-outline" size={40} color={c.textMuted} />
-            <Text style={styles.emptyTitle}>No offers yet</Text>
+            <Text style={styles.emptyTitle}>
+              {offers.length === 0 ? "No offers yet" : "No matching offers"}
+            </Text>
             <Text style={styles.emptyText}>
-              Create your first offer above, or set prices for every bundle in a
-              tier from Tier Management.
+              {offers.length === 0
+                ? "Create your first offer above, or set prices for every bundle in a tier from Tier Management."
+                : "Choose a different provider or bundle family to see more offers."}
             </Text>
           </View>
         ) : (
@@ -889,8 +1270,36 @@ const useOfferStyles = (c, topInset = 0) => {
       padding: 16,
       marginBottom: 16,
     },
-    createTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 10 },
+    createHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      minHeight: 36,
+    },
+    createTitle: { ...base.sectionTitle, fontSize: 16, marginBottom: 0 },
+    createSubtitle: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      marginTop: 4,
+    },
     fieldLabel: { ...base.label, marginBottom: 6 },
+    choiceRow: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      alignItems: "center",
+      marginBottom: 10,
+    },
+    choiceButton: {
+      paddingHorizontal: 13,
+      paddingVertical: 8,
+      borderRadius: 999,
+      backgroundColor: c.canvasRaised,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      marginRight: 8,
+      marginBottom: 6,
+    },
     chipRow: {
       flexDirection: "row",
       alignItems: "center",
@@ -914,11 +1323,80 @@ const useOfferStyles = (c, topInset = 0) => {
     },
     chipTextActive: { color: c.onAccent },
 
+    bundleChoices: {
+      maxHeight: 220,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      backgroundColor: c.canvasRaised,
+    },
+    bundleChoicesContent: { paddingBottom: 12 },
+    noBundles: {
+      fontFamily: fonts.body,
+      fontSize: 12,
+      color: c.textMuted,
+      padding: 14,
+    },
+    bundleChoice: {
+      minHeight: 54,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderBottomWidth: 1,
+      borderBottomColor: c.hairline,
+    },
+    bundleChoiceActive: { backgroundColor: `${c.mint}18` },
+    bundleChoiceText: { flex: 1, marginRight: 8 },
+    bundleChoiceTitle: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 13,
+      color: c.textPrimary,
+    },
+    bundleChoiceMeta: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+    bundleChoicePrice: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.textSecondary,
+    },
+    filterCard: {
+      ...base.card,
+      borderRadius: 20,
+      padding: 14,
+      marginBottom: 16,
+    },
+    filterTitle: {
+      fontFamily: fonts.display,
+      fontSize: 16,
+      color: c.textPrimary,
+      marginBottom: 10,
+    },
+    filterSection: { marginBottom: 4 },
+    filterLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textMuted,
+      marginBottom: 6,
+    },
+    resultCount: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 2,
+    },
+
     createPriceRow: {
       flexDirection: "row",
       alignItems: "center",
       marginTop: 4,
     },
+    newPriceInputWrap: { width: undefined, flex: 1, height: 44, paddingHorizontal: 12 },
     createButton: {
       flexDirection: "row",
       alignItems: "center",
@@ -933,13 +1411,19 @@ const useOfferStyles = (c, topInset = 0) => {
     createButtonText: {
       fontFamily: fonts.bodyBold,
       color: c.onAccent,
-      marginLeft: 6,
+      fontSize: 13,
     },
     basePriceHint: {
       fontFamily: fonts.body,
       fontSize: 11,
       color: c.textMuted,
       marginTop: 6,
+    },
+    basePriceLink: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.mint,
+      marginTop: 4,
     },
 
     groupCard: {
