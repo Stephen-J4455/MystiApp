@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   View,
   Platform,
+  Modal,
 } from "react-native";
 import { KeyboardAwareScrollView } from "react-native-keyboard-controller";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -18,7 +19,6 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
-import { getProviderDisplayName } from "../lib/providerDisplay";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -104,6 +104,13 @@ const formatPriceInput = (value) => {
   return Number.isFinite(numeric) ? numeric.toFixed(2) : "";
 };
 
+const getTierProviderLabel = (provider) => {
+  const key = String(provider || "jehuca").trim().toLowerCase();
+  if (key === "jehuca") return "MystiwanEbiz";
+  if (key === "bisdel") return "MystiwanEbiz-VIP";
+  return "Data provider";
+};
+
 // Admin base prices are the default a tier price starts from. A base price of
 // 0 counts as "not set" because tier prices must be greater than 0.
 const usableBasePrice = (value) => {
@@ -120,7 +127,12 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   const [basePriceMap, setBasePriceMap] = useState({});
   const [offerMap, setOfferMap] = useState({});
   const [priceInputs, setPriceInputs] = useState({});
+  const [selectedProvider, setSelectedProvider] = useState("all");
   const [selectedNetwork, setSelectedNetwork] = useState("all");
+  const [packageSort, setPackageSort] = useState("price");
+  const [sortModalVisible, setSortModalVisible] = useState(false);
+  const [filterModalVisible, setFilterModalVisible] = useState(false);
+  const [activeFilter, setActiveFilter] = useState("provider");
   const [savingTierId, setSavingTierId] = useState(null);
   const [newTierName, setNewTierName] = useState("");
   const [newTierDescription, setNewTierDescription] = useState("");
@@ -308,6 +320,18 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     [packages, basePriceMap],
   );
 
+  const providerOptions = useMemo(
+    () => [
+      "all",
+      ...new Set(
+        pricedPackages.map((pkg) =>
+          String(pkg.provider || "jehuca").trim().toLowerCase(),
+        ),
+      ),
+    ],
+    [pricedPackages],
+  );
+
   const networkOptions = useMemo(() => {
     const networks = [];
     pricedPackages.forEach((pkg) => {
@@ -318,13 +342,40 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
   }, [pricedPackages]);
 
   const filteredPackages = useMemo(() => {
-    if (selectedNetwork === "all") return pricedPackages;
-    return pricedPackages.filter(
-      (pkg) =>
-        String(pkg.network || "").toUpperCase() ===
-        selectedNetwork.toUpperCase(),
-    );
-  }, [pricedPackages, selectedNetwork]);
+    const filtered = pricedPackages.filter((pkg) => {
+      const provider = String(pkg.provider || "jehuca")
+        .trim()
+        .toLowerCase();
+      const network = String(pkg.network || "").toUpperCase();
+      return (
+        (selectedProvider === "all" || provider === selectedProvider) &&
+        (selectedNetwork === "all" ||
+          network === selectedNetwork.toUpperCase())
+      );
+    });
+    return filtered.sort((first, second) => {
+      const firstValue =
+        packageSort === "price"
+          ? usableBasePrice(basePriceMap[getPackageKey(first)]) ??
+            Number.POSITIVE_INFINITY
+          : Number.parseFloat(first.size) || Number.POSITIVE_INFINITY;
+      const secondValue =
+        packageSort === "price"
+          ? usableBasePrice(basePriceMap[getPackageKey(second)]) ??
+            Number.POSITIVE_INFINITY
+          : Number.parseFloat(second.size) || Number.POSITIVE_INFINITY;
+      return (
+        firstValue - secondValue ||
+        getPackageDescriptor(first).localeCompare(getPackageDescriptor(second))
+      );
+    });
+  }, [
+    pricedPackages,
+    selectedProvider,
+    selectedNetwork,
+    packageSort,
+    basePriceMap,
+  ]);
 
   const tierChangedCount = useCallback(
     (tier) => {
@@ -572,7 +623,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         <View style={styles.packageInfo}>
           <Text style={styles.packageName}>
             {String(pkg.network || "").toUpperCase()} — {desc} ·{" "}
-            {getProviderDisplayName(pkg.provider)}
+            {getTierProviderLabel(pkg.provider)}
           </Text>
           <Text style={styles.packageMeta}>
             {pkg.size ? `${pkg.size} GB · ` : ""}Base:{" "}
@@ -767,33 +818,175 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           </TouchableOpacity>
         </View>
 
-        {networkOptions.length > 1 ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.networkFilterRow}
-          >
-            {networkOptions.map((option) => (
-              <TouchableOpacity
-                key={option}
-                style={[
-                  styles.networkChip,
-                  selectedNetwork === option && styles.networkChipActive,
-                ]}
-                onPress={() => setSelectedNetwork(option)}
-              >
-                <Text
-                  style={[
-                    styles.networkChipText,
-                    selectedNetwork === option && styles.networkChipTextActive,
-                  ]}
-                >
-                  {option === "all" ? "All Networks" : option}
+        <View style={styles.filterButtons}>
+          {providerOptions.length > 1 ? (
+            <TouchableOpacity
+              style={styles.sortButton}
+              onPress={() => {
+                setActiveFilter("provider");
+                setFilterModalVisible(true);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`Filter by provider, currently ${selectedProvider === "all" ? "all providers" : getTierProviderLabel(selectedProvider)}`}
+            >
+              <Ionicons name="funnel-outline" size={16} color={c.textSecondary} />
+              <Text style={styles.sortButtonText}>
+                Provider:{" "}
+                {selectedProvider === "all"
+                  ? "All"
+                  : getTierProviderLabel(selectedProvider)}
+              </Text>
+              <Ionicons name="chevron-down" size={16} color={c.textMuted} />
+            </TouchableOpacity>
+          ) : null}
+          {networkOptions.length > 1 ? (
+            <TouchableOpacity
+              style={styles.sortButton}
+              onPress={() => {
+                setActiveFilter("network");
+                setFilterModalVisible(true);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`Filter by network, currently ${selectedNetwork === "all" ? "all networks" : selectedNetwork}`}
+            >
+              <Ionicons name="cellular-outline" size={16} color={c.textSecondary} />
+              <Text style={styles.sortButtonText}>
+                Network: {selectedNetwork === "all" ? "All" : selectedNetwork}
+              </Text>
+              <Ionicons name="chevron-down" size={16} color={c.textMuted} />
+            </TouchableOpacity>
+          ) : null}
+        </View>
+
+        <Modal
+          visible={filterModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setFilterModalVisible(false)}
+        >
+          <View style={styles.sortModalBackdrop}>
+            <TouchableOpacity
+              style={StyleSheet.absoluteFill}
+              activeOpacity={1}
+              onPress={() => setFilterModalVisible(false)}
+              accessibilityLabel="Close filter options"
+            />
+            <View style={styles.sortModalCard}>
+              <View style={styles.sortModalHeader}>
+                <Text style={styles.sortModalTitle}>
+                  Filter by {activeFilter}
                 </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        ) : null}
+                <TouchableOpacity
+                  onPress={() => setFilterModalVisible(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close filter options"
+                  hitSlop={10}
+                >
+                  <Ionicons name="close" size={22} color={c.textMuted} />
+                </TouchableOpacity>
+              </View>
+              {(activeFilter === "provider" ? providerOptions : networkOptions).map(
+                (option) => {
+                  const selected =
+                    activeFilter === "provider"
+                      ? selectedProvider === option
+                      : selectedNetwork === option;
+                  const label =
+                    activeFilter === "provider"
+                      ? option === "all"
+                        ? "All Providers"
+                        : getTierProviderLabel(option)
+                      : option === "all"
+                        ? "All Networks"
+                        : option;
+                  return (
+                    <TouchableOpacity
+                      key={`${activeFilter}-${option}`}
+                      style={styles.sortOption}
+                      onPress={() => {
+                        if (activeFilter === "provider") {
+                          setSelectedProvider(option);
+                        } else {
+                          setSelectedNetwork(option);
+                        }
+                        setFilterModalVisible(false);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityState={{ selected }}
+                    >
+                      <Text style={styles.sortOptionText}>{label}</Text>
+                      {selected ? (
+                        <Ionicons name="checkmark" size={20} color={c.mint} />
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                },
+              )}
+            </View>
+          </View>
+        </Modal>
+
+        <TouchableOpacity
+          style={styles.sortButton}
+          onPress={() => setSortModalVisible(true)}
+          accessibilityRole="button"
+          accessibilityLabel={`Sort packages, currently ${packageSort === "price" ? "price low to high" : "size small to large"}`}
+        >
+          <Ionicons name="swap-vertical-outline" size={17} color={c.textSecondary} />
+          <Text style={styles.sortButtonText}>
+            Sort: {packageSort === "price" ? "Price" : "Size"}
+          </Text>
+          <Ionicons name="chevron-down" size={16} color={c.textMuted} />
+        </TouchableOpacity>
+
+        <Modal
+          visible={sortModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setSortModalVisible(false)}
+        >
+          <View style={styles.sortModalBackdrop}>
+            <TouchableOpacity
+              style={StyleSheet.absoluteFill}
+              activeOpacity={1}
+              onPress={() => setSortModalVisible(false)}
+              accessibilityLabel="Close sort options"
+            />
+            <View style={styles.sortModalCard}>
+              <View style={styles.sortModalHeader}>
+                <Text style={styles.sortModalTitle}>Sort packages</Text>
+                <TouchableOpacity
+                  onPress={() => setSortModalVisible(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close sort options"
+                  hitSlop={10}
+                >
+                  <Ionicons name="close" size={22} color={c.textMuted} />
+                </TouchableOpacity>
+              </View>
+              {[
+                { key: "price", label: "Price: low to high" },
+                { key: "size", label: "Size: small to large" },
+              ].map((option) => (
+                <TouchableOpacity
+                  key={option.key}
+                  style={styles.sortOption}
+                  onPress={() => {
+                    setPackageSort(option.key);
+                    setSortModalVisible(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: packageSort === option.key }}
+                >
+                  <Text style={styles.sortOptionText}>{option.label}</Text>
+                  {packageSort === option.key ? (
+                    <Ionicons name="checkmark" size={20} color={c.mint} />
+                  ) : null}
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </Modal>
 
         {tiers.length === 0 ? (
           <View style={styles.emptyCard}>
@@ -903,11 +1096,68 @@ const useTierStyles = (c, topInset = 0) => {
       marginLeft: 6,
     },
 
-    networkFilterRow: {
+    filterButtons: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      flexWrap: "wrap",
+    },
+    sortButton: {
+      alignSelf: "flex-start",
       flexDirection: "row",
       alignItems: "center",
-      paddingVertical: 4,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      marginBottom: 12,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      backgroundColor: c.surface,
+    },
+    sortButtonText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 12,
+      color: c.textSecondary,
+      marginHorizontal: 8,
+    },
+    sortModalBackdrop: {
+      flex: 1,
+      justifyContent: "center",
+      padding: 24,
+      backgroundColor: "rgba(0, 0, 0, 0.5)",
+    },
+    sortModalCard: {
+      width: "100%",
+      maxWidth: 420,
+      alignSelf: "center",
+      padding: 18,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: c.hairline,
+      backgroundColor: c.surface,
+    },
+    sortModalHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
       marginBottom: 8,
+    },
+    sortModalTitle: {
+      fontFamily: fonts.display,
+      fontSize: 17,
+      color: c.textPrimary,
+    },
+    sortOption: {
+      minHeight: 48,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      borderTopWidth: 1,
+      borderTopColor: c.hairline,
+    },
+    sortOptionText: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 14,
+      color: c.textSecondary,
     },
     networkChip: {
       paddingHorizontal: 14,
