@@ -21,6 +21,8 @@ import { getEdgeFunctionName } from "../lib/env";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
+import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
+import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
 import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
 import { copyToClipboard } from "../lib/clipboard";
 import {
@@ -64,7 +66,11 @@ const initialForm = {
 
 export default function AfaRegistrationScreen({ navigation }) {
   const { showError, showSuccess } = useNotification();
-  const { isSuperAgent: isSuperAgentProfile } = useProfile();
+  const {
+    isSuperAgent: isSuperAgentProfile,
+    isSubAgent: isSubAgentProfile,
+  } = useProfile();
+  const dockBottomPadding = useDockBottomPadding(16);
   const [form, setForm] = useState(initialForm);
   const [settings, setSettings] = useState(null);
   const [registrations, setRegistrations] = useState([]);
@@ -316,10 +322,22 @@ export default function AfaRegistrationScreen({ navigation }) {
       if (Platform.OS === "web") setWebPaymentRequested(true);
       else setPaymentVisible(true);
     } catch (error) {
-      showError(
-        "AFA Registration",
-        error.message || "Unable to complete registration",
+      const message = await getEdgeFunctionErrorMessage(
+        error,
+        "Unable to complete registration",
       );
+      if (
+        isSubAgentProfile &&
+        paymentMethod === "wallet" &&
+        /insufficient wallet balance/i.test(message)
+      ) {
+        showError(
+          "Super Agent wallet balance is low",
+          "There may not be enough balance to cover this registration. Ask your Super Agent to check or top up their wallet, or choose Paystack and try again.",
+        );
+      } else {
+        showError("AFA Registration", message);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -450,7 +468,10 @@ export default function AfaRegistrationScreen({ navigation }) {
       </View>
 
       <KeyboardAwareScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          Platform.OS !== "web" && { paddingBottom: dockBottomPadding },
+        ]}
         keyboardShouldPersistTaps="handled"
       >
         <View style={styles.hero}>

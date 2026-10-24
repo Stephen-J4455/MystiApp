@@ -32,6 +32,10 @@ import {
   updateSubAgentOrderStatus,
   SUPER_AGENT_WRITABLE_STATUSES,
 } from "../lib/superAgentRoster";
+import {
+  fetchHistoryOrderPage,
+  HISTORY_PAGE_SIZE,
+} from "../services/historyPrefetch";
 
 const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 
@@ -54,16 +58,11 @@ const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 // bottom. The list is also moved onto a `FlatList`, which unmounts rows that
 // have scrolled away instead of keeping them all alive.
 //
-// TEN ROWS PER PAGE.
+// FIVE ROWS PER SOURCE PAGE.
 //
-// A page of ten is deliberately small. The cost of a page is dominated by the
-// provider status refresh, and that work is now batched into ONE edge call
-// for the page - so the marginal cost of a tenth row is a fraction of a
-// round trip, not a round trip. Ten rows fill roughly a screen and a half,
-// which means the user reaches the "load more" trigger having seen
-// something, rather than scrolling through three pages of content that was
-// never going to be read.
-const PAGE_SIZE = 10;
+// Smaller pages reduce the initial payload and keep provider status checks
+// scoped to fewer orders. Older rows are fetched as the user scrolls.
+const PAGE_SIZE = HISTORY_PAGE_SIZE;
 
 // A money value that may genuinely be UNKNOWN, rendered so an unknown reads as
 // unknown.
@@ -204,7 +203,7 @@ const getSubAgentBusinessNames = async (superAgentId) => {
  * Only orders that could still move are sent to the provider.
  *
  * This is the single biggest win on a long history, and it is why a page of
- * ten old orders costs almost nothing while a page of ten fresh ones costs
+ * five old orders costs almost nothing while a page of five fresh ones costs
  * one batched call.
  */
 const refreshProviderStatuses = async (orders, table) => {
@@ -507,32 +506,42 @@ export default function HistoryScreen({ navigation }) {
   // previous one's details.
   const [complaintOrder, setComplaintOrder] = useState(null);
   const { showError, showSuccess } = useNotification();
-  const { isSuperAgent: isSuperAgentProfile, isSubAgent: isAgentProfile } =
-    useProfile();
+  const {
+    isSuperAgent: isSuperAgentProfile,
+    isSubAgent: isAgentProfile,
+    profile,
+    loading: profileLoading,
+  } = useProfile();
 
   useEffect(() => {
-    checkAgentStatus();
-
-    // Add listener to refresh when returning to screen
     const unsubscribe = navigation.addListener("focus", () => {
-      // Re-check agent status and fetch transactions when returning to screen
       checkAgentStatus(true);
     });
 
+    // The mount-time focus event can fire before the listener is attached, so
+    // load once here only when this screen is already focused. This avoids the
+    // previous mount request plus focus request racing each other.
+    if (navigation.isFocused()) checkAgentStatus();
+
     return unsubscribe;
-  }, [navigation]);
+  }, [
+    navigation,
+    profile?.id,
+    profileLoading,
+    isAgentProfile,
+    isSuperAgentProfile,
+  ]);
 
   // Real-time updates for orders
   useEffect(() => {
     let historyChannel = null;
     let cancelled = false;
+    const userId = profile?.id;
+    if (!userId || profileLoading) return undefined;
 
     const setupRealtimeSubscriptions = async () => {
       try {
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
-        if (!user || cancelled) return;
+        if (cancelled) return;
 
         // From the profile context (`public.user_profiles`), NOT
         // `isSuperAgent(user)`. The old call was left over from the metadata
@@ -557,7 +566,7 @@ export default function HistoryScreen({ navigation }) {
             event: "*",
             schema: "public",
             table: "orders",
-            filter: `user_id=eq.${user.id}`,
+            filter: `user_id=eq.${userId}`,
           },
           () => checkAgentStatus(true),
         );
@@ -568,7 +577,7 @@ export default function HistoryScreen({ navigation }) {
             event: "*",
             schema: "public",
             table: "agent_orders",
-            filter: `agent_id=eq.${user.id}`,
+            filter: `agent_id=eq.${userId}`,
           },
           () => checkAgentStatus(true),
         );
@@ -580,7 +589,7 @@ export default function HistoryScreen({ navigation }) {
               event: "*",
               schema: "public",
               table: "agent_orders",
-              filter: `super_agent_id=eq.${user.id}`,
+              filter: `super_agent_id=eq.${userId}`,
             },
             () => checkAgentStatus(true),
           );
@@ -602,7 +611,7 @@ export default function HistoryScreen({ navigation }) {
                       event: "*",
                       schema: "public",
                       table: "orders",
-                      filter: `super_agent_id=eq.${user.id}`,
+                      filter: `super_agent_id=eq.${userId}`,
                     },
                     () => checkAgentStatus(true),
                   );
@@ -625,29 +634,21 @@ export default function HistoryScreen({ navigation }) {
       removeChannelSafe(historyChannel);
       historyChannel = null;
     };
-  }, []);
+  }, [
+    profile?.id,
+    profileLoading,
+    isAgentProfile,
+    isSuperAgentProfile,
+  ]);
 
   const checkAgentStatus = async (isRefresh = false) => {
-    try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (user) {
-        // Role from `public.user_profiles` via the profile context. The old code
-        // read `user_metadata.role` and `user_metadata.super_agent_id`, both
-        // writable by the account owner via `auth.updateUser()`.
-        setIsSuperAgentUser(isSuperAgentProfile);
-        const agentStatus = isAgentProfile;
-        setIsAgent(agentStatus);
+    if (profileLoading || !profile?.id) return;
 
-        // Fetch transactions after determining agent status
-        fetchTransactions(agentStatus, isRefresh);
-      }
-    } catch (error) {
-      console.error("Error checking agent status:", error);
-      setIsAgent(false);
-      fetchTransactions(false, isRefresh);
-    }
+    // Identity and roles are already resolved by ProfileContext. Avoid a
+    // second auth.getUser network request before using the prefetched page.
+    setIsSuperAgentUser(isSuperAgentProfile);
+    setIsAgent(isAgentProfile);
+    fetchTransactions(isAgentProfile, isRefresh);
   };
 
   const fetchTransactions = async (
@@ -661,25 +662,38 @@ export default function HistoryScreen({ navigation }) {
       } else {
         setRefreshing(true);
       }
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
+      const user = profile?.id ? { id: profile.id } : null;
       if (user) {
         let allTransactions = [];
+        const pendingStatusRefreshes = [];
+        let subAgentBusinessNamesRequest = null;
+        let walletOrdersForSettlement = [];
+        const subAgentIdsByOrderKey = new Map();
 
         // THE PAGE WINDOW.
         //
-        // Each source is read with the SAME server-side range, so every branch
-        // contributes its newest `PAGE_SIZE` rows to the page and the merged
-        // result is still the newest `PAGE_SIZE` transactions overall.
+        // Each source is read with the SAME server-side range. The sources are
+        // merged and sorted below; paging remains independent per source.
         //
         // The range is applied per source rather than after the merge, because
         // the merge happens in memory across four different tables - there is
         // no single query to page. The consequence is that a page is not
         // guaranteed to hold exactly `PAGE_SIZE` rows, which is why
         // `hasMore` is decided per source rather than from the merged length.
-        const from = page * PAGE_SIZE;
-        const to = from + PAGE_SIZE - 1;
+        // Home prefetches this page while the user is there; this shares its
+        // in-flight request or warm result. Later pages use the same query path
+        // without entering the first-page cache.
+        const {
+          regularOrders: regularOrdersRequest,
+          agentOrders: agentOrdersRequest,
+          assignedOrders: assignedOrdersRequest,
+          walletOrders: walletOrdersRequest,
+        } = await fetchHistoryOrderPage({
+          userId: user.id,
+          isAgent: agentStatus,
+          isSuperAgent: isSuperAgentProfile,
+          page,
+        });
 
         // A source is "exhausted" when it returned fewer rows than the window
         // asked for. Tracked per source so the screen knows when EVERY branch
@@ -691,26 +705,22 @@ export default function HistoryScreen({ navigation }) {
         };
 
         // Fetch regular orders
-        const { data: regularOrders, error: regularError } = await supabase
-          .from("orders")
-          .select("*")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .range(from, to);
+        const { data: regularOrders, error: regularError } =
+          await regularOrdersRequest;
 
         if (regularError) {
           console.error("Error fetching regular orders:", regularError);
         } else {
           markExhausted((regularOrders || []).length);
-          // Regular orders carry their own `jehuca_order_id`. They were
-          // previously NEVER refreshed, so a normal user or a super agent's own
-          // wallet purchase kept whatever status was written at dispatch time
-          // even after the provider had moved it to COMPLETED.
-          const refreshedRegularOrders = await refreshProviderStatuses(
-            regularOrders,
-            "orders",
-          );
-          const normalizedRegularOrders = refreshedRegularOrders.map(
+          // Keep the first render independent from provider latency. The
+          // saved order state is shown immediately; any provider status change
+          // is applied to the visible rows in the background.
+          pendingStatusRefreshes.push({
+            orders: regularOrders,
+            table: "orders",
+            orderType: "regular",
+          });
+          const normalizedRegularOrders = regularOrders.map(
             (order) => ({
               ...order,
               orderType: "regular",
@@ -723,22 +733,19 @@ export default function HistoryScreen({ navigation }) {
 
         // If user is an agent, fetch agent orders too
         if (agentStatus) {
-          const { data: agentOrders, error: agentError } = await supabase
-            .from("agent_orders")
-            .select("*")
-            .eq("agent_id", user.id)
-            .order("created_at", { ascending: false })
-            .range(from, to);
+          const { data: agentOrders, error: agentError } =
+            await agentOrdersRequest;
 
           if (agentError) {
             console.error("Error fetching agent orders:", agentError);
           } else {
             markExhausted((agentOrders || []).length);
-            const refreshedAgentOrders = await refreshProviderStatuses(
-              agentOrders,
-              "agent_orders",
-            );
-            const normalizedAgentOrders = refreshedAgentOrders.map((order) => ({
+            pendingStatusRefreshes.push({
+              orders: agentOrders,
+              table: "agent_orders",
+              orderType: "agent",
+            });
+            const normalizedAgentOrders = agentOrders.map((order) => ({
               ...order,
               orderType: "agent",
               displayName: order.recipient_name,
@@ -759,21 +766,18 @@ export default function HistoryScreen({ navigation }) {
                     // super agent whose Paystack read succeeded.
                     let subAgentBusinessNames = new Map();
 
-                    const { data: assignedOrders, error: assignedError } = await supabase
-                      .from("agent_orders")
-                      .select("*")
-                      .eq("super_agent_id", user.id)
-                      .order("created_at", { ascending: false })
-                      .range(from, to);
+                    const { data: assignedOrders, error: assignedError } =
+                      await assignedOrdersRequest;
 
           if (assignedError) {
             console.error("Error fetching sub-agent orders:", assignedError);
           } else {
             markExhausted((assignedOrders || []).length);
-            const refreshedAssignedOrders = await refreshProviderStatuses(
-              assignedOrders,
-              "agent_orders",
-            );
+            pendingStatusRefreshes.push({
+              orders: assignedOrders,
+              table: "agent_orders",
+              orderType: "agent",
+            });
             // THE SUB-AGENT NAMES.
             //
             // These come from an edge function and are the SAME on every page
@@ -781,19 +785,21 @@ export default function HistoryScreen({ navigation }) {
             // are fetched ONCE and cached, rather than re-fetched for every
             // page the user loads. On a history the user scrolls through
             // several pages, that was several identical edge calls.
-            subAgentBusinessNames =
-              await getSubAgentBusinessNames(user.id);
-            const assignedTransactions = refreshedAssignedOrders.map(
+            subAgentBusinessNamesRequest =
+              getSubAgentBusinessNames(user.id);
+            const assignedTransactions = assignedOrders.map(
               (order) => ({
                 ...order,
                 orderType: "agent",
                 isSubAgentTransaction: true,
-                subAgentBusinessName:
-                  subAgentBusinessNames.get(order.agent_id) || "",
+                subAgentBusinessName: "",
                 displayName: order.recipient_name,
                 displayPhone: order.recipient_phone,
               }),
             );
+            assignedOrders.forEach((order) => {
+              subAgentIdsByOrderKey.set(`agent-${order.id}`, order.agent_id);
+            });
             allTransactions = [...allTransactions, ...assignedTransactions];
           }
 
@@ -834,12 +840,8 @@ export default function HistoryScreen({ navigation }) {
                       //
                       // A denied read must not blank the orders already loaded.
                       try {
-                        const { data: walletOrders, error: walletOrdersError } = await supabase
-                          .from("orders")
-                          .select("*")
-                          .eq("super_agent_id", user.id)
-                          .order("created_at", { ascending: false })
-                          .range(from, to);
+                        const { data: walletOrders, error: walletOrdersError } =
+                          await walletOrdersRequest;
 
                         if (walletOrdersError) {
                           console.error(
@@ -848,10 +850,12 @@ export default function HistoryScreen({ navigation }) {
                           );
                         } else {
                           markExhausted((walletOrders || []).length);
-                          const refreshedWalletOrders = await refreshProviderStatuses(
-                            walletOrders,
-                            "orders",
-                          );
+                          walletOrdersForSettlement = walletOrders || [];
+                          pendingStatusRefreshes.push({
+                            orders: walletOrders,
+                            table: "orders",
+                            orderType: "regular",
+                          });
 
                           // THE SETTLEMENT JOIN. `orders` does not carry the money split.
                           //
@@ -884,49 +888,16 @@ export default function HistoryScreen({ navigation }) {
                           // Per-source: a denied read of `payment_transactions` leaves the
                           // wallet orders visible with no settlement figures, rather than
                           // dropping the orders themselves.
-                          let paymentsByOrderId = new Map();
-                          const walletOrderIds = refreshedWalletOrders.map(
-                            (order) => order.id,
-                          );
-                          if (walletOrderIds.length > 0) {
-                            try {
-                              const { data: walletPayments, error: walletPaymentsError } =
-                                await supabase
-                                  .from("payment_transactions")
-                                  .select(
-                                    "order_id, order_type, gross_amount, base_amount, transaction_fee, main_account_amount, super_agent_amount, settlement_status",
-                                  )
-                                  .eq("order_type", "regular")
-                                  .in("order_id", walletOrderIds);
-
-                              if (walletPaymentsError) {
-                                console.error(
-                                  "Error fetching wallet order settlements:",
-                                  walletPaymentsError,
-                                );
-                              } else {
-                                paymentsByOrderId = new Map(
-                                  (walletPayments || []).map((payment) => [
-                                    payment.order_id,
-                                    payment,
-                                  ]),
-                                );
-                              }
-                            } catch (walletPaymentsCatch) {
-                              console.error(
-                                "Error fetching wallet order settlements:",
-                                walletPaymentsCatch,
-                              );
-                            }
-                          }
-
-                          const walletTransactions = refreshedWalletOrders.map((order) => {
-                            const payment = paymentsByOrderId.get(order.id) || null;
+                          const walletTransactions = walletOrders.map((order) => {
+                            subAgentIdsByOrderKey.set(
+                              `regular-${order.id}`,
+                              order.user_id,
+                            );
                             return {
                               ...order,
                               orderType: "regular",
                               isSubAgentTransaction: true,
-                              subAgentBusinessName: subAgentBusinessNames.get(order.user_id) || "",
+                              subAgentBusinessName: "",
                               // `orders` names the buyer on `user_id` and carries the recipient
                               // on `phone` - the same shape branch 1 reads, and deliberately
                               // NOT the `recipient_*` columns `agent_orders` uses. The two tables
@@ -938,7 +909,7 @@ export default function HistoryScreen({ navigation }) {
                                                             // and is a sound fallback: it is the sale price the order
                                                             // was created with, not a settlement figure nobody
                                                             // measured.
-                                                            gross_amount: payment?.gross_amount ?? order.amount ?? null,
+                                                            gross_amount: order.amount ?? null,
                                                             // What the super agent's wallet was actually drawn down by:
                                                             // the admin-set base price.
                                                             //
@@ -947,15 +918,15 @@ export default function HistoryScreen({ navigation }) {
                                                             // IS the margin", inventing a profit figure that was never
                                                             // recorded - and `formatGhc` would render it as a
                                                             // confident number.
-                                                            base_amount: payment?.base_amount ?? null,
+                                                            base_amount: null,
                                                             // Always 0 on a wallet order - the money came from a mirrored
                                                             // balance charged once at top-up, so there is no per-order
                                                             // provider fee. 0 is a REAL value here, not a stand-in for
                                                             // missing, so it is preserved rather than nulled.
-                                                            transaction_fee: payment?.transaction_fee ?? 0,
+                                                            transaction_fee: 0,
                                                             // What the platform took: the sale price less the base price.
-                                                            main_account_amount: payment?.main_account_amount ?? null,
-                                                            settlement_status: payment?.settlement_status ?? null,
+                                                            main_account_amount: null,
+                                                            settlement_status: null,
                                                             // Derived, NOT `payment.super_agent_amount` - that column is
                                                             // unset on the wallet branch, so reading it reported a
                                                             // margin of zero for every purchase.
@@ -966,18 +937,7 @@ export default function HistoryScreen({ navigation }) {
                                                             // is the exact conflation this screen's own header warns
                                                             // against. When either is unknown the margin is unknown,
                                                             // and it is rendered as "—" rather than as a number.
-                                                            super_agent_share: (() => {
-                                                              if (!payment) return null;
-                                                              const gross = Number(payment.gross_amount);
-                                                              const base = Number(payment.base_amount);
-                                                              if (
-                                                                !Number.isFinite(gross) ||
-                                                                !Number.isFinite(base)
-                                                              ) {
-                                                                return null;
-                                                              }
-                                                              return Number((gross - base).toFixed(2));
-                                                            })(),
+                                                            super_agent_share: null,
                                                           };
                           });
                           allTransactions = [
@@ -1032,6 +992,134 @@ export default function HistoryScreen({ navigation }) {
             );
           });
         }
+
+        if (subAgentBusinessNamesRequest) {
+          subAgentBusinessNamesRequest
+            .then((names) => {
+              setTransactions((previous) =>
+                previous.map((transaction) => {
+                  if (!transaction.isSubAgentTransaction) return transaction;
+                  const source = transaction.orderType || "regular";
+                  const subAgentId = subAgentIdsByOrderKey.get(
+                    `${source}-${transaction.id}`,
+                  );
+                  if (!subAgentId) return transaction;
+                  return {
+                    ...transaction,
+                    subAgentBusinessName: names.get(subAgentId) || "",
+                  };
+                }),
+              );
+            })
+            .catch((error) => {
+              console.error("Error refreshing sub-agent names:", error);
+            });
+        }
+
+        if (walletOrdersForSettlement.length > 0) {
+          const walletOrderIds = walletOrdersForSettlement.map(
+            (order) => order.id,
+          );
+          supabase
+            .from("payment_transactions")
+            .select(
+              "order_id, order_type, gross_amount, base_amount, transaction_fee, main_account_amount, super_agent_amount, settlement_status",
+            )
+            .eq("order_type", "regular")
+            .in("order_id", walletOrderIds)
+            .then(({ data, error }) => {
+              if (error) {
+                console.error(
+                  "Error fetching wallet order settlements:",
+                  error,
+                );
+                return;
+              }
+
+              const paymentsByOrderId = new Map(
+                (data || []).map((payment) => [payment.order_id, payment]),
+              );
+              const walletOrderIdSet = new Set(walletOrderIds);
+              setTransactions((previous) =>
+                previous.map((transaction) => {
+                  if (
+                    transaction.orderType !== "regular" ||
+                    !transaction.isSubAgentTransaction ||
+                    !walletOrderIdSet.has(transaction.id)
+                  ) {
+                    return transaction;
+                  }
+                  const payment = paymentsByOrderId.get(transaction.id);
+                  if (!payment) return transaction;
+                  const gross =
+                    payment.gross_amount ?? transaction.gross_amount ?? null;
+                  const base = payment.base_amount ?? null;
+                  const grossNumber = Number(gross);
+                  const baseNumber = Number(base);
+
+                  return {
+                    ...transaction,
+                    gross_amount: gross,
+                    base_amount: base,
+                    transaction_fee: payment.transaction_fee ?? 0,
+                    main_account_amount:
+                      payment.main_account_amount ?? null,
+                    settlement_status: payment.settlement_status ?? null,
+                    super_agent_share:
+                      gross !== null &&
+                      gross !== undefined &&
+                      base !== null &&
+                      base !== undefined &&
+                      Number.isFinite(grossNumber) &&
+                      Number.isFinite(baseNumber)
+                        ? Number((grossNumber - baseNumber).toFixed(2))
+                        : null,
+                  };
+                }),
+              );
+            })
+            .catch((error) => {
+              console.error("Error fetching wallet order settlements:", error);
+            });
+        }
+
+        // Provider lookups can be much slower than reading saved history.
+        // Refresh them after the rows are scheduled for display, then patch
+        // status only so paging, names and settlement details remain intact.
+        const statusRefreshesBySource = new Map();
+        pendingStatusRefreshes.forEach(({ orders, table, orderType }) => {
+          const key = `${table}:${orderType}`;
+          const rows = statusRefreshesBySource.get(key) || new Map();
+          (orders || []).forEach((order) => rows.set(order.id, order));
+          statusRefreshesBySource.set(key, rows);
+        });
+        Promise.all(
+          [...statusRefreshesBySource.entries()].map(
+            async ([key, rowsById]) => {
+              const [table, orderType] = key.split(":");
+              const refreshedOrders = await refreshProviderStatuses(
+                [...rowsById.values()],
+                table,
+              );
+              const refreshedById = new Map(
+                refreshedOrders.map((order) => [order.id, order]),
+              );
+              setTransactions((previous) =>
+                previous.map((transaction) => {
+                  if (transaction.orderType !== orderType) return transaction;
+                  const refreshed = refreshedById.get(transaction.id);
+                  if (!refreshed) return transaction;
+                  return {
+                    ...transaction,
+                    jehuca_order_status: refreshed.jehuca_order_status,
+                  };
+                }),
+              );
+            },
+          ),
+        ).catch((error) => {
+          console.error("Error refreshing transaction statuses:", error);
+        });
 
         // Whether the user can still scroll for more. True while ANY source
         // had a full page; false once every source has run dry.
@@ -1870,10 +1958,8 @@ export default function HistoryScreen({ navigation }) {
         // would re-mount them and the user would see a flash. 6 keeps a
         // comfortable buffer without holding the whole list in memory.
         windowSize={6}
-        // The first page is ten rows, and they are the only rows on screen
-        // at first, so all ten are rendered immediately. Rendering fewer
-        // would leave gaps in the list on a fast scroll, and rendering more
-        // is impossible - there are only ten.
+        // Render the first five rows immediately; further rows are loaded
+        // as the user scrolls.
         initialNumToRender={PAGE_SIZE}
         maxToRenderPerBatch={PAGE_SIZE}
         removeClippedSubviews

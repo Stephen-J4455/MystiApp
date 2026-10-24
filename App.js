@@ -6,17 +6,6 @@ import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
 import Constants from "expo-constants";
 import { useFonts } from "expo-font";
-import {
-  Fraunces_600SemiBold,
-  Fraunces_700Bold,
-} from "@expo-google-fonts/fraunces";
-import {
-  PublicSans_400Regular,
-  PublicSans_500Medium,
-  PublicSans_600SemiBold,
-  PublicSans_700Bold,
-  PublicSans_800ExtraBold,
-} from "@expo-google-fonts/public-sans";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { supabase } from "./src/lib/supabase";
@@ -31,29 +20,6 @@ import {
 } from "./src/services/notifications";
 import UpdateNotification from "./src/components/UpdateNotification";
 import InstallAppBanner from "./src/components/InstallAppBanner";
-import LoginScreen from "./src/screens/LoginScreen";
-import SignupScreen from "./src/screens/SignupScreen";
-import ForgotPasswordScreen from "./src/screens/ForgotPasswordScreen";
-import ResetPasswordScreen from "./src/screens/ResetPasswordScreen";
-import HomeScreen from "./src/screens/HomeScreen";
-import AgentDashboardScreen from "./src/screens/AgentDashboardScreen";
-import ProfileScreen from "./src/screens/ProfileScreen";
-import PrivacyPolicyScreen from "./src/screens/PrivacyPolicyScreen";
-import NotificationsScreen from "./src/screens/NotificationsScreen";
-import DataScreen from "./src/screens/DataScreen";
-import ReceiptScreen from "./src/screens/ReceiptScreen";
-import HistoryScreen from "./src/screens/HistoryScreen";
-import WalletTopUpScreen from "./src/screens/WalletTopUpScreen";
-import SuperAgentManagementScreen from "./src/screens/SuperAgentManagementScreen";
-import SuperAgentOffersScreen from "./src/screens/SuperAgentOffersScreen";
-import SuperAgentAgentsScreen from "./src/screens/SuperAgentAgentsScreen";
-import SuperAgentTierManagementScreen from "./src/screens/SuperAgentTierManagementScreen";
-import SuperAgentPaystackScreen from "./src/screens/SuperAgentPaystackScreen";
-import SuperAgentAnalyticsScreen from "./src/screens/SuperAgentAnalyticsScreen";
-import SuperAgentHeldOrdersScreen from "./src/screens/SuperAgentHeldOrdersScreen";
-import SuperAgentLedgerScreen from "./src/screens/SuperAgentLedgerScreen";
-import SuperAgentTransactionsScreen from "./src/screens/SuperAgentTransactionsScreen";
-import AfaRegistrationScreen from "./src/screens/AfaRegistrationScreen";
 import { ThemeProvider, useTheme } from "./src/contexts/ThemeContext";
 import { DockVisibilityProvider } from "./src/contexts/DockVisibilityContext";
 import DockTabBar from "./src/components/DockTabBar";
@@ -129,13 +95,27 @@ export default function App() {
   // Fraunces carries the display voice, Public Sans the UI voice. Loading them
   // before the splash hides avoids a visible reflow on first paint.
   const [fontsLoaded, fontError] = useFonts({
-    Fraunces_600SemiBold,
-    Fraunces_700Bold,
-    PublicSans_400Regular,
-    PublicSans_500Medium,
-    PublicSans_600SemiBold,
-    PublicSans_700Bold,
-    PublicSans_800ExtraBold,
+    Fraunces_600SemiBold: require(
+      "@expo-google-fonts/fraunces/600SemiBold/Fraunces_600SemiBold.ttf",
+    ),
+    Fraunces_700Bold: require(
+      "@expo-google-fonts/fraunces/700Bold/Fraunces_700Bold.ttf",
+    ),
+    PublicSans_400Regular: require(
+      "@expo-google-fonts/public-sans/400Regular/PublicSans_400Regular.ttf",
+    ),
+    PublicSans_500Medium: require(
+      "@expo-google-fonts/public-sans/500Medium/PublicSans_500Medium.ttf",
+    ),
+    PublicSans_600SemiBold: require(
+      "@expo-google-fonts/public-sans/600SemiBold/PublicSans_600SemiBold.ttf",
+    ),
+    PublicSans_700Bold: require(
+      "@expo-google-fonts/public-sans/700Bold/PublicSans_700Bold.ttf",
+    ),
+    PublicSans_800ExtraBold: require(
+      "@expo-google-fonts/public-sans/800ExtraBold/PublicSans_800ExtraBold.ttf",
+    ),
   });
 
   const fontsReady = fontsLoaded || Boolean(fontError);
@@ -564,7 +544,7 @@ export default function App() {
                 navigation container: it needs no navigation, and screens reach
                 it through context rather than props. */}
             <ProfileProvider user={user}>
-              {canEnterApp && fontsReady ? (
+              {canEnterApp && fontsReady && authInitialized ? (
                 <NavigationContainer
                   ref={navigationRef}
                   // Web only. `undefined` on native - see the memo above. This is
@@ -602,47 +582,85 @@ export default function App() {
                   >
                     {user && !isResettingPassword ? (
                       <>
-                        <Stack.Screen name="Home" component={HomeScreen} />
+                        <Stack.Screen
+                          name="Home"
+                          getComponent={() =>
+                            require("./src/screens/HomeScreen").default
+                          }
+                        />
                         <Stack.Screen
                           name="Profile"
-                          component={ProfileScreen}
+                          getComponent={() =>
+                            require("./src/screens/ProfileScreen").default
+                          }
                         />
                         <Stack.Screen
                           name="PrivacyPolicy"
-                          component={PrivacyPolicyScreen}
+                          getComponent={() =>
+                            require("./src/screens/PrivacyPolicyScreen").default
+                          }
                         />
                         <Stack.Screen
                           name="Notifications"
-                          component={NotificationsScreen}
+                          getComponent={() =>
+                            require("./src/screens/NotificationsScreen").default
+                          }
                         />
-                        <Stack.Screen name="Data" component={DataScreen} />
+                        <Stack.Screen
+                          name="Data"
+                          getComponent={() =>
+                            require("./src/screens/DataScreen").default
+                          }
+                        />
                         <Stack.Screen
                           name="SuperAgentManagement"
-                          component={SuperAgentManagementScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentManagementScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentOffers"
-                          component={SuperAgentOffersScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentOffersScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentTierManagement"
-                          component={SuperAgentTierManagementScreen}
+                          getComponent={() =>
+                            require(
+                              "./src/screens/SuperAgentTierManagementScreen",
+                            ).default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentAgents"
-                          component={SuperAgentAgentsScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentAgentsScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentPaystack"
-                          component={SuperAgentPaystackScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentPaystackScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentAnalytics"
-                          component={SuperAgentAnalyticsScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentAnalyticsScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentHeldOrders"
-                          component={SuperAgentHeldOrdersScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentHeldOrdersScreen")
+                              .default
+                          }
                         />
                         {/* The super agent's operational console, reached from the
                             "Transactions" button on SuperAgentManagementScreen.
@@ -667,40 +685,72 @@ export default function App() {
                         */}
                         <Stack.Screen
                           name="SuperAgentTransactions"
-                          component={SuperAgentTransactionsScreen}
+                          getComponent={() =>
+                            require(
+                              "./src/screens/SuperAgentTransactionsScreen",
+                            ).default
+                          }
                         />
                         <Stack.Screen
                           name="SuperAgentLedger"
-                          component={SuperAgentLedgerScreen}
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentLedgerScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="Receipt"
-                          component={ReceiptScreen}
+                          getComponent={() =>
+                            require("./src/screens/ReceiptScreen").default
+                          }
                         />
                         <Stack.Screen
                           name="History"
-                          component={HistoryScreen}
+                          getComponent={() =>
+                            require("./src/screens/HistoryScreen").default
+                          }
                         />
                         <Stack.Screen
                           name="WalletTopUp"
-                          component={WalletTopUpScreen}
+                          getComponent={() =>
+                            require("./src/screens/WalletTopUpScreen").default
+                          }
                         />
                         <Stack.Screen
                           name="AfaRegistration"
-                          component={AfaRegistrationScreen}
+                          getComponent={() =>
+                            require("./src/screens/AfaRegistrationScreen")
+                              .default
+                          }
                         />
                       </>
                     ) : (
                       <>
-                        <Stack.Screen name="Login" component={LoginScreen} />
-                        <Stack.Screen name="Signup" component={SignupScreen} />
+                        <Stack.Screen
+                          name="Login"
+                          getComponent={() =>
+                            require("./src/screens/LoginScreen").default
+                          }
+                        />
+                        <Stack.Screen
+                          name="Signup"
+                          getComponent={() =>
+                            require("./src/screens/SignupScreen").default
+                          }
+                        />
                         <Stack.Screen
                           name="ForgotPassword"
-                          component={ForgotPasswordScreen}
+                          getComponent={() =>
+                            require("./src/screens/ForgotPasswordScreen")
+                              .default
+                          }
                         />
                         <Stack.Screen
                           name="ResetPassword"
-                          component={ResetPasswordScreen}
+                          getComponent={() =>
+                            require("./src/screens/ResetPasswordScreen")
+                              .default
+                          }
                           initialParams={{ isResetting: isResettingPassword }}
                         />
                       </>

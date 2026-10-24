@@ -39,6 +39,7 @@ import {
   loadSubAgentPackages,
   formatBundleSizeFromDescriptor,
   fetchCatalogPackages,
+  fetchPackagePricing,
 } from "../services/superAgentService";
 import {
   fetchPaymentChargeSettings,
@@ -52,12 +53,6 @@ const BUNDLE_FAMILY_ORDER = [
   { key: "ishare", label: "iShare", icon: "people-outline" },
   { key: "everyday", label: "Everyday", icon: "flash-outline" },
   { key: "big_time", label: "Big Time", icon: "trending-up-outline" },
-];
-
-const DATA_PROVIDERS = [
-  { key: "all", label: "All providers" },
-  { key: "jehuca", label: "Jehuca" },
-  { key: "bisdel", label: "Bisdel" },
 ];
 
 const normalizeUiNetwork = (value) => {
@@ -95,7 +90,6 @@ export default function DataScreen({ navigation, route }) {
   const [selectedBundle, setSelectedBundle] = useState(null);
   const [bundles, setBundles] = useState([]);
   const [activeFamily, setActiveFamily] = useState(null);
-  const [activeProvider, setActiveProvider] = useState("all");
   const [loading, setLoading] = useState(true);
   const [paystackModalVisible, setPaystackModalVisible] = useState(false);
   const [directPaystackRequested, setDirectPaystackRequested] = useState(false);
@@ -902,11 +896,13 @@ export default function DataScreen({ navigation, route }) {
           return;
         }
         const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
-        const { data: pricingRows, error: pricingError } = await supabase
-          .from("package_pricing")
-          .select("provider, package_id, network, type, size, base_price, is_active")
-          .in("provider", providers)
-          .eq("is_active", true);
+        const { data: pricingRows, error: pricingError } =
+          await fetchPackagePricing(
+            "package_pricing",
+            providers,
+            "provider, package_id, network, type, size, base_price, is_active",
+            profile?.id,
+          );
 
         if (pricingError) {
           console.warn("Could not load admin package pricing:", pricingError);
@@ -1005,11 +1001,13 @@ export default function DataScreen({ navigation, route }) {
         return;
       }
       const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
-      const { data: pricingRows, error: pricingError } = await supabase
-        .from("normal_user_package_pricing")
-        .select("provider, package_id, network, type, size, base_price, is_active")
-        .in("provider", providers)
-        .eq("is_active", true);
+      const { data: pricingRows, error: pricingError } =
+        await fetchPackagePricing(
+          "normal_user_package_pricing",
+          providers,
+          "provider, package_id, network, type, size, base_price, is_active",
+          profile?.id,
+        );
 
       if (pricingError) throw pricingError;
 
@@ -1131,52 +1129,9 @@ export default function DataScreen({ navigation, route }) {
     return "everyday";
   };
 
-  const providerOptions = useMemo(() => {
-    const available = new Set(
-      bundles.map((bundle) =>
-        String(bundle.provider || "jehuca").toLowerCase(),
-      ),
-    );
-    return DATA_PROVIDERS.filter(
-      (provider) =>
-        provider.key === "all" || available.has(provider.key),
-    ).map((provider) => ({
-      ...provider,
-      count:
-        provider.key === "all"
-          ? bundles.length
-          : bundles.filter(
-              (bundle) =>
-                String(bundle.provider || "jehuca").toLowerCase() ===
-                provider.key,
-            ).length,
-    }));
-  }, [bundles]);
-
-  const providerFilteredBundles = useMemo(
-    () =>
-      !isSuperAgentUser || activeProvider === "all"
-        ? bundles
-        : bundles.filter(
-            (bundle) =>
-              String(bundle.provider || "jehuca").toLowerCase() ===
-              activeProvider,
-          ),
-    [bundles, isSuperAgentUser, activeProvider],
-  );
-
-  useEffect(() => {
-    if (
-      activeProvider !== "all" &&
-      !providerOptions.some((provider) => provider.key === activeProvider)
-    ) {
-      setActiveProvider("all");
-    }
-  }, [activeProvider, providerOptions]);
-
   const bundleFamilies = useMemo(() => {
     const families = new Map();
-    providerFilteredBundles.forEach((bundle) => {
+    bundles.forEach((bundle) => {
       const family = getBundleFamily(bundle);
       const existing = families.get(family) || { key: family, count: 0 };
       existing.count += 1;
@@ -1187,7 +1142,7 @@ export default function DataScreen({ navigation, route }) {
     return BUNDLE_FAMILY_ORDER.filter((family) => families.has(family.key)).map(
       (family) => families.get(family.key),
     );
-  }, [providerFilteredBundles]);
+  }, [bundles]);
 
   // A single family means there is nothing to switch between, so the tab strip
   // is hidden entirely rather than showing one pointless tab.
@@ -1206,14 +1161,14 @@ export default function DataScreen({ navigation, route }) {
   // exist on the new network never shows an empty list.
   useEffect(() => {
     setActiveFamily(null);
-  }, [network, isAgent, activeProvider]);
+  }, [network, isAgent]);
 
   const visibleBundles = useMemo(() => {
-    if (!showFamilyTabs || !activeFamilyKey) return providerFilteredBundles;
-    return providerFilteredBundles.filter(
+    if (!showFamilyTabs || !activeFamilyKey) return bundles;
+    return bundles.filter(
       (bundle) => getBundleFamily(bundle) === activeFamilyKey,
     );
-  }, [providerFilteredBundles, showFamilyTabs, activeFamilyKey]);
+  }, [bundles, showFamilyTabs, activeFamilyKey]);
 
   const visibleBundlesByNetwork = useMemo(
     () => groupBundlesByNetwork(visibleBundles),
@@ -2115,55 +2070,6 @@ export default function DataScreen({ navigation, route }) {
                 ? `${agentTier} tier · prices set by your super agent`
                 : "Packages and prices set by your super agent"}
             </Text>
-          </View>
-        ) : null}
-
-        {isSuperAgentUser && providerOptions.length > 2 ? (
-          <View style={s.familyTabsWrap}>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={s.familyTabsContent}
-            >
-              {providerOptions.map((provider) => {
-                const isActive = provider.key === activeProvider;
-                return (
-                  <TouchableOpacity
-                    key={`provider-${provider.key}`}
-                    style={[s.familyTab, isActive ? s.familyTabActive : null]}
-                    onPress={() => setActiveProvider(provider.key)}
-                    activeOpacity={0.85}
-                    accessibilityRole="tab"
-                    accessibilityState={{ selected: isActive }}
-                    accessibilityLabel={`${provider.label}, ${provider.count} packages`}
-                  >
-                    <Text
-                      style={[
-                        s.familyTabText,
-                        isActive ? s.familyTabTextActive : null,
-                      ]}
-                    >
-                      {provider.label}
-                    </Text>
-                    <View
-                      style={[
-                        s.familyTabCount,
-                        isActive ? s.familyTabCountActive : null,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          s.familyTabCountText,
-                          isActive ? s.familyTabCountTextActive : null,
-                        ]}
-                      >
-                        {provider.count}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
           </View>
         ) : null}
 

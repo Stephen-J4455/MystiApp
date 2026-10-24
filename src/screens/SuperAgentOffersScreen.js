@@ -340,12 +340,26 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
   const providerOptions = useMemo(() => {
     const available = new Set(
-      [...packages, ...offers].map((item) =>
+      packages.map((item) =>
         String(item.provider || "jehuca").toLowerCase(),
       ),
     );
     return ["jehuca", "bisdel"].filter((provider) => available.has(provider));
-  }, [packages, offers]);
+  }, [packages]);
+
+  const enabledProviders = useMemo(
+    () => new Set(providerOptions),
+    [providerOptions],
+  );
+
+  useEffect(() => {
+    if (
+      selectedProvider !== "all" &&
+      !enabledProviders.has(selectedProvider)
+    ) {
+      setSelectedProvider("all");
+    }
+  }, [selectedProvider, enabledProviders]);
 
   const createProviderOptions = useMemo(
     () =>
@@ -385,6 +399,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
       (offers || []).filter((offer) => {
         const provider = String(offer.provider || "jehuca").toLowerCase();
         return (
+          enabledProviders.has(provider) &&
           (selectedProvider === "all" || provider === selectedProvider) &&
           (
             selectedFamily === "all" ||
@@ -414,7 +429,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
           )
         );
       }),
-    [offers, packages, selectedProvider, selectedFamily],
+    [offers, packages, selectedProvider, selectedFamily, enabledProviders],
   );
 
   const networkOptions = useMemo(() => {

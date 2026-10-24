@@ -5,7 +5,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
-import { useColorScheme } from "react-native";
+import { Platform, useColorScheme } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getPalette, getStatusTone } from "../components/theme";
 
@@ -69,6 +69,14 @@ export function ThemeProvider({ children }) {
         ? "light"
         : "dark"
       : preference;
+
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof document === "undefined") return;
+
+    const canvas = getPalette(scheme).canvas;
+    document.documentElement.style.backgroundColor = canvas;
+    document.body.style.backgroundColor = canvas;
+  }, [scheme]);
 
   const value = useMemo(
     () => ({

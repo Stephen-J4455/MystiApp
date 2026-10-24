@@ -717,16 +717,23 @@ export default function WalletTopUpScreen({ navigation }) {
     setLoading(false);
   };
 
+  const topUpPreview = useMemo(() => {
+    const creditAmount = Number.parseFloat(amount);
+    if (!Number.isFinite(creditAmount) || creditAmount <= 0) return null;
+    const fee = getTransactionChargeAmount(
+      creditAmount,
+      paymentChargeSettings.walletTopUpPercent,
+    );
+    return {
+      credit: creditAmount,
+      fee,
+      total: Number((creditAmount + fee).toFixed(2)),
+    };
+  }, [amount, paymentChargeSettings.walletTopUpPercent]);
+
   return (
     <ThemedScreen>
       <View style={styles.safeArea}>
-        <TouchableOpacity
-          style={styles.floatingBackButton}
-          onPress={() => navigation.goBack()}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="arrow-back" size={20} color={c.textPrimary} />
-        </TouchableOpacity>
         <KeyboardAwareScrollView
           style={styles.content}
           contentContainerStyle={styles.scrollContent}
@@ -734,54 +741,78 @@ export default function WalletTopUpScreen({ navigation }) {
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.header}>
-            <Text style={styles.title}>
-              {isFormerSuperAgent
-                ? "Wallet Balance"
-                : isSuperAgentUser
-                  ? "Super Agent Wallet"
-                  : "Wallet Top-up"}
-            </Text>
-            <Text style={styles.subtitle}>
-              {isFormerSuperAgent
-                ? "Your wallet is still here, but this account can no longer fund it"
-                : fundsSuperAgent
-                  ? `Topping up. Ghc ${currentBalance.toFixed(2)} is your available balance, funded by your payments and spent on your orders.`
-                  : "Add funds to your wallet to start serving customers"}
-            </Text>
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={() => navigation.goBack()}
+              activeOpacity={0.75}
+              accessibilityRole="button"
+              accessibilityLabel="Go back"
+            >
+              <Ionicons name="arrow-back" size={20} color={c.textPrimary} />
+            </TouchableOpacity>
+            <View style={styles.headerText}>
+              <Text style={styles.eyebrow}>WALLET</Text>
+              <Text style={styles.title}>
+                {isFormerSuperAgent
+                  ? "Your balance"
+                  : isSuperAgentUser
+                    ? "Super Agent wallet"
+                    : "Add money"}
+              </Text>
+              <Text style={styles.subtitle}>
+                {isFormerSuperAgent
+                  ? "Your previous wallet balance is available to view."
+                  : fundsSuperAgent
+                    ? "Fund your available balance and keep serving customers."
+                    : "Top up your operational balance securely."}
+              </Text>
+            </View>
           </View>
-          {fundsSuperAgent ? (
-            // A SUB-AGENT NOW HAS A REAL BALANCE.
-            //
-            // It is a mirror of the spending power their payments bought,
-            // funded against their super agent's money - not money of their own,
-            // and not withdrawable. It is debited on every wallet order, which
-            // is why it can legitimately be lower than what they have paid in.
-            //
-            // The previous version of this card claimed they held no balance at
-            // all and rendered nothing, which is what made the wallet read as
-            // "missing". It also has to be labelled as a limit rather than a
-            // balance, because a super agent topping up more does NOT raise it -
-            // only the sub-agent's own payments do.
-            <View style={styles.balanceCard}>
-              <Text style={styles.balanceLabel}>Your available balance</Text>
-              <Text style={styles.balanceAmount}>
-                Ghc {currentBalance.toFixed(2)}
-              </Text>
+
+          <View style={styles.balanceCard}>
+            <View style={styles.balanceTopRow}>
+              <View>
+                <Text style={styles.balanceLabel}>
+                  {fundsSuperAgent ? "YOUR AVAILABLE BALANCE" : "CURRENT BALANCE"}
+                </Text>
+                <Text style={styles.balanceAmount}>
+                  Ghc {currentBalance.toFixed(2)}
+                </Text>
+              </View>
+              <View style={styles.walletGlyph}>
+                <Ionicons name="wallet-outline" size={24} color={c.mint} />
+              </View>
+            </View>
+            <View style={styles.balanceDivider} />
+            <View style={styles.balanceFoot}>
+              <Ionicons
+                name={isFormerSuperAgent ? "eye-outline" : "flash-outline"}
+                size={15}
+                color={c.mint}
+              />
               <Text style={styles.balanceHint}>
-                Funded by your own top-ups and spent on your orders. Not
-                withdrawable, and not raised by money your Super Agent adds.
+                {isFormerSuperAgent
+                  ? "Read-only balance"
+                  : fundsSuperAgent
+                    ? "Your top-ups increase this balance. Orders spend from it; it is not withdrawable."
+                    : "Available for your operational orders"}
               </Text>
             </View>
-          ) : (
-            <View style={styles.balanceCard}>
-              <Text style={styles.balanceLabel}>Current Balance</Text>
-              <Text style={styles.balanceAmount}>
-                Ghc {currentBalance.toFixed(2)}
-              </Text>
+          </View>
+
+          <View style={styles.topUpCard}>
+            <View style={styles.sectionHeading}>
+              <View style={styles.stepBadge}>
+                <Text style={styles.stepBadgeText}>01</Text>
+              </View>
+              <View style={styles.sectionHeadingCopy}>
+                <Text style={styles.sectionTitle}>Choose an amount</Text>
+                <Text style={styles.sectionCaption}>
+                  Select a quick amount or enter your own
+                </Text>
+              </View>
             </View>
-          )}
-          <View>
-            <Text style={styles.sectionTitle}>Quick Select</Text>
+
             <View style={styles.amountGrid}>
               {predefinedAmounts.map((preset) => (
                 <TouchableOpacity
@@ -800,43 +831,69 @@ export default function WalletTopUpScreen({ navigation }) {
                         styles.amountChipTextSelected,
                     ]}
                   >
-                    Ghc {preset}
+                    {preset === 1000 ? "Ghc 1,000" : `Ghc ${preset}`}
                   </Text>
                 </TouchableOpacity>
               ))}
             </View>
-            <Text style={styles.sectionTitle}>Or Enter Amount</Text>
+
+            <Text style={styles.inputLabel}>Custom amount</Text>
             <View style={styles.inputWrapper}>
               <View style={styles.currencyPrefix}>
-                <Text style={styles.currencyText}>GH&#755;</Text>
+                <Text style={styles.currencyText}>Ghc</Text>
               </View>
               <TextInput
                 style={styles.input}
-                placeholder="Enter amount"
+                placeholder="0.00"
                 value={amount}
                 onChangeText={setAmount}
                 keyboardType="numeric"
-                placeholderTextColor="#999"
+                placeholderTextColor={c.textMuted}
+                editable={!isFormerSuperAgent}
+                accessibilityLabel="Top-up amount in Ghana cedis"
               />
             </View>
+
             <View style={styles.limitInfo}>
-              <View style={styles.limitItem}>
-                <Ionicons
-                  name="information-circle-outline"
-                  size={16}
-                  color={c.textMuted}
-                />
-                <Text style={styles.limitText}>Min: Ghc 5</Text>
-              </View>
-              <View style={styles.limitItem}>
-                <Ionicons
-                  name="information-circle-outline"
-                  size={16}
-                  color={c.textMuted}
-                />
-                <Text style={styles.limitText}>Max: Ghc 5,000</Text>
-              </View>
+              <Text style={styles.limitText}>Minimum Ghc 5</Text>
+              <View style={styles.limitDot} />
+              <Text style={styles.limitText}>Maximum Ghc 5,000</Text>
             </View>
+
+            {topUpPreview ? (
+              <View style={styles.paymentSummary}>
+                <View style={styles.summaryHeading}>
+                  <Ionicons
+                    name="receipt-outline"
+                    size={16}
+                    color={c.textSecondary}
+                  />
+                  <Text style={styles.summaryTitle}>Payment summary</Text>
+                </View>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>Added to wallet</Text>
+                  <Text style={styles.summaryValue}>
+                    Ghc {topUpPreview.credit.toFixed(2)}
+                  </Text>
+                </View>
+                <View style={styles.summaryRow}>
+                  <Text style={styles.summaryLabel}>
+                    Payment fee ({paymentChargeSettings.walletTopUpPercent}%)
+                  </Text>
+                  <Text style={styles.summaryValue}>
+                    Ghc {topUpPreview.fee.toFixed(2)}
+                  </Text>
+                </View>
+                <View style={styles.summaryDivider} />
+                <View style={styles.summaryRow}>
+                  <Text style={styles.totalLabel}>You pay</Text>
+                  <Text style={styles.totalValue}>
+                    Ghc {topUpPreview.total.toFixed(2)}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
             <TouchableOpacity
               style={[
                 styles.payButton,
@@ -863,13 +920,26 @@ export default function WalletTopUpScreen({ navigation }) {
                   {isFormerSuperAgent
                     ? "Top-up unavailable"
                     : fundsSuperAgent
-                      ? "Top up"
-                      : "Proceed to Pay"}
+                      ? "Fund wallet"
+                      : "Continue to payment"}
+                  {!loading && !isFormerSuperAgent ? (
+                    <Ionicons
+                      name="arrow-forward"
+                      size={17}
+                      color={c.onAccent}
+                    />
+                  ) : null}
                 </Text>
               )}
             </TouchableOpacity>
+            <View style={styles.secureNote}>
+              <Ionicons name="lock-closed-outline" size={13} color={c.textMuted} />
+              <Text style={styles.secureNoteText}>
+                Secure payment powered by Paystack
+              </Text>
+            </View>
             {fundsSuperAgent && (
-              <Text style={[styles.balanceHint, { marginTop: 10 }]}>
+              <Text style={styles.fundingNote}>
                 {superAgentName ? (
                   <>
                     The amount you pay is credited to {superAgentName}'s wallet
@@ -1018,161 +1088,318 @@ export default function WalletTopUpScreen({ navigation }) {
 }
 
 // Layered on the shared kit. Screen-specific parts are the balance card, the
-// preset-amount chips and the Paystack sheet modal.
+// top-up flow, the payment summary and the Paystack sheet modal.
 const useWalletTopUpStyles = (c, topInset = 0) => {
   const base = themedStyles(c);
   return StyleSheet.create({
     ...base,
     safeArea: { flex: 1 },
     content: { flex: 1 },
-    scrollContent: { padding: 20, paddingBottom: 8 },
+    scrollContent: {
+      paddingHorizontal: 20,
+      paddingTop: 16 + topInset,
+      paddingBottom: 36,
+    },
 
-    // The back button is absolutely positioned and the header sits below it,
-    // so both clear the Android status bar. iOS already spaces this, so the
-    // inset is Android-only.
-    floatingBackButton: {
-      position: "absolute",
-      top: 50 + topInset,
-      left: 16,
-      zIndex: 10,
-      width: 40,
-      height: 40,
-      borderRadius: 999,
+    header: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: 14,
+      paddingBottom: 22,
+    },
+    backButton: {
+      width: 44,
+      height: 44,
+      borderRadius: 15,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.hairline,
       justifyContent: "center",
       alignItems: "center",
     },
-
-    header: { paddingTop: 60 + topInset, paddingBottom: 16 },
-    title: { ...base.headerTitle, fontSize: 28, marginBottom: 8 },
-    subtitle: { ...base.headerSubtitle, fontSize: 14, lineHeight: 20 },
-
-    // Balance is the headline number, so it keeps a filled treatment in both
-    // schemes via the mint tint rather than a flat surface.
-    balanceCard: {
-      marginBottom: 24,
-      padding: 24,
-      borderRadius: 22,
-      backgroundColor: `${c.mint}12`,
-      borderWidth: 1,
-      borderColor: `${c.mint}2E`,
-    },
-    balanceLabel: {
-      fontFamily: fonts.bodySemi,
-      fontSize: 14,
+    headerText: { flex: 1, paddingTop: 1 },
+    eyebrow: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 10,
       color: c.mint,
-      textTransform: "uppercase",
-      letterSpacing: 1,
-      marginBottom: 8,
+      letterSpacing: 1.8,
+      marginBottom: 5,
     },
-    balanceAmount: {
+    title: {
       fontFamily: fonts.display,
-      fontSize: 36,
+      fontSize: 27,
+      lineHeight: 33,
       color: c.textPrimary,
     },
-    // Explains what a sub-agent's mirrored balance IS, and specifically that it
-    // is a limit rather than withdrawable money. Without this the number is
-    // indistinguishable from a super agent's, and the natural assumption is
-    // that their own money is sitting in it.
-    balanceHint: {
+    subtitle: {
       fontFamily: fonts.body,
       fontSize: 13,
       lineHeight: 19,
       color: c.textSecondary,
-      marginTop: 12,
+      marginTop: 5,
     },
-
+    balanceCard: {
+      marginBottom: 18,
+      padding: 20,
+      borderRadius: 24,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairlineStrong,
+      overflow: "hidden",
+    },
+    balanceTopRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    balanceLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 10,
+      color: c.textMuted,
+      letterSpacing: 1.4,
+      marginBottom: 8,
+    },
+    balanceAmount: {
+      fontFamily: fonts.display,
+      fontSize: 34,
+      lineHeight: 41,
+      color: c.textPrimary,
+    },
+    walletGlyph: {
+      width: 48,
+      height: 48,
+      borderRadius: 16,
+      alignItems: "center",
+      justifyContent: "center",
+      backgroundColor: `${c.mint}18`,
+      borderWidth: 1,
+      borderColor: `${c.mint}30`,
+    },
+    balanceDivider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: c.hairline,
+      marginTop: 17,
+      marginBottom: 12,
+    },
+    balanceFoot: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 8,
+    },
+    balanceHint: {
+      fontFamily: fonts.body,
+      flex: 1,
+      fontSize: 11,
+      lineHeight: 16,
+      color: c.textSecondary,
+    },
+    topUpCard: {
+      padding: 18,
+      borderRadius: 24,
+      backgroundColor: c.canvasRaised,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    sectionHeading: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 11,
+      marginBottom: 18,
+    },
+    stepBadge: {
+      width: 34,
+      height: 34,
+      borderRadius: 12,
+      backgroundColor: `${c.mint}18`,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    stepBadgeText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 11,
+      color: c.mint,
+    },
+    sectionHeadingCopy: { flex: 1 },
     sectionTitle: {
       fontFamily: fonts.display,
-      fontSize: 16,
+      fontSize: 18,
       color: c.textPrimary,
-      marginBottom: 12,
-      marginTop: 8,
+    },
+    sectionCaption: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+      marginTop: 3,
     },
     amountGrid: {
       flexDirection: "row",
       flexWrap: "wrap",
-      gap: 10,
-      marginBottom: 20,
+      justifyContent: "space-between",
+      rowGap: 9,
+      marginBottom: 18,
     },
     amountChip: {
-      paddingHorizontal: 16,
-      paddingVertical: 11,
-      borderRadius: 999,
+      width: "31.5%",
+      minHeight: 43,
+      paddingHorizontal: 8,
+      paddingVertical: 10,
+      borderRadius: 14,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.hairline,
+      alignItems: "center",
+      justifyContent: "center",
     },
     amountChipSelected: {
-      backgroundColor: `${c.mint}1F`,
+      backgroundColor: `${c.mint}16`,
       borderColor: c.mint,
     },
     amountChipText: {
       fontFamily: fonts.bodySemi,
-      fontSize: 14,
+      fontSize: 12,
       color: c.textSecondary,
     },
     amountChipTextSelected: { fontFamily: fonts.bodyBold, color: c.mint },
-
+    inputLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+      marginBottom: 8,
+    },
     inputWrapper: {
       flexDirection: "row",
       alignItems: "center",
-      backgroundColor: c.canvasRaised,
-      borderRadius: 18,
-      borderWidth: 1,
-      borderColor: c.hairline,
-      marginBottom: 16,
-      overflow: "hidden",
+      minHeight: 60,
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      borderWidth: 1.5,
+      borderColor: c.hairlineStrong,
+      marginBottom: 10,
     },
     currencyPrefix: {
-      paddingHorizontal: 16,
-      borderRightWidth: StyleSheet.hairlineWidth,
-      borderRightColor: c.hairline,
-      paddingVertical: 17,
+      paddingLeft: 16,
+      paddingRight: 10,
     },
-    currencyText: { fontFamily: fonts.bodyBold, fontSize: 16, color: c.mint },
+    currencyText: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 15,
+      color: c.mint,
+    },
     input: {
       flex: 1,
-      paddingHorizontal: 16,
-      paddingVertical: 17,
-      fontFamily: fonts.bodySemi,
-      fontSize: 18,
+      paddingHorizontal: 8,
+      paddingVertical: 15,
+      fontFamily: fonts.display,
+      fontSize: 23,
       color: c.textPrimary,
     },
-
     limitInfo: {
       flexDirection: "row",
-      justifyContent: "space-between",
-      marginBottom: 24,
-      paddingHorizontal: 4,
+      alignItems: "center",
+      marginBottom: 18,
+      paddingHorizontal: 2,
     },
-    limitItem: { flexDirection: "row", alignItems: "center" },
     limitText: {
       fontFamily: fonts.body,
-      fontSize: 12,
+      fontSize: 10,
       color: c.textMuted,
-      marginLeft: 4,
     },
-
+    limitDot: {
+      width: 3,
+      height: 3,
+      borderRadius: 2,
+      backgroundColor: c.textMuted,
+      marginHorizontal: 8,
+    },
+    paymentSummary: {
+      padding: 14,
+      marginBottom: 16,
+      borderRadius: 16,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.hairline,
+    },
+    summaryHeading: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 7,
+      marginBottom: 11,
+    },
+    summaryTitle: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+    },
+    summaryRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingVertical: 4,
+    },
+    summaryLabel: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      color: c.textMuted,
+    },
+    summaryValue: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 11,
+      color: c.textSecondary,
+    },
+    summaryDivider: {
+      height: StyleSheet.hairlineWidth,
+      backgroundColor: c.hairline,
+      marginVertical: 8,
+    },
+    totalLabel: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 12,
+      color: c.textPrimary,
+    },
+    totalValue: {
+      fontFamily: fonts.bodyBold,
+      fontSize: 14,
+      color: c.mint,
+    },
     payButton: {
       backgroundColor: c.mint,
-      paddingVertical: 18,
-      borderRadius: 999,
+      minHeight: 54,
+      paddingHorizontal: 18,
+      borderRadius: 16,
       alignItems: "center",
-      marginBottom: 40,
+      justifyContent: "center",
+      flexDirection: "row",
+      gap: 9,
     },
-    // Disabled greys the fill out rather than hiding the button, so the
-    // layout does not jump when no amount is entered yet.
     payButtonDisabled: { backgroundColor: c.surfaceHover },
     payButtonText: {
       fontFamily: fonts.bodyBold,
-      fontSize: 16,
+      fontSize: 14,
       color: c.onAccent,
     },
     payButtonTextDisabled: { color: c.textMuted },
-
+    secureNote: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      paddingTop: 13,
+    },
+    secureNoteText: {
+      fontFamily: fonts.body,
+      fontSize: 10,
+      color: c.textMuted,
+    },
+    fundingNote: {
+      fontFamily: fonts.body,
+      fontSize: 11,
+      lineHeight: 17,
+      color: c.textSecondary,
+      marginTop: 14,
+      padding: 12,
+      borderRadius: 13,
+      backgroundColor: `${c.sky}10`,
+    },
     // Paystack sheet
     modalOverlay: {
       flex: 1,

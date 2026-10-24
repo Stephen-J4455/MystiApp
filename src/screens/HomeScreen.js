@@ -9,6 +9,7 @@ import {
   Animated,
   StyleSheet,
   Platform,
+  AppState,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
@@ -22,6 +23,8 @@ import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { removeChannelSafe, uniqueTopic } from "../lib/realtime";
 import { splitReceiptNumber } from "../lib/receiptNumber";
 import { fetchSubAgentActivity } from "../lib/superAgentRoster";
+import { preloadDataPackages } from "../services/superAgentService";
+import { preloadHistoryFirstPage } from "../services/historyPrefetch";
 import {
   canReorderHeldOrders,
   isHeldWindowElapsed,
@@ -214,14 +217,14 @@ const receiptForRow = (row) => {
 };
 
 // Builds an entrance style: fade + rise, staggered by `index`.
-const useEntrance = (index, duration = 520) => {
+const useEntrance = (index, duration = 280) => {
   const progress = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const animation = Animated.timing(progress, {
       toValue: 1,
       duration,
-      delay: 90 * index,
+      delay: 35 * index,
       useNativeDriver: true,
     });
     animation.start();
@@ -234,7 +237,7 @@ const useEntrance = (index, duration = 520) => {
       {
         translateY: progress.interpolate({
           inputRange: [0, 1],
-          outputRange: [22, 0],
+          outputRange: [14, 0],
         }),
       },
     ],
@@ -293,6 +296,7 @@ export default function HomeScreen({ navigation }) {
     isSuperAgent: isSuperAgentRole,
     isNormalUser,
     profile,
+    loading: profileLoading,
   } = useProfile();
   // Local aliases so the ~15 render sites below keep reading naturally. The
   // distinction from `*Role` above is deliberate: the context value is the
@@ -328,6 +332,38 @@ export default function HomeScreen({ navigation }) {
   const [reorderingId, setReorderingId] = useState(null);
   const transactionsSkeletonOpacity = useRef(new Animated.Value(0.6)).current;
   const drawerAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!user || profileLoading || !profile || profile.id !== user.id) return;
+
+    const prefetchOptions = {
+      user,
+      isSubAgent: isAgentRole,
+      isSuperAgent: isSuperAgentRole,
+      superAgentId: profile.superAgentId,
+    };
+
+    Promise.all([
+      preloadDataPackages(prefetchOptions),
+      preloadHistoryFirstPage({
+        userId: user.id,
+        isAgent: isAgentRole,
+        isSuperAgent: isSuperAgentRole,
+      }),
+    ]).catch((error) => {
+      console.warn("Could not prefetch screen data:", error);
+    });
+  }, [
+    user?.id,
+    user?.user_metadata?.tier_name,
+    user?.app_metadata?.tier_name,
+    profileLoading,
+    profile?.id,
+    profile?.role,
+    profile?.superAgentId,
+    isAgentRole,
+    isSuperAgentRole,
+  ]);
 
   // Open: mount first, then slide in. Close: slide out, then unmount once the
   // animation settles. Unmounting immediately would make the panel disappear
@@ -715,16 +751,25 @@ export default function HomeScreen({ navigation }) {
         } else {
           setWalletBalance(Number(data?.balance || 0));
         }
+      } catch (error) {
+        console.error("Wallet balance error:", error);
+      } finally {
+        if (!cancelled) setLoadingWallet(false);
+      }
+    };
+
+    const setupWalletRealtime = async () => {
+      try {
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
+        if (!user || cancelled) return;
 
         walletChannelRef.current = supabase
           .channel(uniqueTopic("home_wallet_balance_realtime"))
           .on(
             "postgres_changes",
             {
-              // INSERT and DELETE, not just UPDATE. The first top-up CREATES
-              // the row, so on an `UPDATE`-only subscription the hero would
-              // never notice the wallet appearing - and a DELETE (row removed)
-              // would leave a stale balance on screen.
               event: "*",
               schema: "public",
               table: "super_agent_wallets",
@@ -738,18 +783,42 @@ export default function HomeScreen({ navigation }) {
               setWalletBalance(Number(payload.new?.balance || 0));
             },
           )
-          .subscribe();
+          .subscribe((status, error) => {
+            if (status === "SUBSCRIBED") {
+              // Re-read after the socket is live so a balance change between
+              // the initial query and subscription cannot leave a stale card.
+              loadWallet();
+            } else if (
+              error ||
+              status === "CHANNEL_ERROR" ||
+              status === "TIMED_OUT"
+            ) {
+              console.warn(
+                "Home wallet realtime subscription unavailable:",
+                status,
+                error,
+              );
+            }
+          });
       } catch (error) {
-        console.error("Wallet balance error:", error);
-      } finally {
-        if (!cancelled) setLoadingWallet(false);
+        console.error("Home wallet realtime setup failed:", error);
       }
     };
 
     loadWallet();
+    setupWalletRealtime();
+    const unsubscribeFocus = navigation.addListener("focus", loadWallet);
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      (state) => {
+        if (state === "active") loadWallet();
+      },
+    );
 
     return () => {
       cancelled = true;
+      unsubscribeFocus();
+      appStateSubscription.remove();
       removeChannelSafe(walletChannelRef.current);
     };
     // `isNormalUser` is a dependency, not just `isSuperAgent`. Both flags are
@@ -758,7 +827,7 @@ export default function HomeScreen({ navigation }) {
     // resolved - reading a stray row for a normal user and rendering it. The
     // role flags flip together, so listing both means the read is re-attempted
     // with the correct authority once the role is actually known.
-  }, [isSuperAgentRole, isNormalUser]);
+  }, [isSuperAgentRole, isNormalUser, navigation]);
 
   // Auto-scroll ads effect
   useEffect(() => {

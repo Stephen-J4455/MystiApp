@@ -5,6 +5,13 @@ import { getEdgeFunctionName } from "../lib/env.js";
 // Client-side fallbacks use the authenticated anon client. Privileged work is
 // performed by Supabase Edge Functions, never with a browser-exposed service key.
 const adminClient = supabase;
+const PACKAGE_CACHE_MS = 30_000;
+let catalogCache = null;
+let catalogRequest = null;
+const packagePricingCache = new Map();
+const packagePricingRequests = new Map();
+const subAgentPackageCache = new Map();
+const subAgentPackageRequests = new Map();
 
 const normalizeKey = (val) => String(val || "").trim().toUpperCase();
 
@@ -23,7 +30,7 @@ const sizeFromDataValue = (dataValue) => {
   return match ? Number(match[1]) : null;
 };
 
-export const fetchCatalogPackages = async () => {
+const fetchCatalogPackagesUncached = async () => {
   try {
     const { data: providerData, error: providerError } =
       await supabase.functions.invoke(
@@ -91,6 +98,69 @@ export const fetchCatalogPackages = async () => {
   }
 };
 
+export const fetchCatalogPackages = async () => {
+  if (catalogCache && catalogCache.expiresAt > Date.now()) {
+    return catalogCache.data;
+  }
+  if (catalogRequest) return catalogRequest;
+
+  catalogRequest = fetchCatalogPackagesUncached()
+    .then((catalog) => {
+      if (catalog.length > 0) {
+        catalogCache = {
+          data: catalog,
+          expiresAt: Date.now() + PACKAGE_CACHE_MS,
+        };
+      }
+      return catalog;
+    })
+    .finally(() => {
+      catalogRequest = null;
+    });
+
+  return catalogRequest;
+};
+
+export const fetchPackagePricing = async (
+  table,
+  providers,
+  columns,
+  cacheScope = "",
+) => {
+  const uniqueProviders = [...new Set(providers)].sort();
+  if (uniqueProviders.length === 0) return { data: [], error: null };
+
+  const key = `${cacheScope}:${table}:${uniqueProviders.join(",")}:${columns}`;
+  const cached = packagePricingCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { data: cached.data, error: null };
+  }
+
+  const existingRequest = packagePricingRequests.get(key);
+  if (existingRequest) return existingRequest;
+
+  const request = adminClient
+    .from(table)
+    .select(columns)
+    .in("provider", uniqueProviders)
+    .eq("is_active", true)
+    .then((result) => {
+      if (!result.error && Array.isArray(result.data)) {
+        packagePricingCache.set(key, {
+          data: result.data,
+          expiresAt: Date.now() + PACKAGE_CACHE_MS,
+        });
+      }
+      return result;
+    })
+    .finally(() => {
+      packagePricingRequests.delete(key);
+    });
+
+  packagePricingRequests.set(key, request);
+  return request;
+};
+
 const findCatalogPackageForOffer = (catalog, offer) => {
   if (!Array.isArray(catalog) || catalog.length === 0) return null;
   const net = normalizeNetworkKey(offer?.network);
@@ -153,7 +223,7 @@ const findCatalogPackageForOffer = (catalog, offer) => {
  * `tier_name` still comes from metadata: it is display/pricing context rather
  * than an authorization input, and `user_profiles` has no such column.
  */
-export const loadSubAgentPackages = async ({
+const loadSubAgentPackagesUncached = async ({
   user,
   network = null,
   superAgentId: resolvedSuperAgentId = null,
@@ -279,11 +349,12 @@ export const loadSubAgentPackages = async ({
     }
     const networkFilter = network ? normalizeNetworkKey(network) : null;
     const { data: activePricingRows, error: activePricingError } =
-      await adminClient
-        .from("package_pricing")
-        .select("provider, package_id, network, type, size, base_price")
-        .in("provider", providers)
-        .eq("is_active", true);
+      await fetchPackagePricing(
+        "package_pricing",
+        providers,
+        "provider, package_id, network, type, size, base_price",
+        user.id,
+      );
 
     if (activePricingError) {
       console.warn(
@@ -426,6 +497,73 @@ export const loadSubAgentPackages = async ({
   } catch (err) {
     console.error("Failed to load sub-agent packages directly:", err);
     return { offers: [], agent_tier: agentTier || null, error: err.message };
+  }
+};
+
+export const loadSubAgentPackages = async (options) => {
+  const { user, superAgentId } = options || {};
+  if (!user) {
+    return { offers: [], agent_tier: null, error: "User is required" };
+  }
+
+  const tier = String(
+    user.user_metadata?.tier_name || user.app_metadata?.tier_name || "",
+  ).trim();
+  const key = `${user.id}:${String(superAgentId || "")}:${tier}`;
+  const cached = subAgentPackageCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const existingRequest = subAgentPackageRequests.get(key);
+  if (existingRequest) return existingRequest;
+
+  // Load all networks once so the Home prefetch can serve any DataScreen route.
+  const request = loadSubAgentPackagesUncached({
+    ...options,
+    network: null,
+  })
+    .then((result) => {
+      if (!result.error) {
+        subAgentPackageCache.set(key, {
+          data: result,
+          expiresAt: Date.now() + PACKAGE_CACHE_MS,
+        });
+      }
+      return result;
+    })
+    .finally(() => {
+      subAgentPackageRequests.delete(key);
+    });
+
+  subAgentPackageRequests.set(key, request);
+  return request;
+};
+
+export const preloadDataPackages = async ({
+  user,
+  isSubAgent,
+  isSuperAgent,
+  superAgentId,
+}) => {
+  if (isSubAgent && superAgentId) {
+    await loadSubAgentPackages({ user, superAgentId });
+    return;
+  }
+
+  const catalog = await fetchCatalogPackages();
+  if (catalog.length === 0) return;
+
+  const providers = [...new Set(catalog.map((pkg) => pkg.provider))];
+  const table = isSuperAgent || isSubAgent
+    ? "package_pricing"
+    : "normal_user_package_pricing";
+  const { error } = await fetchPackagePricing(
+    table,
+    providers,
+    "provider, package_id, network, type, size, base_price, is_active",
+    user.id,
+  );
+  if (error) {
+    console.warn("Could not prefetch package pricing:", error);
   }
 };
 
