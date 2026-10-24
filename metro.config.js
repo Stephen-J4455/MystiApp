@@ -36,8 +36,6 @@ for (const storeEntry of fs
   if (fs.existsSync(storeNodeModules)) addPackages(storeNodeModules);
 }
 
-config.resolver.disableHierarchicalLookup = true;
-config.resolver.unstable_enableSymlinks = true;
 config.resolver.nodeModulesPaths = [
   nodeModulesRoot,
 ];
