@@ -32,6 +32,7 @@ import { Modal } from "react-native";
 import { usePaystackPayment } from "../hooks/usePaystackPayment";
 import { getPaystackPublicKey } from "../lib/supabase";
 import { getEdgeFunctionName } from "../lib/env";
+import { getProviderDisplayName } from "../lib/providerDisplay";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 
@@ -863,7 +864,7 @@ export default function DataScreen({ navigation, route }) {
                 title: `${uiNetwork} — ${descriptor}`,
                 type: String(agentOffer.type || descriptor).toUpperCase(),
                 name:
-                  `${uiNetwork} — ${descriptor} · ${String(agentOffer.provider || "jehuca").toUpperCase()}`,
+                  `${uiNetwork} — ${descriptor} · ${getProviderDisplayName(agentOffer.provider)}`,
                 price:
                   typeof agentOffer.price === "string" &&
                   agentOffer.price.startsWith("Ghc")
@@ -981,7 +982,7 @@ export default function DataScreen({ navigation, route }) {
             category: pkg.category ?? null,
             data_volume: pkg.data_volume ?? null,
             type: pkg.type,
-            name: `${uiNetwork} — ${pkg.type} · ${provider.toUpperCase()}`,
+            name: `${uiNetwork} — ${pkg.type} · ${getProviderDisplayName(provider)}`,
             price: `Ghc ${finalPrice.toFixed(2)}`,
             base_price: finalPrice,
             dataSize: `${pkg.size} GB`,
@@ -1020,7 +1021,7 @@ export default function DataScreen({ navigation, route }) {
           const descriptor = String(row.type || "").trim();
           const size = row.size ?? null;
           const uiNetwork = formatUiNetwork(row.network);
-          const displayName = `${uiNetwork} — ${descriptor} · ${provider.toUpperCase()}`;
+          const displayName = `${uiNetwork} — ${descriptor} · ${getProviderDisplayName(provider)}`;
           const normalizedDescriptor = descriptor.toUpperCase();
           const catalogPackage = catalogOffers.find((pkg) => {
             if (

@@ -18,6 +18,7 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
+import { getProviderDisplayName } from "../lib/providerDisplay";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -299,28 +300,36 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     loadData({ showSpinner: false });
   };
 
+  const pricedPackages = useMemo(
+    () =>
+      packages.filter(
+        (pkg) => usableBasePrice(basePriceMap[getPackageKey(pkg)]) !== null,
+      ),
+    [packages, basePriceMap],
+  );
+
   const networkOptions = useMemo(() => {
     const networks = [];
-    packages.forEach((pkg) => {
+    pricedPackages.forEach((pkg) => {
       const value = String(pkg.network || "").toUpperCase();
       if (value && !networks.includes(value)) networks.push(value);
     });
     return ["all", ...networks];
-  }, [packages]);
+  }, [pricedPackages]);
 
   const filteredPackages = useMemo(() => {
-    if (selectedNetwork === "all") return packages;
-    return packages.filter(
+    if (selectedNetwork === "all") return pricedPackages;
+    return pricedPackages.filter(
       (pkg) =>
         String(pkg.network || "").toUpperCase() ===
         selectedNetwork.toUpperCase(),
     );
-  }, [packages, selectedNetwork]);
+  }, [pricedPackages, selectedNetwork]);
 
   const tierChangedCount = useCallback(
     (tier) => {
       let count = 0;
-      (packages || []).forEach((pkg) => {
+      pricedPackages.forEach((pkg) => {
         const pkgKey = getPackageKey(pkg);
         const inputKey = `${tier.id}::${pkgKey}`;
         const raw = (priceInputs[inputKey] ?? "").toString().trim();
@@ -353,7 +362,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
       });
       return count;
     },
-    [packages, priceInputs, offerMap, basePriceMap],
+    [pricedPackages, priceInputs, offerMap, basePriceMap],
   );
 
   const handlePriceChange = (tierId, pkgKey, text) => {
@@ -373,7 +382,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
     const updates = [];
     const invalidRows = [];
 
-    (packages || []).forEach((pkg) => {
+    pricedPackages.forEach((pkg) => {
       const pkgKey = getPackageKey(pkg);
       const inputKey = `${tier.id}::${pkgKey}`;
       const raw = (priceInputs[inputKey] ?? "").toString().trim();
@@ -563,7 +572,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
         <View style={styles.packageInfo}>
           <Text style={styles.packageName}>
             {String(pkg.network || "").toUpperCase()} — {desc} ·{" "}
-            {String(pkg.provider || "jehuca").toUpperCase()}
+            {getProviderDisplayName(pkg.provider)}
           </Text>
           <Text style={styles.packageMeta}>
             {pkg.size ? `${pkg.size} GB · ` : ""}Base:{" "}
@@ -627,7 +636,7 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
 
         {filteredPackages.length === 0 ? (
           <Text style={styles.tierEmptyText}>
-            No packages match this filter.
+            No bundles with an admin base price match this filter.
           </Text>
         ) : (
           filteredPackages.map((pkg) => renderPackageRow(tier, pkg))
@@ -706,8 +715,8 @@ export default function SuperAgentTierManagementScreen({ navigation }) {
           <Text style={styles.infoText}>
             Every bundle starts at the admin base price. Adjust the amounts to
             set what your agents pay in this tier, then save. Fields you leave
-            blank keep the admin base price, and bundles with no base price yet
-            are skipped.
+            blank keep the admin base price. Bundles without an admin base price
+            are hidden until one is set.
           </Text>
         </View>
 

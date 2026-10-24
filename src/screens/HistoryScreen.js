@@ -1232,7 +1232,7 @@ export default function HistoryScreen({ navigation }) {
         );
         throw new Error(message);
       }
-      showSuccess("Order Reordered", "The package was sent to Jehucal.");
+      showSuccess("Order Reordered", "The package was sent to Mys.");
       await checkAgentStatus(true);
     } catch (error) {
       console.error("Held order reorder failed:", error);

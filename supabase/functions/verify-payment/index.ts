@@ -371,17 +371,26 @@ const resolveOrderApiCost = async (
     network: string;
     type: string;
     packageId?: string | null;
-    fallback: number;
+    fallback: number | null;
     provider: string;
   },
 ) => {
   try {
+    const liveCost = await fetchProviderPrice(packageId, provider);
+    if (liveCost === null && fallback === null) {
+      return {
+        apiCost: null,
+        costSource: "unavailable",
+        discount: 0,
+      };
+    }
+
     const { data, error } = await client.rpc("resolve_api_cost", {
       p_audience: audience,
       p_network: network,
       p_type: type,
       p_package_id: packageId || null,
-      p_live_cost: await fetchProviderPrice(packageId, provider),
+      p_live_cost: liveCost,
       p_fallback: fallback,
       p_provider: provider,
     });
@@ -1108,7 +1117,7 @@ Deno.serve(async (req) => {
         // amount, which under-states nothing but over-states the cost the
         // platform actually owes.
         packageId: walletProviderPackageId || null,
-        fallback: walletAmount,
+        fallback: isSuperAgent ? walletAmount : null,
         provider: activeProvider,
       });
 
@@ -1628,13 +1637,44 @@ Deno.serve(async (req) => {
 
     const { data: chargeSettings } = await supabaseAdmin
       .from("payment_charge_settings")
-      .select("super_agent_percent")
+      .select("super_agent_percent, normal_user_percent")
       .order("updated_at", { ascending: false })
       .limit(1)
       .maybeSingle();
     const superAgentChargePercent = Number(
       chargeSettings?.super_agent_percent ?? 1.95,
     );
+    const normalUserChargePercent = Number(
+      chargeSettings?.normal_user_percent ?? 1.95,
+    );
+
+    // Snapshot the admin's configured tier price server-side. The client sends
+    // a base_price for checkout arithmetic, but that value is not authoritative
+    // and must not become the cost basis in analytics.
+    const adminBasePrice = isSubAgentOrder
+      ? await resolveAdminBasePrice(supabaseAdmin, {
+          audience: "super_agent",
+          network: String(orderNetwork || "").trim().toUpperCase(),
+          type: String(
+            provider_type || package_type || package_name || "",
+          ).trim().toUpperCase(),
+          packageId: String(provider_package_id || offer_id || "").trim(),
+          provider: activeProvider,
+        })
+      : null;
+
+    if (isSubAgentOrder && adminBasePrice === null) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "The admin base price for this package is unavailable. Please try again later.",
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
 
     const settlement = (() => {
       const gross = Number(orderAmount || 0);
@@ -1648,6 +1688,8 @@ Deno.serve(async (req) => {
         requestedBase >= 0 &&
         requestedTierExtra >= 0 &&
         requestedTransactionFee >= 0 &&
+        adminBasePrice !== null &&
+        Math.abs(requestedBase - adminBasePrice) <= 0.01 &&
         Math.abs(
           requestedBase + requestedTierExtra + requestedTransactionFee - gross,
         ) <= 0.01 &&
@@ -1663,7 +1705,7 @@ Deno.serve(async (req) => {
             (requestedBase + requestedTierExtra).toFixed(2),
           ),
           agentNet: 0,
-          baseAmount: Number(requestedBase.toFixed(2)),
+          baseAmount: Number(adminBasePrice.toFixed(2)),
           agentMarkup: Number(requestedTierExtra.toFixed(2)),
           transactionFee: Number(requestedTransactionFee.toFixed(2)),
         };
@@ -1698,6 +1740,8 @@ Deno.serve(async (req) => {
       requestedBase >= 0 &&
       requestedTierExtra >= 0 &&
       requestedTransactionFee >= 0 &&
+      adminBasePrice !== null &&
+      Math.abs(requestedBase - adminBasePrice) <= 0.01 &&
       Math.abs(
         requestedBase +
           requestedTierExtra +
@@ -1750,6 +1794,43 @@ Deno.serve(async (req) => {
     const isAgentOrder = Boolean(
       resolvedSuperAgentId || identity.role === "sub_agent",
     );
+    const normalUserTransactionFee = (() => {
+      if (isAgentOrder) return 0;
+      const normalBase = Number(base_price);
+      const requestedFee = Number(transaction_fee);
+      const normalMarkup = Number(tier_extra || 0);
+      const expectedFee = Number(
+        ((normalBase * normalUserChargePercent) / 100).toFixed(2),
+      );
+      const validBreakdown =
+        Number.isFinite(normalBase) &&
+        normalBase >= 0 &&
+        Number.isFinite(requestedFee) &&
+        requestedFee >= 0 &&
+        Number.isFinite(normalMarkup) &&
+        normalMarkup === 0 &&
+        Math.abs(requestedFee - expectedFee) <= 0.01 &&
+        Math.abs(normalBase + requestedFee - orderAmount) <= 0.01;
+
+      return validBreakdown ? expectedFee : null;
+    })();
+    if (normalUserTransactionFee === null) {
+      return new Response(
+        JSON.stringify({
+          error: "Invalid normal-user Paystack charge breakdown",
+          details: {
+            base_price,
+            transaction_fee,
+            amount: orderAmount,
+            normal_user_charge_percent: normalUserChargePercent,
+          },
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
     const rawProviderType = String(
       provider_type || offer?.type || "",
     ).toUpperCase();
@@ -1782,7 +1863,7 @@ Deno.serve(async (req) => {
       packageId: provider_package_id || offer_id || null,
       // Last resort: an agent order's base_amount is already the provider cost,
       // and for a normal-user order the sale price bounds the cost.
-      fallback: isAgentOrder ? settlement.baseAmount : Number(orderAmount || 0),
+      fallback: isAgentOrder ? null : Number(orderAmount || 0),
       provider: activeProvider,
     });
     const apiCostSnapshot = orderApiCost.apiCost;
@@ -1848,7 +1929,9 @@ Deno.serve(async (req) => {
         api_cost: apiCostSnapshot,
         cost_source: resolvedCostSource,
         agent_markup: settlement.agentMarkup,
-        transaction_fee: settlement.transactionFee,
+        transaction_fee: isAgentOrder
+          ? settlement.transactionFee
+          : normalUserTransactionFee,
         main_account_amount: settlement.adminShare,
         settlement_status: "pending",
         paystack_subaccount_code: paystackSubaccountCode,
@@ -2055,7 +2138,9 @@ Deno.serve(async (req) => {
         gross_amount: orderAmount,
         base_amount: isAgentOrder ? settlement.baseAmount : orderAmount,
         agent_markup: settlement.agentMarkup,
-        transaction_fee: settlement.transactionFee,
+        transaction_fee: isAgentOrder
+          ? settlement.transactionFee
+          : normalUserTransactionFee,
         main_account_amount: isAgentOrder ? settlement.adminShare : orderAmount,
         super_agent_amount: settlement.superAgentShare,
         agent_net: settlement.agentNet,

@@ -17,6 +17,7 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
+import { getProviderDisplayName } from "../lib/providerDisplay";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -338,14 +339,23 @@ export default function SuperAgentOffersScreen({ navigation }) {
     return map;
   }, [packages]);
 
+  const pricedPackages = useMemo(
+    () =>
+      (packages || []).filter(
+        (pkg) =>
+          usableBasePrice(basePriceMap[getPackageKey(pkg)]) !== null,
+      ),
+    [packages, basePriceMap],
+  );
+
   const providerOptions = useMemo(() => {
     const available = new Set(
-      packages.map((item) =>
+      pricedPackages.map((item) =>
         String(item.provider || "jehuca").toLowerCase(),
       ),
     );
     return ["jehuca", "bisdel"].filter((provider) => available.has(provider));
-  }, [packages]);
+  }, [pricedPackages]);
 
   const enabledProviders = useMemo(
     () => new Set(providerOptions),
@@ -364,16 +374,16 @@ export default function SuperAgentOffersScreen({ navigation }) {
   const createProviderOptions = useMemo(
     () =>
       [...new Set(
-        packages.map((pkg) =>
+        pricedPackages.map((pkg) =>
           String(pkg.provider || "jehuca").toLowerCase(),
         ),
       )].sort(),
-    [packages],
+    [pricedPackages],
   );
 
   const familyOptions = useMemo(() => {
     const available = new Set(
-      packages
+      pricedPackages
         .filter((pkg) => {
           const provider = String(pkg.provider || "jehuca").toLowerCase();
           return selectedProvider === "all" || provider === selectedProvider;
@@ -386,7 +396,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
       { key: "big_time", label: "Big Time" },
       { key: "everyday", label: "Everyday" },
     ].filter((family) => family.key === "all" || available.has(family.key));
-  }, [packages, selectedProvider]);
+  }, [pricedPackages, selectedProvider]);
 
   useEffect(() => {
     if (!familyOptions.some((family) => family.key === selectedFamily)) {
@@ -434,7 +444,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
 
   const networkOptions = useMemo(() => {
     const networks = [];
-    (packages || [])
+    pricedPackages
       .filter((pkg) => {
         return (
           String(pkg.provider || "jehuca").toLowerCase() === createProvider
@@ -445,11 +455,11 @@ export default function SuperAgentOffersScreen({ navigation }) {
         if (value && !networks.includes(value)) networks.push(value);
       });
     return networks;
-  }, [packages, createProvider]);
+  }, [pricedPackages, createProvider]);
 
   const formPackages = useMemo(
     () =>
-      (packages || []).filter(
+      pricedPackages.filter(
         (pkg) => {
           return (
             String(pkg.provider || "jehuca").toLowerCase() === createProvider &&
@@ -464,7 +474,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
           (secondBase ?? Number.POSITIVE_INFINITY)
         );
       }),
-    [packages, formNetwork, createProvider, basePriceMap],
+    [pricedPackages, formNetwork, createProvider, basePriceMap],
   );
 
   useEffect(() => {
@@ -931,7 +941,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                             createProvider === provider && styles.chipTextActive,
                           ]}
                         >
-                          {provider === "bisdel" ? "Bisdel" : "Jehuca"}
+                          {getProviderDisplayName(provider)}
                         </Text>
                       </TouchableOpacity>
                     ))}
@@ -997,7 +1007,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                           </Text>
                           <Text style={styles.bundleChoiceMeta}>
                             {pkg.size ? `${pkg.size} GB · ` : ""}
-                            {String(pkg.provider || "jehuca").toUpperCase()}
+                            {getProviderDisplayName(pkg.provider)}
                           </Text>
                         </View>
                         <Text style={styles.bundleChoicePrice}>
@@ -1010,7 +1020,8 @@ export default function SuperAgentOffersScreen({ navigation }) {
                   })
                 ) : (
                   <Text style={styles.noBundles}>
-                    No bundles available for this network.
+                    No bundles with an admin base price are available for this
+                    network.
                   </Text>
                 )}
               </ScrollView>
@@ -1143,7 +1154,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
               {[{ key: "all", label: "All" }].concat(
                 providerOptions.map((provider) => ({
                   key: provider,
-                  label: provider === "bisdel" ? "Bisdel" : "Jehuca",
+                  label: getProviderDisplayName(provider),
                 })),
               ).map((option) => (
                 <TouchableOpacity

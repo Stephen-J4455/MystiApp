@@ -768,7 +768,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                         </View>
                         {tx.jehuca_order_id && (
                           <View style={styles.txInfoRow}>
-                            <Text style={styles.txInfoLabel}>Jehuca order</Text>
+                            <Text style={styles.txInfoLabel}>Provider order</Text>
                             <Text style={styles.txInfoValue}>
                               {tx.jehuca_order_id}
                             </Text>

@@ -177,7 +177,7 @@ export default function ReceiptScreen({ navigation, route }) {
         showError("Reorder Failed", result.message);
         return;
       }
-      showSuccess("Order Reordered", "The package was sent to Jehucal.");
+      showSuccess("Order Reordered", "The package was sent to Mys.");
     } finally {
       setReordering(false);
     }

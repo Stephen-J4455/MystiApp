@@ -1044,7 +1044,7 @@ export default function HomeScreen({ navigation }) {
         showError("Reorder Failed", result.message);
         return;
       }
-      showSuccess("Order Reordered", "The package was sent to Jehucal.");
+      showSuccess("Order Reordered", "The package was sent to Mys.");
       checkAgentStatus({ refreshTransactions: true, refreshAds: false });
     } finally {
       setReorderingId(null);
