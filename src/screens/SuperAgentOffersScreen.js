@@ -17,7 +17,6 @@ import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
 import { getEdgeFunctionName } from "../lib/env";
 import { getEdgeFunctionErrorMessage } from "../lib/edgeFunctions";
-import { getProviderDisplayName } from "../lib/providerDisplay";
 import { fonts } from "../components/theme";
 import { ThemedScreen, themedStyles } from "../components/ui";
 import { useTheme } from "../contexts/ThemeContext";
@@ -99,6 +98,13 @@ const formatGhc = (value) => `Ghc ${Number(value || 0).toFixed(2)}`;
 const formatPriceInput = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric.toFixed(2) : "";
+};
+
+const getOffersProviderLabel = (provider) => {
+  const key = String(provider || "jehuca").trim().toLowerCase();
+  if (key === "jehuca") return "MystiwanEbiz";
+  if (key === "bisdel") return "MystiwanEbiz-VIP";
+  return "Data provider";
 };
 
 // Admin base prices are the default an offer price starts from. A base price of
@@ -941,7 +947,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
                             createProvider === provider && styles.chipTextActive,
                           ]}
                         >
-                          {getProviderDisplayName(provider)}
+                          {getOffersProviderLabel(provider)}
                         </Text>
                       </TouchableOpacity>
                     ))}
@@ -1007,9 +1013,15 @@ export default function SuperAgentOffersScreen({ navigation }) {
                           </Text>
                           <Text style={styles.bundleChoiceMeta}>
                             {pkg.size ? `${pkg.size} GB · ` : ""}
-                            {getProviderDisplayName(pkg.provider)}
+                            {getOffersProviderLabel(pkg.provider)}
                           </Text>
                         </View>
+                        <Ionicons
+                          name="create-outline"
+                          size={18}
+                          color={c.textMuted}
+                          accessible={false}
+                        />
                         <Text style={styles.bundleChoicePrice}>
                           {adminBasePrice !== null
                             ? `Admin base ${formatGhc(adminBasePrice)}`
@@ -1154,7 +1166,7 @@ export default function SuperAgentOffersScreen({ navigation }) {
               {[{ key: "all", label: "All" }].concat(
                 providerOptions.map((provider) => ({
                   key: provider,
-                  label: getProviderDisplayName(provider),
+                  label: getOffersProviderLabel(provider),
                 })),
               ).map((option) => (
                 <TouchableOpacity
