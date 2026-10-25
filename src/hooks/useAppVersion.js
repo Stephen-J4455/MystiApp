@@ -6,6 +6,7 @@ import Constants from "expo-constants";
 const { getVersionStatus } = require("../lib/versionCheck");
 
 const APP_VERSION = Constants.expoConfig?.version || "1.0.0";
+const APP_VERSION_CHECK_TIMEOUT_MS = 10_000;
 
 export const useAppVersion = () => {
   const isWeb = Platform.OS === "web";
@@ -30,6 +31,12 @@ export const useAppVersion = () => {
   }, []);
 
   const checkAppVersion = async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      APP_VERSION_CHECK_TIMEOUT_MS,
+    );
+
     try {
       const platform = Platform.OS === "web" ? "web" : Platform.OS;
 
@@ -38,7 +45,8 @@ export const useAppVersion = () => {
         .select("*")
         .eq("platform", platform)
         .order("updated_at", { ascending: false })
-        .limit(1);
+        .limit(1)
+        .abortSignal(controller.signal);
 
       if (error) {
         console.error("Error fetching app version:", error);
@@ -97,6 +105,8 @@ export const useAppVersion = () => {
       console.error("Error checking app version:", error);
       setCanEnterApp(true);
       setVersionChecked(true);
+    } finally {
+      clearTimeout(timeout);
     }
   };
 

@@ -83,6 +83,7 @@ Deno.serve(async (req) => {
         provider_order_id: order.provider_order_id || null,
         order_reference: order.jehuca_order_id,
         status: order.status,
+        jehuca_order_status: order.jehuca_order_status || null,
       });
     }
     if (order.jehuca_response?.success === true) {
@@ -311,7 +312,8 @@ Deno.serve(async (req) => {
       provider_name: "bisdel",
       provider_order_id: providerOrderId ?? null,
       order_reference: orderReference,
-      status: providerStatus,
+      status: "processing",
+      jehuca_order_status: providerStatus,
     });
   } catch (error) {
     console.error(

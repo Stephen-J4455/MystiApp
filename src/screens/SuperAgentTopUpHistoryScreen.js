@@ -21,6 +21,7 @@ const getStatusColor = (status) => {
   switch (String(status || "").toLowerCase()) {
     case "success":
     case "completed":
+    case "credited":
       return colors.success;
     case "pending":
       return colors.warning;

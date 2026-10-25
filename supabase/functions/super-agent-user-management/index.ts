@@ -591,11 +591,15 @@ Deno.serve(async (req) => {
           // sum 100 client-side and can be shown without a second request.
           summary: {
             count: (topUps || []).filter(
-              (topUp: any) => topUp.status === "success",
+              (topUp: any) =>
+                topUp.status === "success" || topUp.status === "credited",
             ).length,
             total_credited: Number(
               (topUps || [])
-                .filter((topUp: any) => topUp.status === "success")
+                .filter(
+                  (topUp: any) =>
+                    topUp.status === "success" || topUp.status === "credited",
+                )
                 .reduce(
                   (sum: number, topUp: any) => sum + Number(topUp.amount || 0),
                   0,

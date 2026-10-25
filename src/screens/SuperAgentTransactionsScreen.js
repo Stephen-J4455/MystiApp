@@ -170,7 +170,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
               source: "wallet_topup",
               amountDisplay: "Ghc " + Number(t.amount || 0).toFixed(2),
               statusColor:
-                t.status === "success"
+                t.status === "success" || t.status === "credited"
                   ? colors.success
                   : t.status === "pending"
                     ? colors.warning
@@ -433,7 +433,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
             source: "sub_agent_topup",
             amountDisplay: "Ghc " + Number(topup.amount || 0).toFixed(2),
             statusColor:
-              topup.status === "success"
+              topup.status === "success" || topup.status === "credited"
                 ? colors.success
                 : topup.status === "pending"
                   ? colors.warning

@@ -1099,8 +1099,9 @@ Deno.serve(async (req) => {
       // ledger entry and the raw row is only used when no ledger credit was
       // found - otherwise every top-up would be counted twice.
       const ledgerRowsByTopup = new Map<string, (typeof ledgerRows)[number]>();
-      const walletTopupCredits = ledgerRows.filter(
-        (row) => row.reason === "wallet_topup",
+      const walletTopupCredits = ledgerRows.filter((row) =>
+        row.reason === "wallet_topup" ||
+        row.reason === "sub_agent_wallet_topup_super_agent_side"
       );
       for (const topup of walletTopupCredits) {
         const topupId = topup.metadata?.topup_id;
@@ -1242,6 +1243,211 @@ Deno.serve(async (req) => {
       });
     }
 
+    if (action === "declinePendingWalletTopup") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+
+      const reference = String(body.reference || "").trim();
+      if (!reference) return json({ error: "Payment reference is required" }, 400);
+
+      const { data: topup, error: topupError } = await admin
+        .from("wallet_topups")
+        .select("id, status")
+        .eq("reference", reference)
+        .maybeSingle();
+      if (topupError) throw topupError;
+      if (!topup) return json({ error: "Wallet top-up was not found" }, 404);
+      if (topup.status !== "pending") {
+        return json(
+          { error: `This top-up is already ${String(topup.status || "processed")}` },
+          409,
+        );
+      }
+
+      const { data: declinedTopup, error: declineError } = await admin
+        .from("wallet_topups")
+        .update({ status: "cancelled" })
+        .eq("id", topup.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (declineError) throw declineError;
+      if (!declinedTopup) {
+        return json({ error: "This top-up is no longer pending" }, 409);
+      }
+      return json({ success: true, status: "cancelled" });
+    }
+
+    if (action === "creditPendingWalletTopup") {
+      if (!isAdmin)
+        return json({ error: "Administrator access required" }, 403);
+
+      const reference = String(body.reference || "").trim();
+      if (!reference) return json({ error: "Payment reference is required" }, 400);
+
+      const { data: topup, error: topupError } = await admin
+        .from("wallet_topups")
+        .select("*")
+        .eq("reference", reference)
+        .maybeSingle();
+      if (topupError) throw topupError;
+      if (!topup) return json({ error: "Wallet top-up was not found" }, 404);
+      if (topup.status !== "pending") {
+        return json(
+          { error: `This top-up is already ${String(topup.status || "processed")}` },
+          409,
+        );
+      }
+
+      const amount = Number(topup.amount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return json({ error: "Recorded top-up amount is invalid" }, 400);
+      }
+
+      const payerId = String(topup.funder_user_id || topup.agent_id || "").trim();
+      if (!payerId) return json({ error: "Top-up payer could not be identified" }, 400);
+      const { data: payerProfile, error: payerProfileError } = await admin
+        .from("user_profiles")
+        .select("id, role, super_agent_id")
+        .eq("id", payerId)
+        .maybeSingle();
+      if (payerProfileError) throw payerProfileError;
+      const payerRole = normalizeRole(payerProfile?.role);
+      let walletOwnerId: string;
+      if (payerRole === "super_agent") {
+        walletOwnerId = payerId;
+      } else if (payerRole === "sub_agent") {
+        walletOwnerId = String(
+          topup.wallet_owner_id || payerProfile?.super_agent_id || "",
+        ).trim();
+        if (!walletOwnerId) {
+          return json(
+            { error: "Sub-agent has no assigned Super Agent wallet to fund" },
+            400,
+          );
+        }
+      } else {
+        return json({ error: "This account cannot fund an operational wallet" }, 400);
+      }
+
+      const { data: claimedTopup, error: claimError } = await admin
+        .from("wallet_topups")
+        .update({ status: "processing" })
+        .eq("id", topup.id)
+        .eq("status", "pending")
+        .select("id")
+        .maybeSingle();
+      if (claimError) throw claimError;
+      if (!claimedTopup) {
+        return json({ error: "This top-up is no longer pending" }, 409);
+      }
+
+      const creditWallet = async (
+        walletId: string,
+        referenceSuffix: string,
+        reason: string,
+      ) => {
+        const result = await admin.rpc("credit_super_agent_wallet", {
+          p_super_agent_id: walletId,
+          p_amount: amount,
+          p_reference: `wallet-topup-${topup.id}${referenceSuffix}`,
+          p_reason: reason,
+          p_metadata: {
+            topup_id: topup.id,
+            funded_by: payerId,
+            funded_by_role: payerRole,
+            manually_credited: true,
+            credited_by: identity.id,
+            credited_by_email: identity.email,
+          },
+        });
+        if (result.error) throw result.error;
+        if (!result.data?.success) {
+          throw new Error("Wallet credit could not be completed");
+        }
+        return result.data;
+      };
+
+      try {
+        const ownerCredit = await creditWallet(
+          walletOwnerId,
+          "",
+          payerRole === "super_agent"
+            ? "wallet_topup"
+            : "sub_agent_wallet_topup_super_agent_side",
+        );
+        let subAgentBalance: number | null = null;
+        if (payerRole === "sub_agent") {
+          const mirrorCredit = await creditWallet(
+            payerId,
+            `:sub:${payerId}`,
+            "sub_agent_wallet_topup_sub_agent_side",
+          );
+          subAgentBalance = Number(mirrorCredit.balance || 0);
+        }
+
+        const { data: creditedTopup, error: updateError } = await admin
+          .from("wallet_topups")
+          .update({ status: "credited" })
+          .eq("id", topup.id)
+          .eq("status", "processing")
+          .select("id")
+          .maybeSingle();
+        if (updateError) throw updateError;
+        if (!creditedTopup) {
+          const { data: currentTopup, error: currentTopupError } = await admin
+            .from("wallet_topups")
+            .select("status")
+            .eq("id", topup.id)
+            .maybeSingle();
+          if (currentTopupError) throw currentTopupError;
+          if (
+            currentTopup?.status === "success" ||
+            currentTopup?.status === "credited"
+          ) {
+            return json({
+              success: true,
+              already_processed: true,
+              credited_amount: amount,
+              new_balance: Number(ownerCredit.balance || 0),
+              sub_agent_balance: subAgentBalance,
+            });
+          }
+          if (currentTopup?.status === "processing") {
+            throw new Error("Wallet credit completed, but top-up status did not update");
+          }
+
+          return json(
+            {
+              error:
+                "Wallet was credited, but the top-up status changed concurrently",
+            },
+            409,
+          );
+        }
+
+        return json({
+          success: true,
+          credited_amount: amount,
+          new_balance: Number(ownerCredit.balance || 0),
+          sub_agent_balance: subAgentBalance,
+        });
+      } catch (error) {
+        const { error: releaseError } = await admin
+          .from("wallet_topups")
+          .update({ status: "pending" })
+          .eq("id", topup.id)
+          .eq("status", "processing");
+        if (releaseError) {
+          console.error(
+            "[creditPendingWalletTopup] Could not release top-up claim:",
+            releaseError.message,
+          );
+        }
+        throw error;
+      }
+    }
+
     if (action === "verifyPendingWalletTopup") {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
@@ -1256,6 +1462,10 @@ Deno.serve(async (req) => {
         .maybeSingle();
       if (topupError) throw topupError;
       if (!topup) return json({ error: "Wallet top-up was not found" }, 404);
+      const checkOnly = body.checkOnly === true;
+      if (checkOnly && topup.status !== "pending") {
+        return json({ error: "Only pending top-ups can be checked" }, 409);
+      }
       if (topup.status !== "pending" && topup.status !== "success") {
         return json(
           { error: `This top-up is already ${String(topup.status || "processed")}` },
@@ -1281,6 +1491,7 @@ Deno.serve(async (req) => {
         return json({
           success: false,
           payment_status: paystackResult?.data?.status || "unverified",
+          error: "Paystack has not confirmed a successful payment.",
           message: "Paystack has not confirmed a successful payment.",
         }, 409);
       }
@@ -1349,6 +1560,16 @@ Deno.serve(async (req) => {
         );
       }
 
+      if (checkOnly) {
+        return json({
+          success: true,
+          payment_found: true,
+          payment_status: paystackResult.data.status,
+          received_amount: receivedGross,
+          expected_amount: expectedGross,
+        });
+      }
+
       const payerId = String(topup.funder_user_id || topup.agent_id || "").trim();
       if (!payerId) return json({ error: "Top-up payer could not be identified" }, 400);
       const { data: payerProfile, error: payerProfileError } = await admin
@@ -1373,6 +1594,21 @@ Deno.serve(async (req) => {
         }
       } else {
         return json({ error: "This account cannot fund an operational wallet" }, 400);
+      }
+
+      const claimedPending = topup.status === "pending";
+      if (claimedPending) {
+        const { data: claimedTopup, error: claimError } = await admin
+          .from("wallet_topups")
+          .update({ status: "processing" })
+          .eq("id", topup.id)
+          .eq("status", "pending")
+          .select("id")
+          .maybeSingle();
+        if (claimError) throw claimError;
+        if (!claimedTopup) {
+          return json({ error: "This top-up is no longer pending" }, 409);
+        }
       }
 
       const topupId = String(topup.id);
@@ -1404,73 +1640,102 @@ Deno.serve(async (req) => {
         return result.data;
       };
 
-      const ownerCredit = await creditWallet(
-        walletOwnerId,
-        "",
-        payerRole === "super_agent"
-          ? "wallet_topup"
-          : "sub_agent_wallet_topup_super_agent_side",
-      );
-      let subAgentBalance: number | null = null;
-      if (payerRole === "sub_agent") {
-        const mirrorCredit = await creditWallet(
-          payerId,
-          `:sub:${payerId}`,
-          "sub_agent_wallet_topup_sub_agent_side",
+      try {
+        const ownerCredit = await creditWallet(
+          walletOwnerId,
+          "",
+          payerRole === "super_agent"
+            ? "wallet_topup"
+            : "sub_agent_wallet_topup_super_agent_side",
         );
-        subAgentBalance = Number(mirrorCredit.balance || 0);
-      }
-
-      const updateData: Record<string, unknown> = {
-        status: "success",
-        paystack_transaction_id: paystackTransactionId,
-        paystack_transaction_status: paystackResult.data.status,
-        paid_at: paystackResult.data.paid_at || new Date().toISOString(),
-        channel: paystackResult.data.channel || null,
-        bank: paystackResult.data.authorization?.bank || null,
-        gross_amount: expectedGross,
-        charge_amount:
-          recordedChargeAmount === null
-            ? Number((expectedGross - netAmount).toFixed(2))
-            : recordedChargeAmount,
-        funder_user_id: payerId,
-        wallet_owner_id: walletOwnerId,
-      };
-      if (recordedChargePercent !== null) {
-        updateData.charge_percent = recordedChargePercent;
-      }
-      const optionalTopupColumns = new Set([
-        "gross_amount",
-        "charge_amount",
-        "charge_percent",
-        "funder_user_id",
-        "wallet_owner_id",
-      ]);
-      for (;;) {
-        const { error: updateError } = await admin
-          .from("wallet_topups")
-          .update(updateData)
-          .eq("id", topup.id)
-          .in("status", ["pending", "success"]);
-        if (!updateError) break;
-        if (updateError.code !== "42703") throw updateError;
-        const missingColumn =
-          /column\s+"?(\w+)"?\s+of relation\s+"?wallet_topups"?\s+does not exist/i.exec(
-            updateError.message || "",
-          )?.[1];
-        if (!missingColumn || !optionalTopupColumns.has(missingColumn)) {
-          throw updateError;
+        let subAgentBalance: number | null = null;
+        if (payerRole === "sub_agent") {
+          const mirrorCredit = await creditWallet(
+            payerId,
+            `:sub:${payerId}`,
+            "sub_agent_wallet_topup_sub_agent_side",
+          );
+          subAgentBalance = Number(mirrorCredit.balance || 0);
         }
-        delete updateData[missingColumn];
-      }
 
-      return json({
-        success: true,
-        credited_amount: netAmount,
-        new_balance: Number(ownerCredit.balance || 0),
-        sub_agent_balance: subAgentBalance,
-        already_processed: Boolean(ownerCredit.already_processed),
-      });
+        const updateData: Record<string, unknown> = {
+          status: "success",
+          paystack_transaction_id: paystackTransactionId,
+          paystack_transaction_status: paystackResult.data.status,
+          paid_at: paystackResult.data.paid_at || new Date().toISOString(),
+          channel: paystackResult.data.channel || null,
+          bank: paystackResult.data.authorization?.bank || null,
+          gross_amount: expectedGross,
+          charge_amount:
+            recordedChargeAmount === null
+              ? Number((expectedGross - netAmount).toFixed(2))
+              : recordedChargeAmount,
+          funder_user_id: payerId,
+          wallet_owner_id: walletOwnerId,
+        };
+        if (recordedChargePercent !== null) {
+          updateData.charge_percent = recordedChargePercent;
+        }
+        const optionalTopupColumns = new Set([
+          "gross_amount",
+          "charge_amount",
+          "charge_percent",
+          "funder_user_id",
+          "wallet_owner_id",
+        ]);
+        let updatedTopup = false;
+        for (;;) {
+          const { data: updated, error: updateError } = await admin
+            .from("wallet_topups")
+            .update(updateData)
+            .eq("id", topup.id)
+            .eq("status", claimedPending ? "processing" : "success")
+            .select("id")
+            .maybeSingle();
+          if (!updateError) {
+            if (!updated) {
+              throw new Error(
+                "Top-up status changed before it could be confirmed",
+              );
+            }
+            updatedTopup = true;
+            break;
+          }
+          if (updateError.code !== "42703") throw updateError;
+          const missingColumn =
+            /column\s+"?(\w+)"?\s+of relation\s+"?wallet_topups"?\s+does not exist/i.exec(
+              updateError.message || "",
+            )?.[1];
+          if (!missingColumn || !optionalTopupColumns.has(missingColumn)) {
+            throw updateError;
+          }
+          delete updateData[missingColumn];
+        }
+
+        if (!updatedTopup) throw new Error("Top-up could not be confirmed");
+        return json({
+          success: true,
+          credited_amount: netAmount,
+          new_balance: Number(ownerCredit.balance || 0),
+          sub_agent_balance: subAgentBalance,
+          already_processed: Boolean(ownerCredit.already_processed),
+        });
+      } catch (error) {
+        if (claimedPending) {
+          const { error: releaseError } = await admin
+            .from("wallet_topups")
+            .update({ status: "pending" })
+            .eq("id", topup.id)
+            .eq("status", "processing");
+          if (releaseError) {
+            console.error(
+              "[verifyPendingWalletTopup] Could not release top-up claim:",
+              releaseError.message,
+            );
+          }
+        }
+        throw error;
+      }
     }
 
     if (action === "initializeSuperAgentWallet") {
