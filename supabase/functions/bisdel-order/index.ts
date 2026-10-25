@@ -113,19 +113,24 @@ Deno.serve(async (req) => {
           })
           .eq("id", order.id);
         if (repairError) throw repairError;
+      }
 
-        const paymentReference = String(order.payment_reference || "").trim();
-        if (paymentReference && previousProviderStatus) {
-          const { error: transactionError } = await admin
-            .from("payment_transactions")
-            .update({ bisdel_order_status: previousProviderStatus })
-            .eq("payment_reference", paymentReference);
-          if (transactionError) {
-            console.warn(
-              "[Bisdel order] Could not repair payment transaction status:",
-              transactionError.message,
-            );
-          }
+      const paymentReference = String(order.payment_reference || "").trim();
+      if (previouslyAccepted && paymentReference) {
+        const { error: transactionError } = await admin
+          .from("payment_transactions")
+          .update({
+            status: repairedStatus,
+            ...(previousProviderStatus
+              ? { bisdel_order_status: previousProviderStatus }
+              : {}),
+          })
+          .eq("payment_reference", paymentReference);
+        if (transactionError) {
+          console.warn(
+            "[Bisdel order] Could not repair payment transaction status:",
+            transactionError.message,
+          );
         }
       }
 
@@ -312,6 +317,24 @@ Deno.serve(async (req) => {
           saveAcceptedResponseError.message,
         );
       }
+      const paymentReference = String(order.payment_reference || "").trim();
+      if (paymentReference) {
+        const { error: transactionError } = await admin
+          .from("payment_transactions")
+          .update({
+            status: "processing",
+            ...(providerStatus ? { bisdel_order_status: providerStatus } : {}),
+            jehuca_response: providerData,
+            provider_name: "bisdel",
+          })
+          .eq("payment_reference", paymentReference);
+        if (transactionError) {
+          console.warn(
+            "[Bisdel order] Could not update payment transaction:",
+            transactionError.message,
+          );
+        }
+      }
       return respond({
         success: false,
         error: "Bisdel accepted the order but returned no order reference. Do not retry it.",
@@ -356,6 +379,7 @@ Deno.serve(async (req) => {
       const { error: transactionError } = await admin
         .from("payment_transactions")
         .update({
+          status: "processing",
           jehuca_order_id: orderReference,
           bisdel_order_status: storedProviderStatus,
           jehuca_response: providerData,

@@ -1094,6 +1094,7 @@ Deno.serve((req) =>
               const { error: txError } = await admin
                 .from("payment_transactions")
                 .update({
+                  status: "processing",
                   jehuca_order_id: jehucaOrderId,
                   [providerStatusColumn]: jehucaOrderStatus,
                   jehuca_response: providerData ?? null,
