@@ -695,9 +695,7 @@ export default function SuperAgentTransactionsScreen({ navigation }) {
                       ]}
                     >
                       <Text style={styles.txStatusText}>
-                        {String(
-                          tx.jehuca_order_status || tx.status || "unknown",
-                        ).toUpperCase()}
+                        {String(tx.status || "unknown").toUpperCase()}
                       </Text>
                     </View>
                   </View>

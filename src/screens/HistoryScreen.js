@@ -25,6 +25,8 @@ import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import { fonts } from "../components/theme";
 import {
   formatOrderStatusLabel,
+  getProviderOrderStatus,
+  getProviderOrderStatusColumn,
   isRealStatus,
   resolveOrderStatus,
 } from "../lib/orderStatus";
@@ -86,7 +88,7 @@ const formatGhcOptional = (value) => {
 };
 
 // Status selection is delegated to `lib/orderStatus.js`, which explains why a
-// plain `jehuca_order_status || status` chain is wrong: the corrupt boolean
+// plain `provider_order_status || status` chain is wrong: the corrupt boolean
 // string "true" is truthy, so it wins the `||` and then fails the real-status
 // test, rendering "Unknown" for an order whose real internal status was sitting
 // unread in the very next field.
@@ -106,7 +108,7 @@ const warnProviderOrderMissingOnce = (orderId) => {
   }
   warnedMissingProviderOrders.add(orderId);
   console.warn(
-    "Jehucal status request failed: Not Found 404 for provider order",
+    "Provider status request failed: Not Found 404 for order",
     orderId,
     "- the provider only retains its 10 most recent orders, so this status is unrecoverable.",
   );
@@ -221,7 +223,7 @@ const refreshProviderStatuses = async (orders, table) => {
   // gets one row per order.
   const needsRefresh = rows.filter((order) => {
     if (!order.jehuca_order_id) return false;
-    const providerStatus = String(order.jehuca_order_status || "")
+    const providerStatus = String(getProviderOrderStatus(order) || "")
       .trim()
       .toLowerCase();
     if (settled.has(providerStatus)) return false;
@@ -272,7 +274,7 @@ const refreshProviderStatuses = async (orders, table) => {
       );
     }
   } catch (error) {
-    console.warn("Unable to refresh Jehuca status:", error);
+    console.warn("Unable to refresh provider status:", error);
     return rows;
   }
 
@@ -290,7 +292,7 @@ const refreshProviderStatuses = async (orders, table) => {
         warnProviderOrderMissingOnce(result.orderId);
       } else {
         console.warn(
-          "Jehucal status request failed:",
+          "Provider status request failed:",
           result.error,
           result.providerStatusCode,
         );
@@ -311,14 +313,12 @@ const refreshProviderStatuses = async (orders, table) => {
 
   // THE WRITE-BACK FALLBACK.
   //
-  // `synced === true` means the deployed function already wrote the status
-  // server-side, to every table carrying this provider id. Writing again from
-  // here is redundant - and keeping two writers is how the field drifted from
-  // the provider in the first place. `synced` undefined means the response
-  // came from the OLD build, which has no server-side sync, so the write-back
-  // below is the only persistence path there.
+  // The deployed function reports which provider-specific column it synced.
+  // Older builds do not report that column, so the client writes the status
+  // when the server did not sync the correct field.
   const writeBack = async (order) => {
     const providerName = String(order.provider_name || "jehuca").toLowerCase();
+    const statusColumn = getProviderOrderStatusColumn(providerName);
     const statusKey = `${providerName}::${String(order.jehuca_order_id)}`;
     const providerStatus = statusById.get(statusKey);
     if (!providerStatus) return order;
@@ -329,10 +329,13 @@ const refreshProviderStatuses = async (orders, table) => {
         String(r?.orderId) === String(order.jehuca_order_id),
     );
 
-    if (result?.synced !== true && providerStatus !== order.jehuca_order_status) {
+    const serverSyncedThisColumn =
+      result?.synced === true &&
+      result?.providerStatusColumn === statusColumn;
+    if (!serverSyncedThisColumn && providerStatus !== order[statusColumn]) {
       const { error: writeError } = await supabase
         .from(table)
-        .update({ jehuca_order_status: providerStatus })
+        .update({ [statusColumn]: providerStatus })
         .eq("id", order.id);
       if (writeError) {
         // This fallback write needs the caller to pass RLS on the row. It
@@ -349,7 +352,7 @@ const refreshProviderStatuses = async (orders, table) => {
       }
     }
 
-    return { ...order, jehuca_order_status: providerStatus };
+    return { ...order, [statusColumn]: providerStatus };
   };
 
   const refreshed = await Promise.all(needsRefresh.map(writeBack));
@@ -378,6 +381,7 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
   const results = await Promise.all(
     (orders || []).map(async (order) => {
       if (!order.jehuca_order_id) return order;
+      const statusColumn = getProviderOrderStatusColumn(order.provider_name);
 
       try {
         const { data, error } = await supabase.functions.invoke(
@@ -410,7 +414,7 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
                   ? fallback.data.status
                   : null);
               if (!isRealStatus(fallbackStatus)) return order;
-              return { ...order, jehuca_order_status: fallbackStatus };
+              return { ...order, [statusColumn]: fallbackStatus };
             }
           }
           return order;
@@ -420,7 +424,7 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
             warnProviderOrderMissingOnce(order.jehuca_order_id);
           } else {
             console.warn(
-              "Jehucal status request failed:",
+              "Provider status request failed:",
               data.error,
               data.providerStatusCode,
             );
@@ -437,14 +441,17 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
 
         if (!isRealStatus(providerStatus)) return order;
 
-        if (data?.synced === true) {
-          return { ...order, jehuca_order_status: providerStatus };
+        const serverSyncedThisColumn =
+          data?.synced === true &&
+          data?.providerStatusColumn === statusColumn;
+        if (serverSyncedThisColumn) {
+          return { ...order, [statusColumn]: providerStatus };
         }
 
-        if (providerStatus !== order.jehuca_order_status) {
+        if (providerStatus !== order[statusColumn]) {
           const { error: writeError } = await supabase
             .from(table)
-            .update({ jehuca_order_status: providerStatus })
+            .update({ [statusColumn]: providerStatus })
             .eq("id", order.id);
           if (writeError) {
             console.warn(
@@ -456,9 +463,9 @@ const refreshProviderStatusesOneByOne = async (orders, table) => {
           }
         }
 
-        return { ...order, jehuca_order_status: providerStatus };
+        return { ...order, [statusColumn]: providerStatus };
       } catch (error) {
-        console.warn("Unable to refresh Jehuca status:", error);
+        console.warn("Unable to refresh provider status:", error);
         return order;
       }
     }),
@@ -1111,7 +1118,8 @@ export default function HistoryScreen({ navigation }) {
                   if (!refreshed) return transaction;
                   return {
                     ...transaction,
-                    jehuca_order_status: refreshed.jehuca_order_status,
+                    [getProviderOrderStatusColumn(transaction.provider_name)]:
+                      getProviderOrderStatus(refreshed),
                   };
                 }),
               );
@@ -1373,9 +1381,9 @@ export default function HistoryScreen({ navigation }) {
                               ? transaction.status.trim()
                               : null;
                                           const cardProviderStatus = isRealStatus(
-                              transaction.jehuca_order_status,
+                              getProviderOrderStatus(transaction),
                                           )
-                              ? transaction.jehuca_order_status.trim()
+                              ? getProviderOrderStatus(transaction).trim()
                               : null;
               // Resolved once and reused for the pill's colour AND its label,
               // so the two can never come from different fields.

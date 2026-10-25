@@ -8,16 +8,16 @@
 //                           completed, delivered, refunded, failed, expired,
 //                           cancelled) plus the two lifecycle states the app
 //                           owns itself: "held" and "expired".
-//   `jehuca_order_status` - the PROVIDER's state, mirrored. Can be blank, and
-//                           on rows written before the dispatch fix it is the
-//                           literal string "true" (the provider's success
-//                           BOOLEAN, not a status).
+//   `<provider>_order_status` - the PROVIDER's state, mirrored separately for
+//                               Jehuca and Bisdel. It can be blank, and older
+//                               rows may contain the provider's success
+//                               BOOLEAN instead of an order status.
 //
 // The bug this module exists to prevent
 // --------------------------------------
 // Both screens used to resolve the displayed status with a plain `||`:
 //
-//     jehuca_order_status || status
+//     provider_order_status || status
 //
 // `||` only skips a FALSY value, and the string "true" is truthy. So a row
 // carrying the corrupt boolean would select "true", fail the real-status test,
@@ -50,6 +50,14 @@ export const isRealStatus = (status) => {
   return !/^(true|false)$/i.test(trimmed);
 };
 
+export const getProviderOrderStatusColumn = (providerName) =>
+  String(providerName || "jehuca").trim().toLowerCase() === "bisdel"
+    ? "bisdel_order_status"
+    : "jehuca_order_status";
+
+export const getProviderOrderStatus = (order) =>
+  order?.[getProviderOrderStatusColumn(order?.provider_name)];
+
 /**
  * Picks the status to show for an order row.
  *
@@ -65,7 +73,7 @@ export const resolveOrderStatus = (order) => {
   const internal = order?.status;
   if (isRealStatus(internal)) return internal.trim();
 
-  const provider = order?.jehuca_order_status;
+  const provider = getProviderOrderStatus(order);
   if (isRealStatus(provider)) return provider.trim();
 
   return null;

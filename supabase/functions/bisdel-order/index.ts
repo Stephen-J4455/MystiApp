@@ -76,14 +76,67 @@ Deno.serve(async (req) => {
       return respond({ error: "This order was cancelled" }, 409);
     }
     if (order.jehuca_order_id) {
+      const previousProviderOrder = order.jehuca_response?.data || {};
+      const rawPreviousStatus =
+        previousProviderOrder.status ??
+        previousProviderOrder.order_status ??
+        order.bisdel_order_status;
+      const previousProviderStatus =
+        typeof rawPreviousStatus === "string" &&
+          rawPreviousStatus.trim() &&
+          !/^(true|false)$/i.test(rawPreviousStatus.trim())
+          ? rawPreviousStatus.trim()
+          : null;
+      const previouslyAccepted = order.jehuca_response?.success === true;
+      const repairedStatus =
+        previouslyAccepted &&
+          (order.status === "pending" ||
+            (previousProviderStatus && order.status === previousProviderStatus))
+          ? "processing"
+          : order.status;
+
+      if (
+        previouslyAccepted &&
+        (order.status !== repairedStatus ||
+          (previousProviderStatus &&
+            order.bisdel_order_status !== previousProviderStatus))
+      ) {
+        const { error: repairError } = await admin
+          .from(table)
+          .update({
+            status: repairedStatus,
+            ...(previousProviderStatus
+              ? { bisdel_order_status: previousProviderStatus }
+              : {}),
+            provider_deferred_at: null,
+            provider_deferred_reason: null,
+          })
+          .eq("id", order.id);
+        if (repairError) throw repairError;
+
+        const paymentReference = String(order.payment_reference || "").trim();
+        if (paymentReference && previousProviderStatus) {
+          const { error: transactionError } = await admin
+            .from("payment_transactions")
+            .update({ bisdel_order_status: previousProviderStatus })
+            .eq("payment_reference", paymentReference);
+          if (transactionError) {
+            console.warn(
+              "[Bisdel order] Could not repair payment transaction status:",
+              transactionError.message,
+            );
+          }
+        }
+      }
+
       return respond({
         success: true,
         already_dispatched: true,
         provider_name: "bisdel",
         provider_order_id: order.provider_order_id || null,
         order_reference: order.jehuca_order_id,
-        status: order.status,
-        jehuca_order_status: order.jehuca_order_status || null,
+        status: repairedStatus,
+        bisdel_order_status: previousProviderStatus,
       });
     }
     if (order.jehuca_response?.success === true) {
@@ -182,6 +235,15 @@ Deno.serve(async (req) => {
     }
 
     const providerData = await providerResponse.json().catch(() => null);
+    const providerOrder = providerData?.data || {};
+    const rawProviderStatus =
+      providerOrder.status ?? providerOrder.order_status;
+    const providerStatus =
+      typeof rawProviderStatus === "string" &&
+        rawProviderStatus.trim() &&
+        !/^(true|false)$/i.test(rawProviderStatus.trim())
+        ? rawProviderStatus.trim()
+        : null;
     const accepted =
       providerResponse.ok &&
       providerData?.success === true &&
@@ -193,6 +255,9 @@ Deno.serve(async (req) => {
           status: "pending",
           provider_deferred_at: new Date().toISOString(),
           provider_deferred_reason: "provider_rejected",
+          ...(providerStatus
+            ? { bisdel_order_status: providerStatus }
+            : {}),
           jehuca_response: providerData ?? null,
           provider_dispatch_attempts:
             Number(order.provider_dispatch_attempts || 0) + 1,
@@ -210,6 +275,7 @@ Deno.serve(async (req) => {
         deferred: true,
         reason: "provider_rejected",
         provider_status: providerResponse.status,
+        bisdel_order_status: providerStatus,
         details: {
           code: providerData?.code,
           error: providerData?.error || providerData?.message,
@@ -218,7 +284,6 @@ Deno.serve(async (req) => {
       });
     }
 
-    const providerOrder = providerData?.data || {};
     const providerOrderId = providerOrder.order_id;
     const orderReference = String(
       providerOrder.order_reference || providerOrderId || "",
@@ -231,6 +296,9 @@ Deno.serve(async (req) => {
         .from(table)
         .update({
           status: "processing",
+          ...(providerStatus
+            ? { bisdel_order_status: providerStatus }
+            : {}),
           jehuca_response: providerData,
           provider_deferred_at: null,
           provider_deferred_reason: "provider_response_missing_order_id",
@@ -251,7 +319,7 @@ Deno.serve(async (req) => {
       }, 502);
     }
 
-    const providerStatus = String(providerOrder.status || "pending");
+    const storedProviderStatus = providerStatus || "pending";
     const { error: orderUpdateError } = await admin
       .from(table)
       .update({
@@ -259,7 +327,7 @@ Deno.serve(async (req) => {
         // Mysti's paid order in processing once the API accepts the request.
         status: "processing",
         jehuca_order_id: orderReference,
-        jehuca_order_status: providerStatus,
+        bisdel_order_status: storedProviderStatus,
         jehuca_response: providerData,
         provider_order_id: providerOrderId == null
           ? null
@@ -289,7 +357,7 @@ Deno.serve(async (req) => {
         .from("payment_transactions")
         .update({
           jehuca_order_id: orderReference,
-          jehuca_order_status: providerStatus,
+          bisdel_order_status: storedProviderStatus,
           jehuca_response: providerData,
           provider_name: "bisdel",
           provider_order_id: providerOrderId == null
@@ -313,7 +381,7 @@ Deno.serve(async (req) => {
       provider_order_id: providerOrderId ?? null,
       order_reference: orderReference,
       status: "processing",
-      jehuca_order_status: providerStatus,
+      bisdel_order_status: storedProviderStatus,
     });
   } catch (error) {
     console.error(

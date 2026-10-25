@@ -232,24 +232,28 @@ const syncProviderStatus = async ({
   rows: number;
   forbidden: boolean;
 }> => {
+  const providerStatusColumn = providerName === "bisdel"
+    ? "bisdel_order_status"
+    : "jehuca_order_status";
+
   // Read via the service-role client: the caller's RLS visibility must not
   // be able to hide an order from the ownership check.
   const [agentRows, orderRows, paymentRows] = await Promise.all([
     admin
       .from("agent_orders")
-      .select("id, agent_id, jehuca_order_status")
+      .select(`id, agent_id, ${providerStatusColumn}`)
       .eq("jehuca_order_id", orderId)
       .eq("provider_name", providerName),
       // Provider selection is snapshotted on the order, so status remains
       // routable after the administrator switches the active catalog.
     admin
       .from("orders")
-      .select("id, user_id, jehuca_order_status")
+      .select(`id, user_id, ${providerStatusColumn}`)
       .eq("jehuca_order_id", orderId)
       .eq("provider_name", providerName),
     admin
       .from("payment_transactions")
-      .select("id, user_id, jehuca_order_status")
+      .select(`id, user_id, ${providerStatusColumn}`)
       .eq("jehuca_order_id", orderId)
       .eq("provider_name", providerName),
   ]);
@@ -292,13 +296,13 @@ const syncProviderStatus = async ({
   }
 
   const staleAgent = agentMatches.filter(
-    (r) => r.jehuca_order_status !== providerOrderStatus,
+    (r) => r[providerStatusColumn] !== providerOrderStatus,
   );
   const staleOrder = orderMatches.filter(
-    (r) => r.jehuca_order_status !== providerOrderStatus,
+    (r) => r[providerStatusColumn] !== providerOrderStatus,
   );
   const stalePayment = paymentMatches.filter(
-    (r) => r.jehuca_order_status !== providerOrderStatus,
+    (r) => r[providerStatusColumn] !== providerOrderStatus,
   );
 
   if (
@@ -310,7 +314,7 @@ const syncProviderStatus = async ({
   }
 
   const patch: Record<string, unknown> = {
-    jehuca_order_status: providerOrderStatus,
+    [providerStatusColumn]: providerOrderStatus,
     provider_name: providerName,
     // The scrubbed payload, NOT the raw provider body: `jehuca_response` is
     // read by the admin app, so storing the raw response would write the
@@ -410,6 +414,9 @@ const syncProviderStatusesBatch = async ({
   statusByOrderId: Map<string, string | null>;
   responseByOrderId: Map<string, unknown>;
 }): Promise<Map<string, { updated: boolean; rows: number; forbidden: boolean }>> => {
+  const providerStatusColumn = providerName === "bisdel"
+    ? "bisdel_order_status"
+    : "jehuca_order_status";
   const outcomes = new Map<
     string,
     { updated: boolean; rows: number; forbidden: boolean }
@@ -421,17 +428,17 @@ const syncProviderStatusesBatch = async ({
   const [agentRows, orderRows, paymentRows] = await Promise.all([
     admin
       .from("agent_orders")
-      .select("id, agent_id, jehuca_order_id, jehuca_order_status")
+      .select(`id, agent_id, jehuca_order_id, ${providerStatusColumn}`)
       .in("jehuca_order_id", orderIds)
       .eq("provider_name", providerName),
     admin
       .from("orders")
-      .select("id, user_id, jehuca_order_id, jehuca_order_status")
+      .select(`id, user_id, jehuca_order_id, ${providerStatusColumn}`)
       .in("jehuca_order_id", orderIds)
       .eq("provider_name", providerName),
     admin
       .from("payment_transactions")
-      .select("id, user_id, jehuca_order_id, jehuca_order_status")
+      .select(`id, user_id, jehuca_order_id, ${providerStatusColumn}`)
       .in("jehuca_order_id", orderIds)
       .eq("provider_name", providerName),
   ]);
@@ -469,7 +476,7 @@ const syncProviderStatusesBatch = async ({
     group(key).agent.push({
       id: row.id as number,
       ownerId: (row.agent_id as string | null) ?? null,
-      status: (row.jehuca_order_status as string | null) ?? null,
+      status: (row[providerStatusColumn] as string | null) ?? null,
     });
   });
   (orderRows.data ?? []).forEach((row: Record<string, unknown>) => {
@@ -477,7 +484,7 @@ const syncProviderStatusesBatch = async ({
     group(key).order.push({
       id: row.id as number,
       ownerId: (row.user_id as string | null) ?? null,
-      status: (row.jehuca_order_status as string | null) ?? null,
+      status: (row[providerStatusColumn] as string | null) ?? null,
     });
   });
   (paymentRows.data ?? []).forEach((row: Record<string, unknown>) => {
@@ -485,7 +492,7 @@ const syncProviderStatusesBatch = async ({
     group(key).payment.push({
       id: row.id as number,
       ownerId: (row.user_id as string | null) ?? null,
-      status: (row.jehuca_order_status as string | null) ?? null,
+      status: (row[providerStatusColumn] as string | null) ?? null,
     });
   });
 
@@ -537,7 +544,7 @@ const syncProviderStatusesBatch = async ({
     }
 
     const patch: Record<string, unknown> = {
-      jehuca_order_status: providerOrderStatus,
+      [providerStatusColumn]: providerOrderStatus,
       provider_name: providerName,
       // The scrubbed payload, NOT the raw provider body: `jehuca_response` is
       // read by the admin app, so storing the raw response would write the
@@ -952,6 +959,7 @@ Deno.serve(async (req) => {
           orderId,
           success: !outcome.forbidden,
           forbidden: outcome.forbidden,
+          providerStatusColumn,
           providerOrderStatus,
           orderStatus: providerOrderStatus,
           synced: outcome.updated,
@@ -1094,7 +1102,7 @@ Deno.serve(async (req) => {
     // ---------------------------------------------------------------------
     // PERSIST TO THE DATABASE
     // ---------------------------------------------------------------------
-    // Previously the ONLY writer of `jehuca_order_status` was the client, in
+    // Previously the ONLY writer of provider status was the client, in
     // HistoryScreen, which meant the database only learned a status when a
     // user happened to open that screen - and admin reports, super-agent
     // views and any other consumer read whatever stale value was last
@@ -1133,6 +1141,7 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({
         ...scrubProviderPayload(data),
+        providerStatusColumn,
         providerOrderStatus,
         orderStatus: providerOrderStatus,
         // Echo what was written so the client can update its local row

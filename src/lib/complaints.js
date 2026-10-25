@@ -1,4 +1,5 @@
 import { SUPPORT_WHATSAPP, buildWhatsAppLink, openWhatsApp } from "./whatsapp";
+import { getProviderOrderStatus } from "./orderStatus";
 
 export const COMPLAINT_REASONS = [
   { id: "not_delivered", label: "Data not delivered" },
@@ -83,8 +84,9 @@ export const buildComplaintMessage = (order, reasonId, extra) => {
   lines.push(`Placed: ${formatWhen(order?.created_at)}`);
 
   if (order?.status) lines.push(`Our status: ${order.status}`);
-  if (order?.jehuca_order_status) {
-    lines.push(`Provider status: ${order.jehuca_order_status}`);
+  const providerStatus = getProviderOrderStatus(order);
+  if (providerStatus) {
+    lines.push(`Provider status: ${providerStatus}`);
   }
   if (order?.jehuca_order_id)
     lines.push(`Provider order: ${order.jehuca_order_id}`);

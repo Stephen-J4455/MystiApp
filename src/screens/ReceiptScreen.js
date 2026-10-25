@@ -183,7 +183,8 @@ export default function ReceiptScreen({ navigation, route }) {
     }
   };
 
-  // A card tap passes a History row, which carries both status columns. The
+  // A card tap passes a History row, which carries the internal and
+  // provider-specific status columns. The
   // shared resolver picks our internal lifecycle status when it is real and
   // falls back to provider status otherwise - NOT a plain `||` chain, which would let the
   // corrupt boolean string "true" win and then render "Unknown" for an order we
@@ -287,7 +288,7 @@ export default function ReceiptScreen({ navigation, route }) {
     //   `status`              OUR internal state. Written at creation, then by
     //                         dispatch and the 24h expiry sweep. The app's own
     //                         record of what it decided.
-    //   `jehuca_order_status` the PROVIDER's state, mirrored. Authoritative on
+    //   provider-specific order status - the PROVIDER's state, mirrored. Authoritative on
     //                         whether data actually landed, and often newer than
     //                         ours.
     //
@@ -300,7 +301,7 @@ export default function ReceiptScreen({ navigation, route }) {
     // status", with a "Sources differ" flag and a note explaining which one to
     // believe. It was built for a support audience - on a support ticket ("I
     // paid and nothing arrived") that gap is the whole question - but this
-    // screen is the CUSTOMER's receipt. A customer cannot call Jehucal, and
+    // screen is the CUSTOMER's receipt. A customer cannot call the provider, and
     // cannot tell which of the two is "right"; showing them that two systems
     // disagree about their own order makes a settled purchase look undecided.
     //
@@ -424,7 +425,7 @@ export default function ReceiptScreen({ navigation, route }) {
                     plus a "Sources differ" flag and a note explaining which one to
                     believe. That was built for a support audience, but this screen is
                     the CUSTOMER's receipt, and the distinction is internal
-                    information: a customer cannot call Jehucal, and showing them
+                    information: a customer cannot call the provider, and showing them
                     that two systems disagree about their own order makes a settled
                     purchase look undecided.
 

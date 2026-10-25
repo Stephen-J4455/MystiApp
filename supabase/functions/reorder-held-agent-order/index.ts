@@ -686,6 +686,9 @@ Deno.serve(async (req) => {
             providerData?.status ||
             "accepted",
         );
+    const providerStatusColumn = providerName === "bisdel"
+      ? "bisdel_order_status"
+      : "jehuca_order_status";
     const { error: orderUpdateError } = await admin
       .from("agent_orders")
       .update({
@@ -699,7 +702,7 @@ Deno.serve(async (req) => {
         status: "processing",
         transaction_status: "success",
         jehuca_order_id: providerOrderId,
-        jehuca_order_status: providerStatus,
+        [providerStatusColumn]: providerStatus,
         jehuca_response: providerData,
         provider_name: providerName,
         provider_order_id: rawProviderOrderId == null
@@ -717,7 +720,7 @@ Deno.serve(async (req) => {
       .update({
         status: "success",
         jehuca_order_id: providerOrderId,
-        jehuca_order_status: providerStatus,
+        [providerStatusColumn]: providerStatus,
         jehuca_response: providerData,
         provider_name: providerName,
         provider_order_id: rawProviderOrderId == null

@@ -694,6 +694,9 @@ Deno.serve((req) =>
       }
 
       const providerName = String(order.provider_name || "jehuca").toLowerCase();
+      const providerStatusColumn = providerName === "bisdel"
+        ? "bisdel_order_status"
+        : "jehuca_order_status";
       if (providerName !== "jehuca" && providerName !== "bisdel") {
         return respond({ error: "Order has an unsupported data provider" }, 500);
       }
@@ -728,7 +731,7 @@ Deno.serve((req) =>
           provider_name: providerName,
           provider_order_id: order.provider_order_id || null,
           jehuca_order_id: order.jehuca_order_id,
-          jehuca_order_status: order.jehuca_order_status || null,
+          [providerStatusColumn]: order[providerStatusColumn] || null,
         });
       }
 
@@ -1041,7 +1044,7 @@ Deno.serve((req) =>
                 status: "processing",
                 ...settlementPatch,
                 jehuca_order_id: jehucaOrderId,
-                jehuca_order_status: jehucaOrderStatus,
+                [providerStatusColumn]: jehucaOrderStatus,
                 jehuca_response: providerData ?? null,
                 provider_name: providerName,
                 provider_order_id: providerOrderId == null
@@ -1092,7 +1095,7 @@ Deno.serve((req) =>
                 .from("payment_transactions")
                 .update({
                   jehuca_order_id: jehucaOrderId,
-                  jehuca_order_status: jehucaOrderStatus,
+                  [providerStatusColumn]: jehucaOrderStatus,
                   jehuca_response: providerData ?? null,
                   provider_name: providerName,
                   provider_order_id: providerOrderId == null
@@ -1120,7 +1123,7 @@ Deno.serve((req) =>
         provider_name: providerName,
         provider_order_id: providerOrderId ?? null,
         jehuca_order_id: jehucaOrderId,
-        jehuca_order_status: jehucaOrderStatus,
+        [providerStatusColumn]: jehucaOrderStatus,
       });
     } catch (error) {
       console.error(

@@ -3138,9 +3138,9 @@ export default function DataScreen({ navigation, route }) {
                         return;
                       }
 
-                      // No client-side write-back of jehuca_order_id here.
-                      // `dispatch-order` already persists jehuca_order_id,
-                      // jehuca_order_status and jehuca_response on the order
+                      // No client-side write-back of the provider order id here.
+                      // `dispatch-order` already persists the provider order id,
+                      // provider-specific status and response on the order
                       // row using the service role. Repeating it from the app
                       // was a silent no-op: these tables are RLS-scoped and the
                       // client only holds the anon key, so the update was
