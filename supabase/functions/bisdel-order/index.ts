@@ -75,6 +75,20 @@ Deno.serve(async (req) => {
     if (order.status === "cancelled") {
       return respond({ error: "This order was cancelled" }, 409);
     }
+    if (
+      !order.jehuca_order_id &&
+      order.provider_deferred_reason === "provider_response_missing_order_id"
+    ) {
+      return respond({
+        success: true,
+        already_dispatched: true,
+        needs_reconciliation: true,
+        provider_name: "bisdel",
+        status: order.status,
+        bisdel_order_status: order.bisdel_order_status || "pending",
+        error: "Bisdel accepted this order, but its reference is missing. Do not retry it.",
+      });
+    }
     if (order.jehuca_order_id) {
       const previousProviderOrder = order.jehuca_response?.data || {};
       const rawPreviousStatus =
@@ -239,20 +253,26 @@ Deno.serve(async (req) => {
       });
     }
 
-    const providerData = await providerResponse.json().catch(() => null);
-    const providerOrder = providerData?.data || {};
+    const providerResponseText = await providerResponse.text();
+    let providerData;
+    try {
+      providerData = JSON.parse(providerResponseText);
+    } catch {
+      providerData = { raw_response: providerResponseText };
+    }
+    const providerOrder =
+      providerData?.data || providerData?.payload || providerData?.order || {};
     const rawProviderStatus =
-      providerOrder.status ?? providerOrder.order_status;
+      providerOrder.status ??
+      providerOrder.order_status ??
+      providerData?.status;
     const providerStatus =
       typeof rawProviderStatus === "string" &&
         rawProviderStatus.trim() &&
         !/^(true|false)$/i.test(rawProviderStatus.trim())
         ? rawProviderStatus.trim()
         : null;
-    const accepted =
-      providerResponse.ok &&
-      providerData?.success === true &&
-      providerData?.data?.success !== false;
+    const accepted = providerResponse.ok;
     if (!accepted) {
       const { error: updateError } = await admin
         .from(table)
@@ -289,18 +309,26 @@ Deno.serve(async (req) => {
       });
     }
 
-    const providerOrderId = providerOrder.order_id;
+    const providerOrderId =
+      providerOrder.order_id ?? providerData?.order_id;
     const orderReference = String(
-      providerOrder.order_reference || providerOrderId || "",
+      providerOrder.order_reference ||
+        providerOrder.reference ||
+        providerData?.order_reference ||
+        providerData?.reference ||
+        providerOrderId ||
+        "",
     ).trim();
     if (!orderReference) {
       console.error("[Bisdel order] Accepted response is missing its order ID", {
         order_id: order.id,
       });
+      const storedProviderStatus = providerStatus || "pending";
       const { error: saveAcceptedResponseError } = await admin
         .from(table)
         .update({
           status: "processing",
+          bisdel_order_status: storedProviderStatus,
           jehuca_response: providerData,
           provider_deferred_at: null,
           provider_deferred_reason: "provider_response_missing_order_id",
@@ -313,16 +341,10 @@ Deno.serve(async (req) => {
           "[Bisdel order] Could not save accepted response:",
           saveAcceptedResponseError.message,
         );
-      }
-      const { error: providerStatusUpdateError } = await admin
-        .from(table)
-        .update({ bisdel_order_status: providerStatus || "pending" })
-        .eq("id", order.id);
-      if (providerStatusUpdateError) {
-        console.error(
-          "[Bisdel order] Could not save accepted provider status:",
-          providerStatusUpdateError.message,
-        );
+        return respond({
+          success: false,
+          error: "Bisdel accepted the order, but its status could not be saved. Do not retry it.",
+        }, 500);
       }
       const paymentReference = String(order.payment_reference || "").trim();
       if (paymentReference) {
@@ -330,7 +352,7 @@ Deno.serve(async (req) => {
           .from("payment_transactions")
           .update({
             status: "processing",
-            bisdel_order_status: providerStatus || "pending",
+            bisdel_order_status: storedProviderStatus,
             jehuca_response: providerData,
             provider_name: "bisdel",
           })
@@ -343,10 +365,16 @@ Deno.serve(async (req) => {
         }
       }
       return respond({
-        success: false,
-        error: "Bisdel accepted the order but returned no order reference. Do not retry it.",
-        provider_response: providerData,
-      }, 502);
+        success: true,
+        deferred: false,
+        already_dispatched: true,
+        needs_reconciliation: true,
+        provider_name: "bisdel",
+        provider_order_id: providerOrderId ?? null,
+        order_reference: null,
+        status: "processing",
+        bisdel_order_status: storedProviderStatus,
+      });
     }
 
     const storedProviderStatus = providerStatus || "pending";
@@ -354,6 +382,7 @@ Deno.serve(async (req) => {
       .from(table)
       .update({
         status: "processing",
+        bisdel_order_status: storedProviderStatus,
         jehuca_order_id: orderReference,
         jehuca_response: providerData,
         provider_order_id: providerOrderId == null
@@ -378,29 +407,13 @@ Deno.serve(async (req) => {
       }, 500);
     }
 
-    const { error: providerStatusUpdateError } = await admin
-      .from(table)
-      .update({ bisdel_order_status: storedProviderStatus })
-      .eq("id", order.id);
-    if (providerStatusUpdateError) {
-      console.error("[Bisdel order] Could not save accepted provider status", {
-        order_id: order.id,
-        order_reference: orderReference,
-        error: providerStatusUpdateError.message,
-      });
-      return respond({
-        error: "Bisdel accepted the order, but its provider status could not be saved.",
-        order_reference: orderReference,
-        status: "processing",
-      }, 500);
-    }
-
     const paymentReference = String(order.payment_reference || "").trim();
     if (paymentReference) {
       const { error: transactionError } = await admin
         .from("payment_transactions")
         .update({
           status: "processing",
+          bisdel_order_status: storedProviderStatus,
           jehuca_order_id: orderReference,
           jehuca_response: providerData,
           provider_name: "bisdel",
@@ -415,17 +428,6 @@ Deno.serve(async (req) => {
           "[Bisdel order] Could not update payment transaction:",
           transactionError.message,
         );
-      } else {
-        const { error: transactionStatusError } = await admin
-          .from("payment_transactions")
-          .update({ bisdel_order_status: storedProviderStatus })
-          .eq("payment_reference", paymentReference);
-        if (transactionStatusError) {
-          console.warn(
-            "[Bisdel order] Could not update payment transaction provider status:",
-            transactionStatusError.message,
-          );
-        }
       }
     }
 
