@@ -1049,36 +1049,55 @@ Deno.serve(async (req) => {
       if (!isAdmin)
         return json({ error: "Administrator access required" }, 403);
 
-      const limit = Math.min(200, Math.max(1, Number(body.limit) || 100));
-
       // Internal wallet movements (admin top-ups, order debits, refunds) and
       // Paystack-funded top-ups are stored in different tables, so merge them
       // into one chronological feed for the admin wallet screen.
-      const [ledgerResult, topupResult, walletResult] = await Promise.all([
-        admin
-          .from("super_agent_wallet_ledger")
-          .select(
-            "id, super_agent_id, amount, balance_before, balance_after, entry_type, reason, reference, order_id, metadata, created_at",
-          )
-          .order("created_at", { ascending: false })
-          .limit(limit),
-        admin
-          .from("wallet_topups")
-          .select(
-            "id, agent_id, amount, reference, status, channel, bank, paystack_transaction_id, paid_at, created_at",
-          )
-          .order("created_at", { ascending: false })
-          .limit(limit),
+      const walletPageSize = 1000;
+      const [ledgerRowsRaw, topupRowsRaw, walletResult] = await Promise.all([
+        (async () => {
+          const rows = [];
+          for (let offset = 0;; offset += walletPageSize) {
+            const { data, error } = await admin
+              .from("super_agent_wallet_ledger")
+              .select(
+                "id, super_agent_id, amount, balance_before, balance_after, entry_type, reason, reference, order_id, metadata, created_at",
+              )
+              .order("created_at", { ascending: false })
+              .order("id", { ascending: false })
+              .range(offset, offset + walletPageSize - 1);
+            if (error) throw error;
+            const page = data || [];
+            rows.push(...page);
+            if (page.length < walletPageSize) break;
+          }
+          return rows;
+        })(),
+        (async () => {
+          const rows = [];
+          for (let offset = 0;; offset += walletPageSize) {
+            const { data, error } = await admin
+              .from("wallet_topups")
+              .select(
+                "id, agent_id, amount, reference, status, channel, bank, paystack_transaction_id, paid_at, created_at",
+              )
+              .order("created_at", { ascending: false })
+              .order("id", { ascending: false })
+              .range(offset, offset + walletPageSize - 1);
+            if (error) throw error;
+            const page = data || [];
+            rows.push(...page);
+            if (page.length < walletPageSize) break;
+          }
+          return rows;
+        })(),
         admin
           .from("super_agent_wallets")
           .select("super_agent_id, balance, updated_at"),
       ]);
 
-      if (ledgerResult.error) throw ledgerResult.error;
-      if (topupResult.error) throw topupResult.error;
       if (walletResult.error) throw walletResult.error;
 
-      const ledgerRows = (ledgerResult.data || []).map((row) => ({
+      const ledgerRows = ledgerRowsRaw.map((row) => ({
         id: `ledger-${row.id}`,
         source: "wallet_ledger" as const,
         holderId: row.super_agent_id,
@@ -1110,7 +1129,7 @@ Deno.serve(async (req) => {
         }
       }
 
-      const topupEntries = (topupResult.data || [])
+      const topupEntries = topupRowsRaw
         .map((row) => ({
           id: `topup-${row.id}`,
           source: "wallet_topup" as const,
@@ -1226,7 +1245,7 @@ Deno.serve(async (req) => {
       }
 
       return json({
-        entries: entries.slice(0, limit).map((entry) => {
+        entries: entries.map((entry) => {
           const holder = holderDirectory[entry.holderId] || {
             name: "",
             email: "",
