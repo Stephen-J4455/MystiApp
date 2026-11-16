@@ -807,7 +807,7 @@ Deno.serve(async (req) => {
               type: String(provider_type || package_type || package_name || "")
                 .trim()
                 .toUpperCase(),
-              packageId: String(provider_package_id || offer_id || "").trim(),
+              packageId: String(provider_package_id || "").trim(),
               provider: activeProvider,
             });
 
@@ -1000,9 +1000,7 @@ Deno.serve(async (req) => {
       // wallet has already been debited - so the customer pays for nothing and
       // no error surfaces. The client sends these for the Paystack path; the
       // wallet path was the gap.
-      const walletProviderPackageId = String(
-        provider_package_id || offer_id || "",
-      ).trim();
+      const walletProviderPackageId = String(provider_package_id || "").trim();
       const walletProviderType = String(
         provider_type || package_type || package_name || "",
       )
@@ -1488,9 +1486,17 @@ Deno.serve(async (req) => {
     // Get offer details from the database.
     // Prefer the normal offers table for the current production schema,
     // but support a super-agent offer table if it has been added.
+    //
+    // IMPORTANT: `orders.offer_id` is a FK to `public.offers(id)`, so a
+    // normal-user order may only carry an offer_id that exists in `offers`.
+    // Offers found in `super_agent_offers` must NOT be stamped onto `orders`,
+    // or the insert violates the foreign key and the verified payment fails
+    // to create an order. Track which table the offer came from so we only
+    // persist a locally-valid offer_id.
     console.log("Fetching offer with ID:", offer_id);
     let offer = null;
     let offerError = null;
+    let offerSource: "offers" | "super_agent_offers" | null = null;
 
     const offerQueries = [
       { table: "offers", select: "*" },
@@ -1508,6 +1514,7 @@ Deno.serve(async (req) => {
         if (!error && data) {
           offer = data;
           offerError = null;
+          offerSource = query.table as "offers" | "super_agent_offers";
           break;
         }
 
@@ -1519,7 +1526,7 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log("Offer query result:", { offer, offerError });
+    console.log("Offer query result:", { offer, offerError, offerSource });
 
     if (!offer) {
       console.error("Offer not found:", offerError);
@@ -1568,17 +1575,29 @@ Deno.serve(async (req) => {
     const normalizedPackageSize = String(package_size || "")
       .trim()
       .replace(/\s+/g, " ");
-    const orderTitle =
-      offer?.title ||
-      (normalizedPackageSize
-        ? `${orderNetwork} - ${normalizedPackageSize} Data Bundle`
-        : package_name || `${orderNetwork} Data Bundle`);
-    const localOfferId = offer?.id ? Number(offer.id) : null;
+    // Use the client-sent package_size (what was actually purchased) rather
+    // than the offer's title, which may carry a stale or different size.
+    const orderTitle = normalizedPackageSize
+      ? `${orderNetwork} - ${normalizedPackageSize} Data Bundle`
+      : offer?.title || package_name || `${orderNetwork} Data Bundle`;
+    // `localOfferId` is the raw offer ID from whichever table it was found in.
+    // It is used by `agent_orders`, whose `offer_id` FK points to
+    // `agent_offers(id)` - a separate table from `offers`.
+    const localOfferId = offer ? Number(offer.id) : null;
+
+    // `orderOfferId` is only stamped on `orders`, whose `offer_id` FK points
+    // to `public.offers(id)`. An offer found only in `super_agent_offers`
+    // must not be stamped onto `orders`, or the insert violates the foreign
+    // key and the verified payment fails to create an order.
+    const orderOfferId =
+      offer && offerSource === "offers" ? Number(offer.id) : null;
 
     console.log("Resolved local offer reference:", {
       requestedOfferId: offer_id,
       localOfferId,
+      orderOfferId,
       hasLocalOffer: Boolean(offer),
+      offerSource,
     });
 
     // Ownership from the authoritative profile, never from user metadata.
@@ -1658,7 +1677,7 @@ Deno.serve(async (req) => {
           type: String(
             provider_type || package_type || package_name || "",
           ).trim().toUpperCase(),
-          packageId: String(provider_package_id || offer_id || "").trim(),
+          packageId: String(provider_package_id || "").trim(),
           provider: activeProvider,
         })
       : null;
@@ -1860,7 +1879,7 @@ Deno.serve(async (req) => {
       audience: costAudience,
       network: orderNetwork,
       type: normalizedProviderType,
-      packageId: provider_package_id || offer_id || null,
+      packageId: provider_package_id || null,
       // Last resort: an agent order's base_amount is already the provider cost,
       // and for a normal-user order the sale price bounds the cost.
       fallback: isAgentOrder ? null : Number(orderAmount || 0),
@@ -1896,7 +1915,7 @@ Deno.serve(async (req) => {
       const agentOrderData = {
         agent_id: user.id,
         offer_id: localOfferId,
-        provider_package_id: String(provider_package_id || offer_id),
+        provider_package_id: String(provider_package_id || ""),
         provider_type: normalizedProviderType,
         provider_size: normalizedProviderSize,
         provider_name: activeProvider,
@@ -1976,7 +1995,7 @@ Deno.serve(async (req) => {
         // Normal-user package IDs come from Jehuca, not public.offers.
         // Keep this nullable unless a matching local offer was found so the
         // orders foreign key is not given an unrelated provider package ID.
-        offer_id: localOfferId,
+        offer_id: orderOfferId,
         // Persisted so the order can be dispatched to Jehuca later, including
         // from the admin retry action when the provider account was unfunded
         // at purchase time. Without these the provider request is not
@@ -2248,3 +2267,4 @@ Deno.serve(async (req) => {
     );
   }
 });
+       

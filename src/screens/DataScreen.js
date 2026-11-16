@@ -275,7 +275,7 @@ export default function DataScreen({ navigation, route }) {
             reference: response.reference,
             user_id: user.id,
             offer_id: selectedBundle.id,
-            provider_package_id: selectedBundle.package_id || selectedBundle.id,
+            provider_package_id: selectedBundle.package_id || null,
             provider_name: selectedBundle.provider || "jehuca",
             package_name: selectedBundle.name,
             package_type: selectedBundle.type || null,
@@ -1423,7 +1423,7 @@ export default function DataScreen({ navigation, route }) {
           // type BEFORE it ever contacts the provider, so the wallet would be
           // debited for an order that can never be delivered. Mirrors the
           // Paystack path above.
-          provider_package_id: bundle.package_id || bundle.id,
+          provider_package_id: bundle.package_id || null,
           package_type: bundle.type || null,
           provider_type: bundle.type || null,
           provider_size: Number(
@@ -3027,8 +3027,7 @@ export default function DataScreen({ navigation, route }) {
                           reference: message.data.reference,
                           user_id: user.id,
                           offer_id: selectedBundle.id,
-                          provider_package_id:
-                            selectedBundle.package_id || selectedBundle.id,
+                          provider_package_id: selectedBundle.package_id || null,
                           provider_name: selectedBundle.provider || "jehuca",
                           package_name: selectedBundle.name,
                           package_type: selectedBundle.type || null,
