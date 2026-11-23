@@ -94,12 +94,18 @@ const withUniqueBundleCards = (bundles) => {
   return [...cards.values()];
 };
 
-const normalizePackageDescriptor = (value) =>
-  String(value || "").toUpperCase().replace(/[\s()-]+/g, "");
-
 const mapCustomerBundles = (pricingRows, catalog, network) => {
-  const packages = new Map();
-  const catalogForNetwork = catalog.filter((pkg) => normalizeUiNetwork(pkg.network) === network);
+  const packageKey = (provider, id) => JSON.stringify([provider, id]);
+  const catalogById = new Map();
+  for (const pkg of catalog) {
+    const provider = String(pkg.provider ?? "").trim().toLowerCase();
+    const id = String(pkg.id ?? "").trim();
+    if (provider && id && normalizeUiNetwork(pkg.network) === network) {
+      const key = packageKey(provider, id);
+      if (!catalogById.has(key)) catalogById.set(key, pkg);
+    }
+  }
+
   const rows = pricingRows
     .filter((row) => normalizeUiNetwork(row.network) === network)
     .sort((a, b) =>
@@ -107,56 +113,34 @@ const mapCustomerBundles = (pricingRows, catalog, network) => {
       Number(b.id || 0) - Number(a.id || 0)
     );
 
+  const bundles = [];
   for (const row of rows) {
-    const provider = String(row.provider || "jehuca").trim().toLowerCase();
-    const type = String(row.type || "").trim();
-    const descriptor = normalizePackageDescriptor(type);
-    const providerCatalog = catalogForNetwork.filter((pkg) =>
-      String(pkg.provider || "jehuca").trim().toLowerCase() === provider
-    );
-    const savedPackageId = String(row.package_id ?? "").trim();
-    const exact = savedPackageId
-      ? providerCatalog.find((pkg) => String(pkg.id) === savedPackageId)
-      : undefined;
-    const matchingPackages = exact ? [] : providerCatalog.filter((pkg) =>
-      normalizePackageDescriptor(getPackageDescriptor(pkg)) === descriptor ||
-      (row.size != null && Number(row.size) === Number(pkg.size) &&
-        normalizePackageDescriptor(pkg.type) === descriptor)
-    );
-    const catalogPackage = exact ?? (matchingPackages.length === 1 ? matchingPackages[0] : undefined);
-    const packageId = row.package_id || catalogPackage?.id || null;
-    const size = row.size ?? catalogPackage?.size ?? null;
-    const key = JSON.stringify([
-      provider,
-      network,
-      catalogPackage?.id != null || packageId != null
-        ? ["package", String(catalogPackage?.id ?? packageId)]
-        : ["descriptor", descriptor, size],
-    ]);
-    const staleId = Boolean(savedPackageId && !exact && catalogPackage);
-    const previous = packages.get(key);
-    // Prefer a checkout ID that matches the catalog, then the latest price.
-    if (previous && (!previous.staleId || staleId)) continue;
+    const provider = String(row.provider ?? "").trim().toLowerCase();
+    const packageId = String(row.package_id ?? "").trim();
+    const key = packageKey(provider, packageId);
+    const pkg = catalogById.get(key);
+    if (!pkg) continue;
+    catalogById.delete(key);
 
-    const uiNetwork = formatUiNetwork(row.network);
+    const type = getPackageDescriptor(pkg);
+    const uiNetwork = formatUiNetwork(pkg.network);
     const price = Number(row.base_price || 0);
-    packages.set(key, {
-      staleId,
-      bundle: {
-        pricingRowId: row.id,
-        id: packageId || `${row.network}-${type}`,
-        package_id: packageId,
-        provider,
-        network: uiNetwork,
-        type,
-        name: `${uiNetwork} — ${type} · ${getProviderDisplayName(provider)}`,
-        price: `Ghc ${price.toFixed(2)}`,
-        base_price: price,
-        dataSize: size === null ? formatBundleSizeFromDescriptor(type) : `${size} GB`,
-      },
+    bundles.push({
+      pricingRowId: row.id,
+      id: packageId,
+      package_id: packageId,
+      provider,
+      network: uiNetwork,
+      type,
+      category: pkg.category ?? null,
+      data_volume: pkg.data_volume ?? null,
+      name: `${uiNetwork} — ${type} · ${getProviderDisplayName(provider)}`,
+      price: `Ghc ${price.toFixed(2)}`,
+      base_price: price,
+      dataSize: pkg.size == null ? "" : `${pkg.size} GB`,
     });
   }
-  return [...packages.values()].map(({ bundle }) => bundle);
+  return bundles;
 };
 
 export default function DataScreen({ navigation, route }) {
@@ -1096,7 +1080,7 @@ export default function DataScreen({ navigation, route }) {
         await fetchPackagePricing(
           "normal_user_package_pricing",
           providers,
-          "id, provider, package_id, network, type, size, base_price, is_active, updated_at",
+          "id, provider, package_id, network, base_price, is_active, updated_at",
           profile?.id,
         );
 
