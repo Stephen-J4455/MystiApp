@@ -61,10 +61,44 @@ export const normalizeName = (value) => String(value ?? "").trim().toUpperCase()
 export const tierOf = (offer) => String(offer.tier_name || offer.default_tier_name || "").trim();
 
 const networkKey = (row) => JSON.stringify([providerOf(row), normalizeNetwork(row.network)]);
-const cardKey = (row, descriptor) => JSON.stringify([
-  networkKey(row),
-  normalizeName(descriptor),
-]);
+
+const currentPackageKey = (row, id) => {
+  const provider = String(row.provider ?? "").trim().toLowerCase();
+  const network = normalizeNetwork(row.network);
+  const packageId = String(id ?? "").trim();
+  return provider && network && packageId ? JSON.stringify([provider, network, packageId]) : null;
+};
+
+export const matchCurrentPackagePrices = (catalog, pricing) => {
+  const available = new Map();
+  for (const pkg of catalog) {
+    const key = currentPackageKey(pkg, pkg.id);
+    if (key && !available.has(key)) available.set(key, pkg);
+  }
+
+  const rows = pricing
+    .filter((row) => row.is_active !== false)
+    .sort((a, b) =>
+      (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0) ||
+      Number(b.id || 0) - Number(a.id || 0)
+    );
+  const matches = [];
+  for (const row of rows) {
+    const key = currentPackageKey(row, row.package_id);
+    const pkg = available.get(key);
+    if (!pkg) continue;
+    available.delete(key);
+    matches.push({ key, pkg, row });
+  }
+  return matches;
+};
+
+export const matchAgentPackagePrices = (catalog, pricing, enabledProviders) => {
+  const providers = new Set(enabledProviders ?? catalog.map(providerOf));
+  return matchCurrentPackagePrices(catalog, pricing).filter(
+    ({ pkg, row }) => providers.has(providerOf(pkg)) && usableBasePrice(row.base_price) !== null,
+  );
+};
 
 const matchesDescriptor = (value, pkg) => {
   const descriptor = normalizeName(value);
@@ -78,57 +112,44 @@ const matchesDescriptor = (value, pkg) => {
   );
 };
 
-// Resolve explicit package IDs before historical descriptors. A bare plan
-// type can refer to several sizes, so only accept it when it identifies one.
-const findPackageEntry = (entries, row, descriptor) => {
+// Existing published offers can omit the provider package ID. Match those
+// against eligible current cards only, and skip ambiguous descriptions.
+const findOfferCard = (entries, row) => {
   const candidates = entries.get(networkKey(row)) || [];
-  const id = normalizeName(row.package_id);
-  const value = normalizeName(descriptor);
-  const explicitId = id || value;
-  const explicit = explicitId && candidates.find(({ pkg }) => normalizeName(pkg.id) === explicitId);
+  const id = String(row.package_id ?? "").trim();
+  if (id) return candidates.find(({ pkg }) => String(pkg.id) === id);
+  const value = normalizeName(row.data_value);
+  const explicit = value && candidates.find(({ pkg }) => normalizeName(pkg.id) === value);
   if (explicit) return explicit;
-  const exact = candidates.find(({ pkg }) => matchesDescriptor(descriptor, pkg));
-  if (exact) return exact;
+  const exact = candidates.filter(({ pkg }) => matchesDescriptor(row.data_value, pkg));
+  if (exact.length) return exact.length === 1 ? exact[0] : undefined;
   const byType = candidates.filter(({ pkg }) => value && normalizeName(pkg.type) === value);
   return byType.length === 1 ? byType[0] : undefined;
 };
 
 export const buildPackageCards = (catalog, pricing, offers, enabledProviders) => {
   const entries = new Map();
-  const cards = new Map();
-  const providers = new Set(enabledProviders ?? catalog.map(providerOf));
-  for (const pkg of catalog) {
-    if (!providers.has(providerOf(pkg))) continue;
-    const key = networkKey(pkg);
-    const candidates = entries.get(key) || [];
-    const descriptor = getPackageDescriptor(pkg);
-    candidates.push({ pkg, descriptor, key: cardKey(pkg, descriptor), base: null });
-    entries.set(key, candidates);
-  }
-
-  for (const row of pricing) {
-    if (row.is_active === false) continue;
-    const entry = findPackageEntry(entries, row, row.type);
-    const base = usableBasePrice(row.base_price);
-    if (entry && base !== null) {
-      entry.base = base;
-      cards.set(entry.key, { ...entry, offers: [] });
-    }
+  const cards = [];
+  for (const { key, pkg, row } of matchAgentPackagePrices(catalog, pricing, enabledProviders)) {
+    const card = {
+      key,
+      pkg,
+      descriptor: getPackageDescriptor(pkg),
+      base: Number(row.base_price),
+      offers: [],
+    };
+    const groupKey = networkKey(pkg);
+    const candidates = entries.get(groupKey) || [];
+    candidates.push(card);
+    entries.set(groupKey, candidates);
+    cards.push(card);
   }
 
   for (const offer of offers) {
-    if (!providers.has(providerOf(offer))) continue;
-    const entry = findPackageEntry(entries, offer, offer.data_value);
-    const key = entry?.key ?? cardKey(offer, offer.data_value);
-    let card = cards.get(key);
-    if (!card) {
-      card = { key, pkg: entry?.pkg ?? offer, descriptor: entry?.descriptor ?? offer.data_value, base: null, offers: [] };
-      cards.set(key, card);
-    }
-    card.offers.push(offer);
+    findOfferCard(entries, offer)?.offers.push(offer);
   }
 
-  return [...cards.values()].sort((a, b) =>
+  return cards.sort((a, b) =>
     normalizeNetwork(a.pkg.network).localeCompare(normalizeNetwork(b.pkg.network)) ||
     (a.base ?? Infinity) - (b.base ?? Infinity) ||
     String(a.descriptor).localeCompare(String(b.descriptor))

@@ -1,5 +1,5 @@
 import { supabase } from "../lib/supabase.js";
-import { invokeEdgeFunction } from "../lib/edgeFunctions.js";
+import { getEdgeFunctionErrorMessage, invokeEdgeFunction } from "../lib/edgeFunctions.js";
 import { getEdgeFunctionName } from "../lib/env.js";
 
 // Client-side fallbacks use the authenticated anon client. Privileged work is
@@ -135,6 +135,18 @@ export const fetchPackagePricing = async (
 
   packagePricingRequests.set(key, request);
   return request;
+};
+
+export const fetchSuperAgentPackageBasePrices = async () => {
+  const { data, error } = await invokeEdgeFunction("super-agent-offers", {
+    body: { action: "getPackageBasePrices" },
+  });
+  if (error) throw new Error(await getEdgeFunctionErrorMessage(error));
+  if (data?.error) throw new Error(data.error);
+  return {
+    pricing: data?.pricing || [],
+    providers: data?.providers ?? null,
+  };
 };
 
 const findCatalogPackageForOffer = (catalog, offer) => {

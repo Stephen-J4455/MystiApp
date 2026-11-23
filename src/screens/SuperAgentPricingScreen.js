@@ -21,7 +21,7 @@ import { getEdgeFunctionName } from "../lib/env";
 import { supabase } from "../lib/supabase";
 import { buildPackageCards } from "../lib/superAgentPricing";
 import { fetchAssignedSubAgents } from "../lib/superAgentRoster";
-import { fetchCatalogPackages } from "../services/superAgentService";
+import { fetchCatalogPackages, fetchSuperAgentPackageBasePrices } from "../services/superAgentService";
 import OffersPanel from "./SuperAgentOffersScreen";
 import TiersPanel from "./SuperAgentTierManagementScreen";
 
@@ -90,7 +90,7 @@ export default function SuperAgentPricingScreen({ navigation, route }) {
       const [offerData, tierData, pricingData, catalog] = await Promise.all([
         readPricing("super-agent-offers", "listSuperAgentOffers"),
         readPricing("super-agent-tier-management", "listTiers"),
-        readPricing("super-agent-offers", "getPackageBasePrices"),
+        fetchSuperAgentPackageBasePrices(),
         fetchCatalogPackages(),
       ]);
       setOffers(offerData?.offers || []);

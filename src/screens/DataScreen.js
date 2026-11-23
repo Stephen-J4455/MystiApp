@@ -19,6 +19,7 @@ import {
   Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
@@ -41,13 +42,14 @@ import {
   formatBundleSizeFromDescriptor,
   fetchCatalogPackages,
   fetchPackagePricing,
+  fetchSuperAgentPackageBasePrices,
 } from "../services/superAgentService";
 import {
   fetchPaymentChargeSettings,
   getTransactionChargeAmount,
 } from "../lib/paymentSettings";
 import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
-import { getPackageDescriptor } from "../lib/superAgentPricing";
+import { getPackageDescriptor, matchAgentPackagePrices, matchCurrentPackagePrices } from "../lib/superAgentPricing";
 
 // Tab order for the data-type switcher. The key must match the value returned
 // by getBundleFamily in the component.
@@ -94,54 +96,32 @@ const withUniqueBundleCards = (bundles) => {
   return [...cards.values()];
 };
 
-const mapCustomerBundles = (pricingRows, catalog, network) => {
-  const packageKey = (provider, id) => JSON.stringify([provider, id]);
-  const catalogById = new Map();
-  for (const pkg of catalog) {
-    const provider = String(pkg.provider ?? "").trim().toLowerCase();
-    const id = String(pkg.id ?? "").trim();
-    if (provider && id && normalizeUiNetwork(pkg.network) === network) {
-      const key = packageKey(provider, id);
-      if (!catalogById.has(key)) catalogById.set(key, pkg);
-    }
-  }
+const mapPricedBundles = (matches, network, agentPricing) =>
+  matches
+    .filter(({ pkg }) => normalizeUiNetwork(pkg.network) === network)
+    .map(({ pkg, row }) => {
+      const provider = String(pkg.provider).trim().toLowerCase();
+      const packageId = String(pkg.id).trim();
+      const descriptor = getPackageDescriptor(pkg);
+      const type = agentPricing && pkg.type ? pkg.type : descriptor;
+      const uiNetwork = formatUiNetwork(pkg.network);
+      const price = Number(row.base_price || 0);
 
-  const rows = pricingRows
-    .filter((row) => normalizeUiNetwork(row.network) === network)
-    .sort((a, b) =>
-      (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0) ||
-      Number(b.id || 0) - Number(a.id || 0)
-    );
-
-  const bundles = [];
-  for (const row of rows) {
-    const provider = String(row.provider ?? "").trim().toLowerCase();
-    const packageId = String(row.package_id ?? "").trim();
-    const key = packageKey(provider, packageId);
-    const pkg = catalogById.get(key);
-    if (!pkg) continue;
-    catalogById.delete(key);
-
-    const type = getPackageDescriptor(pkg);
-    const uiNetwork = formatUiNetwork(pkg.network);
-    const price = Number(row.base_price || 0);
-    bundles.push({
-      pricingRowId: row.id,
-      id: packageId,
-      package_id: packageId,
-      provider,
-      network: uiNetwork,
-      type,
-      category: pkg.category ?? null,
-      data_volume: pkg.data_volume ?? null,
-      name: `${uiNetwork} — ${type} · ${getProviderDisplayName(provider)}`,
-      price: `Ghc ${price.toFixed(2)}`,
-      base_price: price,
-      dataSize: pkg.size == null ? "" : `${pkg.size} GB`,
+      return {
+        pricingRowId: row.id,
+        id: packageId,
+        package_id: packageId,
+        provider,
+        network: uiNetwork,
+        type,
+        category: pkg.category ?? null,
+        data_volume: pkg.data_volume ?? null,
+        name: `${uiNetwork} — ${descriptor} · ${getProviderDisplayName(provider)}`,
+        price: `Ghc ${price.toFixed(2)}`,
+        base_price: price,
+        dataSize: pkg.size == null ? "" : `${pkg.size} GB`,
+      };
     });
-  }
-  return bundles;
-};
 
 export default function DataScreen({ navigation, route }) {
   // Several call sites reach this screen without params (the "Browse" action,
@@ -687,12 +667,6 @@ export default function DataScreen({ navigation, route }) {
   const displayNetwork = network.toUpperCase();
 
   useEffect(() => {
-    if (agentChecked) {
-      fetchOffers();
-    }
-  }, [network, isAgent, agentChecked]);
-
-  useEffect(() => {
     fetchUserEmail();
   }, [network]);
 
@@ -858,15 +832,17 @@ export default function DataScreen({ navigation, route }) {
     };
   }, [agentChecked, isAgent, isSuperAgentUser]);
 
-  const fetchOffers = async () => {
+  const fetchOffers = useCallback(async (isCurrent) => {
     try {
       setLoading(true);
+      let useManagedPricing = false;
 
       if (isAgent) {
         const {
           data: { user },
           error: userError,
         } = await supabase.auth.getUser();
+        if (!isCurrent()) return;
 
         if (userError || !user) {
           setBundles([]);
@@ -879,10 +855,12 @@ export default function DataScreen({ navigation, route }) {
         // would silently fall back to a locally-held id - so a user could point
         // their purchases at an arbitrary settlement account.
         const assignedSuperAgentId = profileSuperAgentId || null;
+        useManagedPricing = isSuperAgentProfile &&
+          String(user.app_metadata?.super_agent_badge || "").toLowerCase() === "enterprise";
 
         // Sub-agents buy from the packages their super agent published for the
         // tier they were granted (falling back to the super agent's General prices).
-        if (assignedSuperAgentId) {
+        if (assignedSuperAgentId && !isSuperAgentProfile) {
           // The owner is passed in from the profile rather than re-read from
           // auth metadata inside the service - see the note there.
           const agentPackagesResult = await loadSubAgentPackages({
@@ -890,6 +868,7 @@ export default function DataScreen({ navigation, route }) {
             network,
             superAgentId: assignedSuperAgentId,
           });
+          if (!isCurrent()) return;
 
           if (
             agentPackagesResult.error &&
@@ -961,141 +940,53 @@ export default function DataScreen({ navigation, route }) {
           setLoading(false);
           return;
         }
-
-        // Direct top-level agent without a super agent: load from catalog
-        const catalogOffers = await fetchCatalogPackages();
-        if (catalogOffers.length === 0) {
-          setBundles([]);
-          setLoading(false);
-          showError("Provider Unavailable", "Could not load the active provider catalog.");
-          return;
-        }
-        const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
-        const { data: pricingRows, error: pricingError } =
-          await fetchPackagePricing(
-            "package_pricing",
-            providers,
-            "provider, package_id, network, type, size, base_price, is_active",
-            profile?.id,
-          );
-
-        if (pricingError) {
-          console.warn("Could not load admin package pricing:", pricingError);
-        }
-
-        const basePriceByKey = {};
-        const basePriceByPackageId = {};
-        (pricingRows || []).forEach((row) => {
-          const descriptor = String(row.type || "")
-            .trim()
-            .toUpperCase();
-          const key = `${String(row.provider || "jehuca").toLowerCase()}::${String(row.network || "").toUpperCase()}::${descriptor}`;
-          basePriceByKey[key] = Number(row.base_price || 0);
-          if (row.package_id) {
-            basePriceByPackageId[`${row.provider}::${String(row.package_id)}`] = Number(
-              row.base_price || 0,
-            );
-          }
-        });
-
-        const filteredOffers = (catalogOffers || []).filter((pkg) => {
-          if (normalizeUiNetwork(pkg.network) !== network) {
-            return false;
-          }
-          const pkgType = String(pkg.type || "")
-            .trim()
-            .toUpperCase();
-          const pkgSize =
-            pkg.size !== undefined && pkg.size !== null ? `${pkg.size}GB` : "";
-          const pkgDescriptor =
-            pkgSize && !pkgType.includes(pkgSize)
-              ? `${pkgType} - ${pkgSize}`.toUpperCase()
-              : (pkgType || pkgSize).toUpperCase();
-          return (pricingRows || []).some((row) => {
-            if (
-              String(row.provider || "jehuca").toLowerCase() !==
-              String(pkg.provider || "jehuca").toLowerCase()
-            ) {
-              return false;
-            }
-            if (row.package_id && String(row.package_id) === String(pkg.id)) {
-              return true;
-            }
-            const rowType = String(row.type || "")
-              .trim()
-              .toUpperCase();
-            return (
-              String(row.network || "").toUpperCase() ===
-                String(pkg.network || "").toUpperCase() &&
-              (rowType === pkgType || rowType === pkgDescriptor)
-            );
-          });
-        });
-        const mappedBundles = filteredOffers.map((pkg) => {
-          const rawType = String(pkg.type || "").trim();
-          const size =
-            pkg.size !== undefined && pkg.size !== null ? `${pkg.size}GB` : "";
-          const descriptor =
-            size && !rawType.toUpperCase().includes(size.toUpperCase())
-              ? `${rawType} - ${size}`.toUpperCase()
-              : (rawType || size).toUpperCase();
-          const provider = String(pkg.provider || "jehuca").toLowerCase();
-          const key = `${provider}::${String(pkg.network || "").toUpperCase()}::${descriptor}`;
-          const basePrice =
-            basePriceByPackageId[`${provider}::${String(pkg.id)}`] ??
-            basePriceByKey[key];
-          const catalogPrice = Number(pkg.price || 0) / 100;
-          const finalPrice = basePrice > 0 ? basePrice : catalogPrice;
-
-          const uiNetwork = formatUiNetwork(pkg.network);
-          return {
-            id: pkg.id,
-            package_id: pkg.id,
-            provider,
-            network: uiNetwork,
-            category: pkg.category ?? null,
-            data_volume: pkg.data_volume ?? null,
-            type: pkg.type,
-            name: `${uiNetwork} — ${pkg.type} · ${getProviderDisplayName(provider)}`,
-            price: `Ghc ${finalPrice.toFixed(2)}`,
-            base_price: finalPrice,
-            dataSize: `${pkg.size} GB`,
-          };
-        });
-        setBundles(withUniqueBundleCards(mappedBundles));
-        setLoading(false);
-        return;
       }
 
-      // Regular customer
-      const catalogOffers = await fetchCatalogPackages();
+      const [catalogOffers, managedPricing] = await Promise.all([
+        fetchCatalogPackages(),
+        useManagedPricing ? fetchSuperAgentPackageBasePrices() : null,
+      ]);
+      if (!isCurrent()) return;
       if (catalogOffers.length === 0) {
         setBundles([]);
         setLoading(false);
         showError("Provider Unavailable", "Could not load the active provider catalog.");
         return;
       }
-      const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
-      const { data: pricingRows, error: pricingError } =
-        await fetchPackagePricing(
-          "normal_user_package_pricing",
+      let pricingRows = managedPricing?.pricing;
+      if (!managedPricing) {
+        const providers = [...new Set(catalogOffers.map((pkg) => pkg.provider))];
+        const { data, error } = await fetchPackagePricing(
+          isAgent ? "package_pricing" : "normal_user_package_pricing",
           providers,
           "id, provider, package_id, network, base_price, is_active, updated_at",
           profile?.id,
         );
-
-      if (pricingError) throw pricingError;
-
-      const mappedBundles = mapCustomerBundles(pricingRows || [], catalogOffers, network);
+        if (!isCurrent()) return;
+        if (error) throw error;
+        pricingRows = data || [];
+      }
+      const matches = isAgent
+        ? matchAgentPackagePrices(catalogOffers, pricingRows, managedPricing?.providers)
+        : matchCurrentPackagePrices(catalogOffers, pricingRows);
+      const mappedBundles = mapPricedBundles(matches, network, isAgent);
       setBundles(withUniqueBundleCards(mappedBundles));
     } catch (error) {
+      if (!isCurrent()) return;
       console.error("Error:", error);
       showError("Error", "Failed to load data bundles");
       setBundles([]);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  };
+  }, [isAgent, isSuperAgentProfile, network, profile?.id, profileSuperAgentId, showError]);
+
+  useFocusEffect(useCallback(() => {
+    if (!agentChecked) return;
+    let current = true;
+    void fetchOffers(() => current);
+    return () => { current = false; };
+  }, [agentChecked, fetchOffers]));
 
   // Groups bundles by network and sorts each group by displayed price.
   const groupBundlesByNetwork = useCallback((list) => {
@@ -2159,7 +2050,7 @@ export default function DataScreen({ navigation, route }) {
             message={
               bundles.length > 0
                 ? "No packages in this data type. Try another tab."
-                : isAgent
+                : isAgentSubAgent && profileSuperAgentId
                   ? "Your super agent has not published packages for this network in your tier yet."
                   : `No data bundles available for ${displayNetwork} at the moment.`
             }
