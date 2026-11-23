@@ -355,28 +355,25 @@ const fetchCatalogPackages = async (
   provider: string,
 ) => {
   if (provider === "bisdel") {
-    const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
-    const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-      .replace(/\0/g, "")
-      .trim();
-    if (!apiKey || !apiSecret) {
+    const apiKey = (Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+      (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+    if (!apiKey) {
       throw new Error("Bisdel API credentials are not configured");
     }
-    const response = await fetch("https://bisdelgh.com/api/xx1/products.php", {
-      headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+    const response = await fetch("https://telcogh.com/api/v1/products", {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(10_000),
     });
     const data = await response.json();
-    if (!response.ok || data?.success !== true) {
-      throw new Error(data?.error || "Bisdel package request failed");
+    const products = data?.data?.products ?? data?.data ?? data?.products;
+    if (!response.ok || data?.status === "error" || !Array.isArray(products)) {
+      throw new Error(data?.message || data?.error || "Bisdel package request failed");
     }
-    const products = Array.isArray(data?.data?.products)
-      ? data.data.products
-      : [];
     return products.map((product: Record<string, unknown>) => {
-      const dataVolume = String(product.data_volume || "");
-      const apiPrice = Number(product.api_price);
+      const dataVolume = String(product.package_size ?? product.data_volume ?? product.size ?? "");
+      const apiPrice = Number(product.api_price ?? product.price);
       return {
-        id: String(product.product_id ?? ""),
+        id: String(product.product_id ?? product.id ?? ""),
         network: String(product.network || "").trim().toUpperCase()
           .replace(/^MTN.*$/, "MTN"),
         type: String(product.name || dataVolume).trim(),
@@ -387,7 +384,9 @@ const fetchCatalogPackages = async (
         data_volume: dataVolume,
         provider,
       };
-    });
+    }).filter((pkg: { id: string; size: number; price: number }) =>
+      pkg.id && pkg.size > 0 && pkg.price > 0
+    );
   }
 
   const apiKey = Deno.env.get("JEHUCA_API_KEY");
@@ -400,6 +399,18 @@ const fetchCatalogPackages = async (
   return (Array.isArray(data?.payload) ? data.payload : []).map(
     (pkg: Record<string, unknown>) => ({ ...pkg, provider }),
   );
+};
+
+const fetchEnabledCatalog = async (providers: string[]) => {
+  const catalogs = await Promise.all(providers.map(async (provider) => {
+    try {
+      return await fetchCatalogPackages(provider);
+    } catch (error) {
+      console.warn("Could not load package catalog for", provider, error);
+      return [];
+    }
+  }));
+  return catalogs.flat();
 };
 
 Deno.serve(async (req) => {
@@ -520,10 +531,7 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      const catalogs = await Promise.all(
-        providers.map((provider) => fetchCatalogPackages(provider)),
-      );
-      const catalog = catalogs.flat();
+      const catalog = await fetchEnabledCatalog(providers);
       const networkFilter = String(
         offer?.network || body?.network || "",
       ).trim().toUpperCase();
@@ -1298,10 +1306,7 @@ Deno.serve(async (req) => {
         }),
       );
 
-      const catalogs = await Promise.all(
-        providers.map((provider) => fetchCatalogPackages(provider)),
-      );
-      const catalog: any[] = catalogs.flat();
+      const catalog: any[] = await fetchEnabledCatalog(providers);
 
       const networkFilter = normalizeNetworkKey(body?.network);
       const enabledOffers = selectedOffers.filter((row: any) => {

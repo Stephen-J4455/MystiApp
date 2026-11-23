@@ -54,15 +54,13 @@ Deno.serve(async (req) => {
     let baseUrl: string;
     let headers: Record<string, string>;
     if (provider === "bisdel") {
-      const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
-      const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-        .replace(/\0/g, "")
-        .trim();
-      if (!apiKey || !apiSecret) {
+      const apiKey = (Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+        (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+      if (!apiKey) {
         return new Response(
           JSON.stringify({
             success: false,
-            error: "Bisdel API credentials are not configured",
+            error: "Configure TELCOGH_API_KEY or BISDEL_DB with the TelcoGH API key",
           }),
           {
             status: 500,
@@ -70,8 +68,8 @@ Deno.serve(async (req) => {
           },
         );
       }
-      baseUrl = "https://bisdelgh.com/api/xx1/balance.php";
-      headers = { "X-API-Key": apiKey, "X-API-Secret": apiSecret };
+      baseUrl = "https://telcogh.com/api/v1/balance";
+      headers = { Authorization: `Bearer ${apiKey}`, Accept: "application/json" };
     } else if (provider === "jehuca") {
       const apiKey = Deno.env.get("JEHUCA_API_KEY");
       if (!apiKey) {
@@ -105,12 +103,28 @@ Deno.serve(async (req) => {
       headers,
     });
 
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
+    if (data === null) {
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: `${provider === "bisdel" ? "Bisdel" : "Jehuca"} returned an invalid balance response`,
+          data_provider: provider,
+        }),
+        {
+          status: 502,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
 
     return new Response(
       JSON.stringify({
         ...data,
         balance: data?.data?.wallet_balance ?? data?.balance,
+        ...(provider === "bisdel" && data?.status === "error"
+          ? { success: false, error: data.message }
+          : {}),
         data_provider: provider,
       }),
       {
@@ -123,12 +137,11 @@ Deno.serve(async (req) => {
       },
     );
   } catch (error) {
-    console.error("Error checking balance:", error);
+    console.error("Error checking balance:", error instanceof Error ? error.name : "Unknown error");
     return new Response(
       JSON.stringify({
         success: false,
         error: "Failed to check balance",
-        details: (error as Error).message,
       }),
       {
         status: 500,

@@ -590,22 +590,21 @@ const extractBalance = (payload: unknown): number => {
 };
 
 const submitBisdelOrder = (
-  providerPackageId: string,
+  network: string,
+  size: number,
   phone: string,
-  externalOrderId: string,
   headers: Record<string, string>,
 ) =>
-  fetch("https://api.bisdelgh.com/api/xx1/order.php", {
+  fetch("https://telcogh.com/api/v1/data", {
     method: "POST",
     headers: {
       ...headers,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      product_id: providerPackageId,
-      phone,
-      quantity: 1,
-      external_order_id: externalOrderId,
+      network,
+      recipient: phone.replace(/^\+?233(?=\d{9}$)/, "0"),
+      package_size: `${size}GB`,
     }),
   });
 
@@ -700,21 +699,24 @@ Deno.serve((req) =>
       if (providerName !== "jehuca" && providerName !== "bisdel") {
         return respond({ error: "Order has an unsupported data provider" }, 500);
       }
-      const providerHeaders: Record<string, string> =
-        providerName === "bisdel"
-          ? {
-              "X-API-Key": (Deno.env.get("BISDEL_DB") ?? "")
-                .replace(/\0/g, "")
-                .trim(),
-              "X-API-Secret": (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-                .replace(/\0/g, "")
-                .trim(),
-            }
-          : { "X-API-Key": Deno.env.get("JEHUCA_API_KEY") || "" };
-      if (
-        !providerHeaders["X-API-Key"] ||
-        (providerName === "bisdel" && !providerHeaders["X-API-Secret"])
-      ) {
+      if (providerName === "bisdel" && !order.jehuca_order_id &&
+        ["provider_response_missing_order_id", "provider_outcome_unknown"]
+          .includes(order.provider_deferred_reason)) {
+        return respond({
+          success: true,
+          already_dispatched: true,
+          needs_reconciliation: true,
+          error: "Bisdel did not return a trackable result. Reconcile the order before retrying.",
+        });
+      }
+      const apiKey = providerName === "bisdel"
+        ? ((Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+          (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim())
+        : Deno.env.get("JEHUCA_API_KEY");
+      const providerHeaders: Record<string, string> = providerName === "bisdel"
+        ? { Authorization: `Bearer ${apiKey}`, Accept: "application/json" }
+        : { "X-API-Key": apiKey || "" };
+      if (!apiKey) {
         return respond(
           { error: `${providerName} API credentials are not configured` },
           500,
@@ -759,9 +761,8 @@ Deno.serve((req) =>
       );
 
       const missingProviderDetails =
-        !providerPackageId ||
-        !cleanPhone ||
-        (providerName === "jehuca" && (!providerSize || !providerType));
+        !cleanPhone || !(providerSize > 0) ||
+        (providerName === "jehuca" && (!providerPackageId || !providerType));
       if (missingProviderDetails) {
         return respond(
           {
@@ -867,9 +868,11 @@ Deno.serve((req) =>
       try {
         providerResponse = providerName === "bisdel"
           ? await submitBisdelOrder(
-              providerPackageId,
+              network.replace(/^MTN.*$/, "MTN")
+                .replace(/^(VODAFONE|VOD)$/, "TELECEL")
+                .replace(/^(AT|AIRTEL[ -]?TIGO)$/, "AIRTELTIGO"),
+              providerSize,
               cleanPhone,
-              `mysti-${orderType}-${order.id}`,
               providerHeaders,
             )
           : await fetch(JEHUCA_ORDERS_URL, {
@@ -902,7 +905,7 @@ Deno.serve((req) =>
           .update({
             status: "pending",
             provider_deferred_at: new Date().toISOString(),
-            provider_deferred_reason: "provider_unreachable",
+            provider_deferred_reason: "provider_outcome_unknown",
             provider_dispatch_attempts:
               Number(order.provider_dispatch_attempts || 0) + 1,
           })
@@ -911,8 +914,9 @@ Deno.serve((req) =>
           {
             success: false,
             deferred: true,
-            reason: "provider_unreachable",
-            error: "Bisdel could not be reached. The order was queued for retry.",
+            reason: "provider_outcome_unknown",
+            needs_reconciliation: true,
+            error: "Bisdel did not confirm the outcome. Reconcile the order before retrying.",
           },
           202,
         );
@@ -921,16 +925,22 @@ Deno.serve((req) =>
       const accepted =
         providerResponse.ok &&
         (providerName === "bisdel"
-          ? providerData?.success === true
+          ? providerData?.status === "success"
           : providerData?.status === true);
 
       if (!accepted) {
+        const reason = providerName === "bisdel" && providerData?.code === "LOW_FLOAT_PAUSED"
+          ? "insufficient_api_balance"
+          : providerName === "bisdel" &&
+              (providerResponse.status >= 500 || (providerResponse.ok && providerData?.status !== "error"))
+            ? "provider_outcome_unknown"
+            : "provider_rejected";
         await admin
           .from(table)
           .update({
             status: "pending",
             provider_deferred_at: new Date().toISOString(),
-            provider_deferred_reason: "provider_rejected",
+            provider_deferred_reason: reason,
             jehuca_response: providerData ?? null,
             provider_dispatch_attempts:
               Number(order.provider_dispatch_attempts || 0) + 1,
@@ -947,7 +957,8 @@ Deno.serve((req) =>
           {
             success: false,
             deferred: true,
-            reason: "provider_rejected",
+            reason,
+            needs_reconciliation: reason === "provider_outcome_unknown",
             provider_status: providerResponse.status,
             details: providerData,
             error:
@@ -986,7 +997,7 @@ Deno.serve((req) =>
             (Array.isArray(providerPayload) ? providerPayload[0]?.id : null)
           );
       const jehucaOrderId = providerName === "bisdel"
-        ? (bisdelOrder.order_reference ?? null)
+        ? (bisdelOrder.reference ?? bisdelOrder.order_reference ?? providerData?.reference ?? null)
         : providerOrderId;
 
       // The status is at `payload.packages[0].status`, NOT at the top level -
@@ -1051,7 +1062,9 @@ Deno.serve((req) =>
                   ? null
                   : String(providerOrderId),
                 provider_deferred_at: null,
-                provider_deferred_reason: null,
+                provider_deferred_reason: providerName === "bisdel" && !jehucaOrderId
+                  ? "provider_response_missing_order_id"
+                  : null,
                 provider_dispatch_attempts:
                   Number(order.provider_dispatch_attempts || 0) + 1,
               })

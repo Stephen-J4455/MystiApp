@@ -30,70 +30,46 @@ const sizeFromDataValue = (dataValue) => {
   return match ? Number(match[1]) : null;
 };
 
+const fetchProviderPackages = async (provider, functionName) => {
+  try {
+    const { data, error } = await supabase.functions.invoke(
+      getEdgeFunctionName(functionName),
+    );
+    if (error || data?.success === false) {
+      throw error || new Error(data.error || "Package request failed");
+    }
+
+    const packages = data?.payload ?? data;
+    return Array.isArray(packages)
+      ? packages.map((pkg) => ({ ...pkg, provider }))
+      : [];
+  } catch (error) {
+    console.error("Could not fetch packages for", provider, error);
+    return [];
+  }
+};
+
 const fetchCatalogPackagesUncached = async () => {
   try {
-    const { data: providerData, error: providerError } =
-      await supabase.functions.invoke(
-        getEdgeFunctionName("get-bisdel-packages"),
-      );
-    if (providerError) {
-      console.error("Could not load enabled provider settings:", providerError);
-      return [];
-    }
+    const { data: settings, error } = await supabase.functions.invoke(
+      getEdgeFunctionName("get-provider-settings"),
+    );
+    if (error) throw error;
 
-    const catalog = [];
-    if (providerData?.jehuca_enabled === true) {
-      const { data: jehucaData, error: jehucaError } =
-        await supabase.functions.invoke(getEdgeFunctionName("get-packages"));
-      if (jehucaError) {
-        console.error("Could not fetch Jehuca packages:", jehucaError);
-      } else {
-        const jehucaPackages = jehucaData?.payload || jehucaData || [];
-        if (Array.isArray(jehucaPackages)) {
-          catalog.push(
-            ...jehucaPackages.map((pkg) => ({
-              ...pkg,
-              provider: "jehuca",
-            })),
-          );
-        }
-      }
+    const requests = [];
+    if (settings?.jehuca_enabled === true) {
+      requests.push(fetchProviderPackages("jehuca", "get-packages"));
     }
-
-    if (providerData?.bisdel_enabled === true) {
-      if (providerData?.success === false) {
-        console.error(
-          "Could not fetch enabled Bisdel packages:",
-          providerData.error || providerData,
-        );
-      } else if (Array.isArray(providerData?.payload)) {
-        catalog.push(
-          ...providerData.payload.map((pkg) => ({
-            ...pkg,
-          })),
-        );
-      }
+    if (settings?.bisdel_enabled === true) {
+      requests.push(fetchProviderPackages("bisdel", "get-bisdel-packages"));
     }
-
-    if (
-      providerData?.jehuca_enabled !== true &&
-      providerData?.bisdel_enabled !== true
-    ) {
+    if (requests.length === 0) {
       console.warn("No data provider APIs are enabled.");
     }
 
-    if (catalog.length === 0 && providerData?.success === false) {
-      console.error("No enabled provider catalog could be loaded.");
-    }
-
-    if (!Array.isArray(catalog)) {
-      console.error("Combined provider catalog is invalid:", providerData);
-      return [];
-    }
-
-    return catalog;
-  } catch (err) {
-    console.error("Provider catalog request failed:", err);
+    return (await Promise.all(requests)).flat();
+  } catch (error) {
+    console.error("Could not load enabled provider settings:", error);
     return [];
   }
 };

@@ -77,7 +77,8 @@ Deno.serve(async (req) => {
     }
     if (
       !order.jehuca_order_id &&
-      order.provider_deferred_reason === "provider_response_missing_order_id"
+      ["provider_response_missing_order_id", "provider_outcome_unknown"]
+        .includes(order.provider_deferred_reason)
     ) {
       return respond({
         success: true,
@@ -86,7 +87,7 @@ Deno.serve(async (req) => {
         provider_name: "bisdel",
         status: order.status,
         bisdel_order_status: order.bisdel_order_status || "pending",
-        error: "Bisdel accepted this order, but its reference is missing. Do not retry it.",
+        error: "Bisdel did not return a trackable result. Reconcile the order before retrying.",
       });
     }
     if (order.jehuca_order_id) {
@@ -167,13 +168,20 @@ Deno.serve(async (req) => {
       }, 409);
     }
 
-    const productId = String(order.provider_package_id || "").trim();
+    const network = String(order.network || "").trim().toUpperCase()
+      .replace(/^MTN.*$/, "MTN")
+      .replace(/^(VODAFONE|VOD)$/, "TELECEL")
+      .replace(/^(AT|AIRTEL[ -]?TIGO)$/, "AIRTELTIGO");
+    const size = Number(order.provider_size) || Number(
+      `${order.provider_type || ""} ${order.data_amount || order.offer_title || ""}`
+        .match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1],
+    );
     const phone = String(
       orderType === "agent"
         ? order.recipient_phone || ""
         : order.phone || order.recipient_phone || "",
-    ).replace(/\s+/g, "");
-    if (!productId || !phone) {
+    ).replace(/\s+/g, "").replace(/^\+?233(?=\d{9}$)/, "0");
+    if (!["MTN", "TELECEL", "AIRTELTIGO"].includes(network) || !(size > 0) || !/^0\d{9}$/.test(phone)) {
       const { error: updateError } = await admin
         .from(table)
         .update({
@@ -186,16 +194,13 @@ Deno.serve(async (req) => {
         .eq("id", order.id);
       if (updateError) throw updateError;
       return respond({
-        error: "This order is missing the Bisdel product ID or recipient phone",
-        details: { has_product_id: Boolean(productId), has_phone: Boolean(phone) },
+        error: "Bisdel requires a supported network, bundle size, and 10-digit Ghana phone number",
       }, 400);
     }
 
-    const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
-    const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-      .replace(/\0/g, "")
-      .trim();
-    if (!apiKey || !apiSecret) {
+    const apiKey = (Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+      (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+    if (!apiKey) {
       const { error: updateError } = await admin
         .from(table)
         .update({
@@ -210,23 +215,21 @@ Deno.serve(async (req) => {
       return respond({ error: "Bisdel API credentials are not configured" }, 500);
     }
 
-    const externalOrderId = `mysti-${orderType}-${order.id}`;
     let providerResponse: Response;
     try {
       providerResponse = await fetch(
-        "https://bisdelgh.com/api/xx1/order.php",
+        "https://telcogh.com/api/v1/data",
         {
           method: "POST",
           headers: {
-            "X-API-Key": apiKey,
-            "X-API-Secret": apiSecret,
+            Authorization: `Bearer ${apiKey}`,
+            Accept: "application/json",
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            product_id: productId,
-            phone,
-            quantity: 1,
-            external_order_id: externalOrderId,
+            network,
+            recipient: phone,
+            package_size: `${size}GB`,
           }),
         },
       );
@@ -240,7 +243,7 @@ Deno.serve(async (req) => {
         .update({
           status: "pending",
           provider_deferred_at: new Date().toISOString(),
-          provider_deferred_reason: "provider_unreachable",
+          provider_deferred_reason: "provider_outcome_unknown",
           provider_dispatch_attempts:
             Number(order.provider_dispatch_attempts || 0) + 1,
         })
@@ -248,8 +251,9 @@ Deno.serve(async (req) => {
       return respond({
         success: false,
         deferred: true,
-        reason: "provider_unreachable",
-        error: "Bisdel could not be reached. The order was queued for retry.",
+        reason: "provider_outcome_unknown",
+        needs_reconciliation: true,
+        error: "Bisdel did not confirm the outcome. Reconcile the order before retrying.",
       });
     }
 
@@ -264,22 +268,26 @@ Deno.serve(async (req) => {
       providerData?.data || providerData?.payload || providerData?.order || {};
     const rawProviderStatus =
       providerOrder.status ??
-      providerOrder.order_status ??
-      providerData?.status;
+      providerOrder.order_status;
     const providerStatus =
       typeof rawProviderStatus === "string" &&
         rawProviderStatus.trim() &&
         !/^(true|false)$/i.test(rawProviderStatus.trim())
         ? rawProviderStatus.trim()
         : null;
-    const accepted = providerResponse.ok;
+    const accepted = providerResponse.ok && providerData?.status === "success";
     if (!accepted) {
+      const reason = providerData?.code === "LOW_FLOAT_PAUSED"
+        ? "insufficient_api_balance"
+        : providerResponse.status >= 500 || (providerResponse.ok && providerData?.status !== "error")
+          ? "provider_outcome_unknown"
+          : "provider_rejected";
       const { error: updateError } = await admin
         .from(table)
         .update({
           status: "pending",
           provider_deferred_at: new Date().toISOString(),
-          provider_deferred_reason: "provider_rejected",
+          provider_deferred_reason: reason,
           ...(providerStatus
             ? { bisdel_order_status: providerStatus }
             : {}),
@@ -298,14 +306,15 @@ Deno.serve(async (req) => {
       return respond({
         success: false,
         deferred: true,
-        reason: "provider_rejected",
+        reason,
+        needs_reconciliation: reason === "provider_outcome_unknown",
         provider_status: providerResponse.status,
         bisdel_order_status: providerStatus,
         details: {
           code: providerData?.code,
           error: providerData?.error || providerData?.message,
         },
-        error: providerData?.error || "Bisdel rejected the order.",
+        error: providerData?.message || providerData?.error || "Bisdel rejected the order.",
       });
     }
 

@@ -304,14 +304,12 @@ const fetchProviderPrice = async (
   try {
     let response: Response;
     if (normalizedProvider === "bisdel") {
-      const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
-      const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-        .replace(/\0/g, "")
-        .trim();
-      if (!apiKey || !apiSecret) return null;
-      response = await fetch("https://bisdelgh.com/api/xx1/products.php", {
+      const apiKey = (Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+        (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+      if (!apiKey) return null;
+      response = await fetch("https://telcogh.com/api/v1/products", {
         method: "GET",
-        headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+        headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       });
     } else {
       const apiKey = Deno.env.get("JEHUCA_API_KEY");
@@ -323,9 +321,10 @@ const fetchProviderPrice = async (
     }
     if (!response.ok) return null;
     const payload = await response.json();
+    const bisdelProducts = payload?.data?.products ?? payload?.data ?? payload?.products;
     const list = normalizedProvider === "bisdel"
-      ? Array.isArray(payload?.data?.products)
-        ? payload.data.products
+      ? payload?.status !== "error" && Array.isArray(bisdelProducts)
+        ? bisdelProducts
         : []
       : Array.isArray(payload?.payload)
         ? payload.payload
@@ -335,11 +334,11 @@ const fetchProviderPrice = async (
     const match = list.find(
       (p: { id?: string | number; product_id?: string | number }) =>
         String(
-          normalizedProvider === "bisdel" ? p?.product_id ?? "" : p?.id ?? "",
+          normalizedProvider === "bisdel" ? p?.product_id ?? p?.id ?? "" : p?.id ?? "",
         ) === id,
     );
     const raw = Number(
-      normalizedProvider === "bisdel" ? match?.api_price : match?.price,
+      normalizedProvider === "bisdel" ? match?.api_price ?? match?.price : match?.price,
     );
     if (!Number.isFinite(raw) || raw < 0) return null;
     return Number(
@@ -2267,4 +2266,3 @@ Deno.serve(async (req) => {
     );
   }
 });
-       

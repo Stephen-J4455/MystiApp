@@ -256,22 +256,23 @@ const fetchProviderPackages = async (
 ) => {
   if (providerName === "bisdel") {
     const response = await fetch(
-      "https://api.bisdelgh.com/api/xx1/products.php",
+      "https://telcogh.com/api/v1/products",
       { headers },
     );
     const data = await response.json();
-    if (!response.ok || data?.success !== true) {
-      throw new Error(data?.error || "Bisdel package request failed");
+    const products = data?.data?.products ?? data?.data ?? data?.products;
+    if (!response.ok || data?.status === "error" || !Array.isArray(products)) {
+      throw new Error(data?.message || data?.error || "Bisdel package request failed");
     }
-    return (Array.isArray(data?.data?.products) ? data.data.products : []).map(
+    return products.map(
       (product: Record<string, unknown>) => {
-        const volume = String(product.data_volume || "");
+        const volume = String(product.package_size ?? product.data_volume ?? product.size ?? "");
         return {
-          id: String(product.product_id ?? ""),
+          id: String(product.product_id ?? product.id ?? ""),
           network: String(product.network || "").trim().toUpperCase(),
           type: String(product.name || volume).trim().toUpperCase(),
           size: Number(volume.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0),
-          price: Number(product.api_price || 0) * 100,
+          price: Math.round(Number(product.api_price ?? product.price) * 100),
         };
       },
     );
@@ -373,21 +374,14 @@ Deno.serve(async (req) => {
     if (providerName !== "jehuca" && providerName !== "bisdel") {
       return respond({ error: "Order has an unsupported data provider" }, 500);
     }
-    const providerHeaders: Record<string, string> =
-      providerName === "bisdel"
-        ? {
-            "X-API-Key": (Deno.env.get("BISDEL_DB") ?? "")
-              .replace(/\0/g, "")
-              .trim(),
-            "X-API-Secret": (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-              .replace(/\0/g, "")
-              .trim(),
-          }
-        : { "X-API-Key": Deno.env.get("JEHUCA_API_KEY") || "" };
-    if (
-      !providerHeaders["X-API-Key"] ||
-      (providerName === "bisdel" && !providerHeaders["X-API-Secret"])
-    ) {
+    const apiKey = providerName === "bisdel"
+      ? ((Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+        (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim())
+      : Deno.env.get("JEHUCA_API_KEY");
+    const providerHeaders: Record<string, string> = providerName === "bisdel"
+      ? { Authorization: `Bearer ${apiKey}`, Accept: "application/json" }
+      : { "X-API-Key": apiKey || "" };
+    if (!apiKey) {
       return respond(
         { error: `${providerName} API credentials are not configured` },
         500,
@@ -609,18 +603,23 @@ Deno.serve(async (req) => {
     }
 
     const providerResponse = providerName === "bisdel"
-      ? await fetch("https://api.bisdelgh.com/api/xx1/order.php", {
+      ? await fetch("https://telcogh.com/api/v1/data", {
           method: "POST",
           headers: {
             ...providerHeaders,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            product_id: providerPackageId,
-            phone,
-            quantity: 1,
-            external_order_id: `mysti-agent-order-${order.id}`,
+            network: String(order.network || "").trim().toUpperCase()
+              .replace(/^MTN.*$/, "MTN")
+              .replace(/^(VODAFONE|VOD)$/, "TELECEL")
+              .replace(/^(AT|AIRTEL[ -]?TIGO)$/, "AIRTELTIGO"),
+            recipient: phone.replace(/^\+?233(?=\d{9}$)/, "0"),
+            package_size: `${providerSize}GB`,
           }),
+        }).catch((error) => {
+          console.error("[Reorder] Bisdel request outcome unknown:", error);
+          return new Response(null, { status: 503 });
         })
       : await fetch("https://backend.jehucale-business.com/api/orders", {
           method: "POST",
@@ -640,11 +639,13 @@ Deno.serve(async (req) => {
             ],
           }),
         });
-    const providerData = await providerResponse.json();
+    const providerData = providerName === "bisdel"
+      ? await providerResponse.json().catch(() => null)
+      : await providerResponse.json();
     const accepted =
       providerResponse.ok &&
       (providerName === "bisdel"
-        ? providerData?.success === true
+        ? providerData?.status === "success"
         : providerData?.status === true);
     console.log("[Reorder] Provider response", {
       order_id: order.id,
@@ -655,7 +656,10 @@ Deno.serve(async (req) => {
         : providerData?.status,
       message: providerData?.message,
     });
-    if (!accepted) {
+    const outcomeUnknown = providerName === "bisdel" && !accepted &&
+      (providerResponse.status >= 500 ||
+        (providerResponse.ok && providerData?.status !== "error"));
+    if (!accepted && !outcomeUnknown) {
       await admin.rpc("credit_super_agent_wallet", {
         p_super_agent_id: user.id,
         p_amount: Number(order.base_amount || 0),
@@ -664,7 +668,12 @@ Deno.serve(async (req) => {
         p_metadata: { order_id: order.id },
       });
       return respond(
-        { error: "Provider order failed", details: providerData },
+        {
+          error: providerName === "bisdel"
+            ? providerData?.message || "Bisdel order failed"
+            : "Provider order failed",
+          details: providerData,
+        },
         502,
       );
     }
@@ -676,10 +685,10 @@ Deno.serve(async (req) => {
       ? providerRecord.order_id
       : providerRecord.orderId || providerRecord.id;
     const providerOrderId = providerName === "bisdel"
-      ? providerRecord.order_reference || null
+      ? providerRecord.reference || providerRecord.order_reference || providerData?.reference || null
       : rawProviderOrderId || null;
     const providerStatus = providerName === "bisdel"
-      ? String(providerRecord.status || "accepted")
+      ? String(providerRecord.status || (outcomeUnknown ? "pending" : "accepted"))
       : String(
           providerRecord.packages?.[0]?.status ||
             providerRecord.status ||
@@ -708,7 +717,15 @@ Deno.serve(async (req) => {
         provider_order_id: rawProviderOrderId == null
           ? null
           : String(rawProviderOrderId),
-        settlement_status: "settled",
+        ...(providerName === "bisdel" && !providerOrderId
+          ? {
+              provider_deferred_reason: outcomeUnknown
+                ? "provider_outcome_unknown"
+                : "provider_response_missing_order_id",
+              provider_deferred_at: new Date().toISOString(),
+            }
+          : {}),
+        settlement_status: outcomeUnknown ? "pending" : "settled",
       })
       .eq("id", order.id);
     if (orderUpdateError) {
@@ -726,7 +743,7 @@ Deno.serve(async (req) => {
         provider_order_id: rawProviderOrderId == null
           ? null
           : String(rawProviderOrderId),
-        settlement_status: "settled",
+        settlement_status: outcomeUnknown ? "pending" : "settled",
       })
       .eq("order_id", order.id)
       .eq("order_type", "agent");
@@ -738,7 +755,10 @@ Deno.serve(async (req) => {
     }
 
     return respond({
-      success: true,
+      success: !outcomeUnknown,
+      ...(providerName === "bisdel" && !providerOrderId
+        ? { needs_reconciliation: true }
+        : {}),
       order_id: order.id,
       provider_order_id: providerOrderId,
       wallet: debit,

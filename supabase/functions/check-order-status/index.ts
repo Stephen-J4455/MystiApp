@@ -645,18 +645,16 @@ const syncProviderStatusesBatch = async ({
 
 const fetchProviderStatus = async (providerName: string, orderId: string) => {
   if (providerName === "bisdel") {
-    const apiKey = (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
-    const apiSecret = (Deno.env.get("BISDEL_SECRET_KEY") ?? "")
-      .replace(/\0/g, "")
-      .trim();
-    if (!apiKey || !apiSecret) {
+    const apiKey = (Deno.env.get("TELCOGH_API_KEY") ?? "").replace(/\0/g, "").trim() ||
+      (Deno.env.get("BISDEL_DB") ?? "").replace(/\0/g, "").trim();
+    if (!apiKey) {
       throw new Error("Bisdel API credentials are not configured");
     }
-    const url = new URL("https://api.bisdelgh.com/api/xx1/status.php");
-    url.searchParams.set("order_reference", orderId);
+    const url = new URL("https://telcogh.com/api/v1/status");
+    url.searchParams.set("reference", orderId);
     const response = await fetch(url, {
       method: "GET",
-      headers: { "X-API-Key": apiKey, "X-API-Secret": apiSecret },
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
     });
     const data = await response.json();
     const order = data?.data || {};
@@ -664,7 +662,7 @@ const fetchProviderStatus = async (providerName: string, orderId: string) => {
       response,
       data,
       status: order.status ?? order.order_status ?? null,
-      failed: !response.ok || data?.success === false,
+      failed: !response.ok || data?.status !== "success",
     };
   }
 
@@ -767,6 +765,9 @@ Deno.serve(async (req) => {
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
+    const providerStatusColumn = providerName === "bisdel"
+      ? "bisdel_order_status"
+      : "jehuca_order_status";
     // Accept a few key spellings. Clients have historically sent `orderId`,
     // and a mismatch here used to be invisible: the fallback below then took
     // the LAST PATH SEGMENT of the function URL, which is the function's own

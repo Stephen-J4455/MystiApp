@@ -24,14 +24,14 @@ const normalizeProducts = (products: unknown[]) =>
     const product = item && typeof item === "object"
       ? item as Record<string, unknown>
       : {};
-    const volume = String(product.data_volume || "");
+    const volume = String(product.package_size ?? product.data_volume ?? product.size ?? "");
     const size = Number(volume.match(/(\d+(?:\.\d+)?)\s*GB/i)?.[1] || 0);
-    const apiPrice = Number(product.api_price);
+    const apiPrice = Number(product.api_price ?? product.price);
     const rawNetwork = String(product.network || "").trim().toUpperCase();
     const network = rawNetwork.startsWith("MTN") ? "MTN" : rawNetwork;
 
     return {
-      id: String(product.product_id ?? ""),
+      id: String(product.product_id ?? product.id ?? ""),
       network,
       type: String(product.name || volume || "").trim(),
       size,
@@ -41,7 +41,7 @@ const normalizeProducts = (products: unknown[]) =>
       validity_days: product.validity_days ?? null,
       category: product.category ?? null,
     };
-  });
+  }).filter((product) => product.id && product.size > 0 && product.price > 0);
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -118,9 +118,8 @@ Deno.serve(async (req) => {
       });
     }
 
-    const apiKey = readSecret("BISDEL_DB");
-    const apiSecret = readSecret("BISDEL_SECRET_KEY");
-    if (!apiKey || !apiSecret) {
+    const apiKey = readSecret("TELCOGH_API_KEY") || readSecret("BISDEL_DB");
+    if (!apiKey) {
       return json(
         { success: false, error: "Bisdel API credentials are not configured" },
         500,
@@ -128,30 +127,30 @@ Deno.serve(async (req) => {
     }
 
     const response = await fetch(
-      "https://bisdelgh.com/api/xx1/products.php",
+      "https://telcogh.com/api/v1/products",
       {
         method: "GET",
+        signal: AbortSignal.timeout(10_000),
         headers: {
-          "X-API-Key": apiKey,
-          "X-API-Secret": apiSecret,
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
         },
       },
     );
     const data = await response.json().catch(() => null);
-    if (!response.ok || data?.success !== true) {
+    const products = data?.data?.products ?? data?.data ?? data?.products;
+    if (!response.ok || data?.status === "error" || !Array.isArray(products)) {
       return json(
         {
           success: false,
-          error: data?.error || "Bisdel package request failed",
+          error: data?.message || data?.error || "Bisdel package request failed",
+          code: data?.code,
           provider_status: response.status,
         },
         response.ok ? 502 : response.status,
       );
     }
 
-    const products = Array.isArray(data?.data?.products)
-      ? data.data.products
-      : [];
     const networkCounts = products.reduce(
       (counts: Record<string, number>, item) => {
         const product = item && typeof item === "object"
