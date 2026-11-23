@@ -1,6 +1,13 @@
 import { supabase } from "../lib/supabase.js";
 import { getEdgeFunctionErrorMessage, invokeEdgeFunction } from "../lib/edgeFunctions.js";
 import { getEdgeFunctionName } from "../lib/env.js";
+import {
+  getPackageDescriptor,
+  normalizeNetwork,
+  providerOf,
+  resolveAgentPackageOffers,
+  tierOf,
+} from "../lib/superAgentPricing.js";
 
 // Client-side fallbacks use the authenticated anon client. Privileged work is
 // performed by Supabase Edge Functions, never with a browser-exposed service key.
@@ -13,21 +20,9 @@ const packagePricingRequests = new Map();
 const subAgentPackageCache = new Map();
 const subAgentPackageRequests = new Map();
 
-const normalizeKey = (val) => String(val || "").trim().toUpperCase();
-
-const normalizeNetworkKey = (val) => {
-  const key = normalizeKey(val);
-  return key === "VODAFONE" || key === "VOD" ? "TELECEL" : key;
-};
-
 export const formatBundleSizeFromDescriptor = (descriptor) => {
   const match = String(descriptor || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
   return match ? `${match[1]} GB` : "";
-};
-
-const sizeFromDataValue = (dataValue) => {
-  const match = String(dataValue || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
-  return match ? Number(match[1]) : null;
 };
 
 const fetchProviderPackages = async (provider, functionName) => {
@@ -149,53 +144,6 @@ export const fetchSuperAgentPackageBasePrices = async () => {
   };
 };
 
-const findCatalogPackageForOffer = (catalog, offer) => {
-  if (!Array.isArray(catalog) || catalog.length === 0) return null;
-  const net = normalizeNetworkKey(offer?.network);
-  const dataVal = normalizeKey(offer?.data_value);
-  if (!dataVal) return null;
-
-  return (
-    catalog.find((pkg) => {
-      if (
-        offer?.provider &&
-        String(pkg?.provider || "jehuca").toLowerCase() !==
-          String(offer.provider).toLowerCase()
-      ) {
-        return false;
-      }
-      if (normalizeNetworkKey(pkg?.network) !== net) return false;
-      const type = normalizeKey(pkg?.type);
-      const size =
-        pkg?.size !== undefined &&
-        pkg?.size !== null &&
-        String(pkg.size).trim() !== ""
-          ? `${pkg.size}GB`
-          : "";
-      const descriptor =
-        size && !type.includes(size) ? `${type} - ${size}` : type || size;
-
-      if (descriptor && descriptor === dataVal) return true;
-      if (
-        String(pkg?.id || "")
-          .trim()
-          .toUpperCase() === dataVal
-      )
-        return true;
-      if (
-        size &&
-        (dataVal === `${type} - ${size}` ||
-          dataVal === `${type} (${size})` ||
-          dataVal === `${type} ${size}` ||
-          dataVal === `${type}-${size}`)
-      ) {
-        return true;
-      }
-      return false;
-    }) || null
-  );
-};
-
 /**
  * Loads data packages for a sub-agent from their assigned super agent's published offers.
  * Resolves tier pricing precedence (tier-specific prices win; General untiered offers fill the rest).
@@ -213,7 +161,6 @@ const findCatalogPackageForOffer = (catalog, offer) => {
  */
 const loadSubAgentPackagesUncached = async ({
   user,
-  network = null,
   superAgentId: resolvedSuperAgentId = null,
 }) => {
   if (!user) {
@@ -239,10 +186,7 @@ const loadSubAgentPackagesUncached = async ({
     const { data: edgeData, error: edgeError } =
       await supabase.functions.invoke(
         getEdgeFunctionName("super-agent-offers"),
-        // Do not send the UI network filter to the edge. Bisdel calls its
-        // Telecel catalog "Vodafone"; filtering there by "TELECEL" would
-        // discard those offers before the client can normalize the alias.
-        // Filter locally below, after the server returns authorized offers.
+        // Load every network so the Home prefetch can serve any DataScreen route.
         { body: { action: "getAgentPackages" } },
       );
 
@@ -297,34 +241,6 @@ const loadSubAgentPackagesUncached = async ({
       };
     }
 
-    const publishedOffers = Array.isArray(offerRows) ? offerRows : [];
-    const packageKeyOf = (row) =>
-      `${normalizeKey(row?.provider || "jehuca")}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
-    const offerTier = (row) =>
-      String(row?.tier_name || row?.default_tier_name || "").trim();
-
-    // Tier offers win; General (untiered) offers fill any bundle the tier does not cover
-    const tierOffers = agentTier
-      ? publishedOffers.filter(
-          (row) => normalizeKey(offerTier(row)) === normalizeKey(agentTier),
-        )
-      : [];
-
-    const coveredKeys = new Set(tierOffers.map(packageKeyOf));
-
-    const generalOffers = publishedOffers.filter(
-      (row) => offerTier(row) === "",
-    );
-
-    const selectedOffers = [...tierOffers];
-    generalOffers.forEach((row) => {
-      const key = packageKeyOf(row);
-      if (!coveredKeys.has(key)) {
-        coveredKeys.add(key);
-        selectedOffers.push(row);
-      }
-    });
-
     const catalog = await fetchCatalogPackages();
     const providers = [...new Set(catalog.map((pkg) => pkg.provider))];
     if (providers.length === 0) {
@@ -335,12 +251,11 @@ const loadSubAgentPackagesUncached = async ({
         providers: [],
       };
     }
-    const networkFilter = network ? normalizeNetworkKey(network) : null;
     const { data: activePricingRows, error: activePricingError } =
       await fetchPackagePricing(
         "package_pricing",
         providers,
-        "provider, package_id, network, type, size, base_price",
+        "id, provider, package_id, network, base_price, is_active, updated_at",
         user.id,
       );
 
@@ -356,125 +271,34 @@ const loadSubAgentPackagesUncached = async ({
       };
     }
 
-    const activePricingKeys = new Set(
-      (activePricingRows || []).map((row) => {
-        const descriptor = normalizeKey(row?.type);
-        const rowSize = row?.size;
-        const descriptorWithSize =
-          rowSize !== null &&
-          rowSize !== undefined &&
-          !descriptor.includes(`${rowSize}GB`)
-            ? `${descriptor} - ${rowSize}GB`
-            : descriptor;
-        return `${normalizeKey(row?.provider)}::${normalizeNetworkKey(row?.network)}::${descriptorWithSize}`;
-      }),
-    );
-    const activePackageIds = new Set(
-      (activePricingRows || [])
-        .map((row) => `${normalizeKey(row?.provider)}::${String(row?.package_id || "")}`)
-        .filter(Boolean),
-    );
+    const mappedPackages = resolveAgentPackageOffers(
+      catalog,
+      activePricingRows || [],
+      offerRows || [],
+      agentTier,
+    ).map(({ pkg, base, offer, price }) => {
+      const descriptor = getPackageDescriptor(pkg);
+      const network = normalizeNetwork(pkg.network);
+      const title = offer.title || `${network} — ${descriptor}`;
 
-    const mappedPackages = selectedOffers
-      .filter((row) => {
-        const rowPackageId = String(row?.package_id || "");
-        const catalogPackage = findCatalogPackageForOffer(catalog, row);
-        const catalogPackageId = String(catalogPackage?.id || "");
-        const provider = String(row?.provider || "jehuca").toLowerCase();
-        const rowKey = `${normalizeKey(provider)}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
-        return (
-          (rowPackageId &&
-            activePackageIds.has(`${normalizeKey(provider)}::${rowPackageId}`)) ||
-          (catalogPackageId &&
-            activePackageIds.has(`${normalizeKey(provider)}::${catalogPackageId}`)) ||
-          activePricingKeys.has(rowKey)
-        );
-      })
-      .filter(
-        (row) => !networkFilter || normalizeNetworkKey(row?.network) === networkFilter,
-      )
-      .map((row) => {
-        const provider = String(row?.provider || "jehuca").toLowerCase();
-        const providerCatalog = catalog.filter(
-          (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
-        );
-        const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
-        const descriptor = String(row?.data_value || "");
-        const size = catalogPackage?.size ?? sizeFromDataValue(descriptor);
-
-        const normalizedDescriptor = normalizeKey(descriptor);
-        const packageBasePriceRow = (activePricingRows || []).find(
-          (pricing) => {
-            if (normalizeKey(pricing?.provider) !== normalizeKey(provider)) {
-              return false;
-            }
-            if (
-              catalogPackage?.id &&
-              String(pricing?.package_id || "") === String(catalogPackage.id)
-            ) {
-              return true;
-            }
-            const pricingType = normalizeKey(pricing?.type);
-            const pricingSize =
-              pricing?.size !== null &&
-              pricing?.size !== undefined &&
-              String(pricing.size).trim() !== ""
-                ? `${pricing.size}GB`
-                : "";
-            const pricingDescriptor =
-              pricingSize && !pricingType.includes(pricingSize)
-                ? `${pricingType} - ${pricingSize}`
-                : pricingType;
-            return (
-              normalizeNetworkKey(pricing?.network) ===
-                normalizeNetworkKey(row?.network) &&
-              (pricingDescriptor === normalizedDescriptor ||
-                pricingType === normalizedDescriptor)
-            );
-          },
-        );
-        const adminBasePrice = Number(packageBasePriceRow?.base_price);
-        const hasAdminBasePrice =
-          Number.isFinite(adminBasePrice) && adminBasePrice > 0;
-        const tierPrice = row?.uses_admin_base_price
-          ? hasAdminBasePrice
-            ? adminBasePrice
-            : 0
-          : Number(row?.price || 0);
-        const catalogPrice = Number(catalogPackage?.price);
-        if (!Number.isFinite(tierPrice) || tierPrice <= 0) return null;
-        const basePrice = hasAdminBasePrice
-          ? adminBasePrice
-          : Number.isFinite(catalogPrice) && catalogPrice > 0
-            ? catalogPrice / 100
-            : tierPrice;
-
-        return {
-          id: String(row.id),
-          superAgentOfferId: row.id,
-          package_id: catalogPackage?.id ?? null,
-          provider,
-          network: normalizeNetworkKey(row?.network),
-          data_value: descriptor,
-          type: String(catalogPackage?.type || descriptor).toUpperCase(),
-          title:
-            row?.title ||
-            `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
-          name:
-            row?.title ||
-            `${normalizeKey(row?.network)} — ${descriptor}`.trim(),
-          price: tierPrice,
-          base_price: basePrice,
-          tier_extra: Math.max(0, tierPrice - basePrice),
-          tier_name: offerTier(row) || null,
-          size: size !== null && size !== undefined ? size : null,
-          dataSize:
-            size !== null && size !== undefined
-              ? `${size} GB`
-              : formatBundleSizeFromDescriptor(descriptor),
-        };
-      })
-      .filter(Boolean);
+      return {
+        id: String(offer.id),
+        superAgentOfferId: offer.id,
+        package_id: pkg.id,
+        provider: providerOf(pkg),
+        network,
+        data_value: descriptor,
+        type: pkg.type || descriptor,
+        title,
+        name: title,
+        price,
+        base_price: base,
+        tier_extra: Math.max(0, price - base),
+        tier_name: tierOf(offer) || null,
+        size: pkg.size ?? null,
+        dataSize: pkg.size == null ? "" : `${pkg.size} GB`,
+      };
+    });
 
     return {
       offers: mappedPackages,
@@ -504,11 +328,7 @@ export const loadSubAgentPackages = async (options) => {
   const existingRequest = subAgentPackageRequests.get(key);
   if (existingRequest) return existingRequest;
 
-  // Load all networks once so the Home prefetch can serve any DataScreen route.
-  const request = loadSubAgentPackagesUncached({
-    ...options,
-    network: null,
-  })
+  const request = loadSubAgentPackagesUncached(options)
     .then((result) => {
       if (!result.error) {
         subAgentPackageCache.set(key, {

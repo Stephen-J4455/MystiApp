@@ -275,51 +275,131 @@ const normalizeNetworkKey = (value: unknown) => {
   return key === "VODAFONE" || key === "VOD" ? "TELECEL" : key;
 };
 
-const sizeFromDataValue = (dataValue: unknown) => {
-  const match = String(dataValue || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
-  return match ? Number(match[1]) : null;
+const providerOf = (row: any) =>
+  String(row.provider || "jehuca").trim().toLowerCase();
+
+const offerTier = (row: any) =>
+  String(row.tier_name || row.default_tier_name || "").trim();
+
+const positivePrice = (value: unknown) => {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0 ? price : null;
 };
 
-// Matches a super-agent offer (e.g. "ISHARE - 1GB") to a Jehuca catalog package
-// so sub-agents still get a package id, size, and bundle type for display.
-const findCatalogPackageForOffer = (catalog: any[], offer: any) => {
-  const network = normalizeNetworkKey(offer?.network);
-  const dataValue = normalizeKey(offer?.data_value);
-  if (!dataValue) return null;
+const packageKey = (provider: string, network: string, id: unknown) => {
+  const packageId = String(id ?? "").trim();
+  return provider && network && packageId
+    ? JSON.stringify([provider, network, packageId])
+    : null;
+};
 
-  return (
-    catalog.find((pkg: any) => {
-      if (normalizeNetworkKey(pkg?.network) !== network) return false;
-      const type = normalizeKey(pkg?.type);
-      const size =
-        pkg?.size !== undefined &&
-        pkg?.size !== null &&
-        String(pkg.size).trim() !== ""
-          ? `${pkg.size}GB`
-          : "";
-      const descriptor =
-        size && !type.includes(size) ? `${type} - ${size}` : type || size;
+const compareNewest = (a: any, b: any) =>
+  (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0) ||
+  Number(b.id || 0) - Number(a.id || 0);
 
-      if (descriptor && descriptor === dataValue) return true;
-      if (
-        String(pkg?.id || "")
-          .trim()
-          .toUpperCase() === dataValue
-      )
-        return true;
-      if (
-        size &&
-        (dataValue === `${type} - ${size}` ||
-          dataValue === `${type} (${size})` ||
-          dataValue === `${type} ${size}` ||
-          dataValue === `${type}-${size}`)
-      ) {
-        return true;
-      }
+const getPackageDescriptor = (pkg: any) => {
+  const type = String(pkg.type || "").trim();
+  const size = String(pkg.size ?? "").trim() ? `${pkg.size}GB` : "";
+  if (size && !normalizeKey(type).includes(size)) return `${type} - ${size}`;
+  return type || size || "DEFAULT";
+};
 
-      return false;
-    }) || null
-  );
+const findOfferPackage = (candidates: any[], offer: any) => {
+  const id = String(offer.package_id ?? "").trim();
+  if (id) return candidates.find(({ pkg }) => String(pkg.id).trim() === id);
+
+  const descriptor = normalizeKey(offer.data_value);
+  if (!descriptor) return;
+  const byId = candidates.find(({ pkg }) => normalizeKey(pkg.id) === descriptor);
+  if (byId) return byId;
+
+  // Older offers can be attached by description when it identifies one active package.
+  const exact = candidates.filter(({ pkg }) => {
+    const type = normalizeKey(pkg.type);
+    const size = pkg.size == null ? "" : `${pkg.size}GB`;
+    return descriptor === normalizeKey(getPackageDescriptor(pkg)) || Boolean(size && [
+      `${type} - ${size}`, `${type} (${size})`, `${type} ${size}`, `${type}-${size}`,
+    ].includes(descriptor));
+  });
+  if (exact.length > 0) return exact.length === 1 ? exact[0] : undefined;
+
+  const byType = candidates.filter(({ pkg }) => normalizeKey(pkg.type) === descriptor);
+  return byType.length === 1 ? byType[0] : undefined;
+};
+
+const resolveAgentPackages = (
+  catalog: any[],
+  pricingRows: any[],
+  offers: any[],
+  agentTier: string,
+  networkFilter: string,
+) => {
+  const catalogById = new Map();
+  for (const pkg of catalog) {
+    const key = packageKey(providerOf(pkg), normalizeNetworkKey(pkg.network), pkg.id);
+    if (key && !catalogById.has(key)) catalogById.set(key, pkg);
+  }
+
+  const cardsByNetwork = new Map();
+  for (const row of [...pricingRows].sort(compareNewest)) {
+    if (row.is_active === false) continue;
+    const provider = String(row.provider ?? "").trim().toLowerCase();
+    const network = normalizeNetworkKey(row.network);
+    if (networkFilter && network !== networkFilter) continue;
+
+    const key = packageKey(provider, network, row.package_id);
+    if (!key || !catalogById.has(key)) continue;
+    const pkg = catalogById.get(key);
+    catalogById.delete(key);
+    const base = positivePrice(row.base_price);
+    if (base === null) continue;
+
+    const group = JSON.stringify([provider, network]);
+    const candidates = cardsByNetwork.get(group) || [];
+    candidates.push({ key, pkg, base });
+    cardsByNetwork.set(group, candidates);
+  }
+
+  const tier = normalizeKey(agentTier);
+  const packages = new Map();
+  const eligible = offers
+    .filter((offer) => {
+      const name = normalizeKey(offerTier(offer));
+      return offer.is_active === true && (!name || name === tier);
+    })
+    .sort((a, b) =>
+      Number(Boolean(offerTier(b))) - Number(Boolean(offerTier(a))) ||
+      Number(Boolean(b.package_id)) - Number(Boolean(a.package_id)) ||
+      compareNewest(a, b)
+    );
+
+  for (const offer of eligible) {
+    const provider = providerOf(offer);
+    const network = normalizeNetworkKey(offer.network);
+    const candidates = cardsByNetwork.get(JSON.stringify([provider, network])) || [];
+    const card = findOfferPackage(candidates, offer);
+    if (!card || packages.has(card.key)) continue;
+
+    const { key, pkg, base } = card;
+    const price = offer.uses_admin_base_price ? base : positivePrice(offer.price);
+    if (price === null) continue;
+    const descriptor = getPackageDescriptor(pkg);
+    packages.set(key, {
+      id: Number(offer.id),
+      network,
+      data_value: descriptor,
+      title: offer.title || `${network} — ${descriptor}`,
+      price,
+      base_price: base,
+      tier_extra: Math.max(0, price - base),
+      tier_name: offerTier(offer) || null,
+      package_id: pkg.id,
+      type: pkg.type || descriptor,
+      size: pkg.size ?? null,
+      provider,
+    });
+  }
+  return [...packages.values()];
 };
 
 const getActiveProvider = async (admin: ReturnType<typeof createClient>) => {
@@ -1236,36 +1316,10 @@ Deno.serve(async (req) => {
         throw offerError;
       }
 
-      const publishedOffers = (offerRows || []) as any[];
-      const packageKeyOf = (row: any) =>
-        `${normalizeKey(row?.provider || "jehuca")}::${normalizeNetworkKey(row?.network)}::${normalizeKey(row?.data_value)}`;
-      const offerTier = (row: any) =>
-        String(row?.tier_name || row?.default_tier_name || "").trim();
-
-      // Tier prices win; the super agent's untiered (General) offers fill any
-      // bundle the tier does not cover. Bundles priced nowhere stay hidden.
-      const tierOffers = agentTier
-        ? publishedOffers.filter(
-            (row) => normalizeKey(offerTier(row)) === normalizeKey(agentTier),
-          )
-        : [];
-      const coveredKeys = new Set(tierOffers.map(packageKeyOf));
-      const generalOffers = publishedOffers.filter(
-        (row) => offerTier(row) === "",
-      );
-
-      const selectedOffers = [...tierOffers];
-      generalOffers.forEach((row) => {
-        const key = packageKeyOf(row);
-        if (coveredKeys.has(key)) return;
-        coveredKeys.add(key);
-        selectedOffers.push(row);
-      });
-
       const { data: activePricingRows, error: activePricingError } =
         await supabaseAdmin
           .from("package_pricing")
-          .select("provider, package_id, network, type, size, base_price, is_active")
+          .select("id, provider, package_id, network, base_price, is_active, updated_at")
           .in("provider", providers)
           .eq("is_active", true);
 
@@ -1287,135 +1341,14 @@ Deno.serve(async (req) => {
         throw activePricingError;
       }
 
-      const activePackageIds = new Set(
-        (activePricingRows || [])
-          .map((row: any) => `${normalizeKey(row?.provider)}::${String(row?.package_id || "").trim()}`)
-          .filter(Boolean),
+      const catalog = await fetchEnabledCatalog(providers);
+      const packages = resolveAgentPackages(
+        catalog,
+        activePricingRows || [],
+        offerRows || [],
+        agentTier,
+        normalizeNetworkKey(body?.network),
       );
-      const activePricingKeys = new Set(
-        (activePricingRows || []).map((row: any) => {
-          const descriptor = normalizeKey(row?.type);
-          const size = row?.size;
-          const descriptorWithSize =
-            size !== null &&
-            size !== undefined &&
-            !descriptor.includes(`${size}GB`)
-              ? `${descriptor} - ${size}GB`
-              : descriptor;
-          return `${normalizeKey(row?.provider)}::${normalizeNetworkKey(row?.network)}::${descriptorWithSize}`;
-        }),
-      );
-
-      const catalog: any[] = await fetchEnabledCatalog(providers);
-
-      const networkFilter = normalizeNetworkKey(body?.network);
-      const enabledOffers = selectedOffers.filter((row: any) => {
-        const networkKey = normalizeNetworkKey(row?.network);
-        const descriptorKey = normalizeKey(row?.data_value);
-        const offerPackageId = String(row?.package_id || "").trim();
-        const provider = String(row?.provider || "jehuca").toLowerCase();
-        const providerCatalog = catalog.filter(
-          (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
-        );
-        const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
-        const catalogPackageId = String(catalogPackage?.id || "").trim();
-        return (
-          (offerPackageId &&
-            activePackageIds.has(`${normalizeKey(provider)}::${offerPackageId}`)) ||
-          (catalogPackageId &&
-            activePackageIds.has(`${normalizeKey(provider)}::${catalogPackageId}`)) ||
-          activePricingKeys.has(`${normalizeKey(provider)}::${networkKey}::${descriptorKey}`)
-        );
-      });
-
-      const packages = enabledOffers
-        .filter(
-          (row) =>
-            !networkFilter ||
-            normalizeNetworkKey(row?.network) === networkFilter,
-        )
-        .map((row) => {
-          const provider = String(row?.provider || "jehuca").toLowerCase();
-          const providerCatalog = catalog.filter(
-            (pkg) => String(pkg?.provider || "jehuca").toLowerCase() === provider,
-          );
-          const catalogPackage = findCatalogPackageForOffer(providerCatalog, row);
-          const size =
-            catalogPackage?.size ?? sizeFromDataValue(row?.data_value);
-          const dataValue = String(row?.data_value || "");
-          const normalizedDataValue = normalizeKey(dataValue);
-          const packageBasePriceRow = (activePricingRows || []).find(
-            (pricing: any) => {
-              if (
-                normalizeKey(pricing?.provider) !== normalizeKey(provider)
-              ) return false;
-              const packageIdMatches =
-                catalogPackage?.id &&
-                String(pricing?.package_id || "") ===
-                  String(catalogPackage.id);
-              if (packageIdMatches) return true;
-
-              const pricingType = normalizeKey(pricing?.type);
-              const pricingSize =
-                pricing?.size !== null &&
-                pricing?.size !== undefined &&
-                String(pricing.size).trim() !== ""
-                  ? `${pricing.size}GB`
-                  : "";
-              const pricingDescriptor =
-                pricingSize && !pricingType.includes(pricingSize)
-                  ? `${pricingType} - ${pricingSize}`
-                  : pricingType;
-              return (
-                normalizeNetworkKey(pricing?.network) ===
-                  normalizeNetworkKey(row?.network) &&
-                (pricingDescriptor === normalizedDataValue ||
-                  pricingType === normalizedDataValue)
-              );
-            },
-          );
-          const adminBasePrice = Number(packageBasePriceRow?.base_price);
-          const hasAdminBasePrice =
-            Number.isFinite(adminBasePrice) && adminBasePrice > 0;
-          const storedPrice = Number(row?.price || 0);
-          const effectivePrice = row?.uses_admin_base_price
-            ? hasAdminBasePrice
-              ? adminBasePrice
-              : 0
-            : storedPrice;
-          const catalogBasePrice = Number(catalogPackage?.price);
-          if (!Number.isFinite(effectivePrice) || effectivePrice <= 0) {
-            return null;
-          }
-
-          return {
-            id: Number(row?.id),
-            network: normalizeNetworkKey(row?.network),
-            data_value: dataValue,
-            title: row?.title || `${row?.network || ""} — ${dataValue}`.trim(),
-            price: effectivePrice,
-            base_price: hasAdminBasePrice
-              ? adminBasePrice
-              : Number.isFinite(catalogBasePrice) && catalogBasePrice > 0
-                ? catalogBasePrice / 100
-                : effectivePrice,
-            tier_extra: Math.max(
-              0,
-              effectivePrice -
-                (hasAdminBasePrice
-                  ? adminBasePrice
-                  : Number.isFinite(catalogBasePrice) && catalogBasePrice > 0
-                    ? catalogBasePrice / 100
-                    : effectivePrice),
-            ),
-            tier_name: offerTier(row) || null,
-            package_id: catalogPackage?.id ?? null,
-            type: catalogPackage?.type ?? null,
-            size: size !== null && size !== undefined ? size : null,
-            provider,
-          };
-        })
-        .filter(Boolean);
 
       return new Response(
         JSON.stringify({

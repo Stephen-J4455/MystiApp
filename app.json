@@ -25,6 +25,7 @@
       }
     },
     "plugins": [
+      "./plugins/withOptionalPortrait",
       [
         "expo-notifications",
         {

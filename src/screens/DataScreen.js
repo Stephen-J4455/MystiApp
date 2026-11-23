@@ -865,7 +865,6 @@ export default function DataScreen({ navigation, route }) {
           // auth metadata inside the service - see the note there.
           const agentPackagesResult = await loadSubAgentPackages({
             user,
-            network,
             superAgentId: assignedSuperAgentId,
           });
           if (!isCurrent()) return;

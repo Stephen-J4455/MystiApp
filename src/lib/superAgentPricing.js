@@ -117,7 +117,7 @@ const matchesDescriptor = (value, pkg) => {
 const findOfferCard = (entries, row) => {
   const candidates = entries.get(networkKey(row)) || [];
   const id = String(row.package_id ?? "").trim();
-  if (id) return candidates.find(({ pkg }) => String(pkg.id) === id);
+  if (id) return candidates.find(({ pkg }) => String(pkg.id).trim() === id);
   const value = normalizeName(row.data_value);
   const explicit = value && candidates.find(({ pkg }) => normalizeName(pkg.id) === value);
   if (explicit) return explicit;
@@ -154,6 +154,29 @@ export const buildPackageCards = (catalog, pricing, offers, enabledProviders) =>
     (a.base ?? Infinity) - (b.base ?? Infinity) ||
     String(a.descriptor).localeCompare(String(b.descriptor))
   );
+};
+
+export const resolveAgentPackageOffers = (catalog, pricing, offers, agentTier) => {
+  const tier = normalizeName(agentTier);
+  return buildPackageCards(catalog, pricing, offers).flatMap(({ pkg, base, offers }) => {
+    const eligible = offers
+      .filter((offer) => {
+        const offerTier = normalizeName(tierOf(offer));
+        return offer.is_active === true && (!offerTier || offerTier === tier);
+      })
+      .sort((a, b) =>
+        Number(Boolean(tierOf(b))) - Number(Boolean(tierOf(a))) ||
+        Number(Boolean(b.package_id)) - Number(Boolean(a.package_id)) ||
+        (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0) ||
+        Number(b.id || 0) - Number(a.id || 0)
+      );
+
+    for (const offer of eligible) {
+      const price = offer.uses_admin_base_price ? base : usableBasePrice(offer.price);
+      if (price !== null) return [{ pkg, base, offer, price }];
+    }
+    return [];
+  });
 };
 
 export const buildTierOverview = (tiers, cards, agents) => {
