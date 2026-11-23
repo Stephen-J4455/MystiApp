@@ -71,7 +71,7 @@ export default function ProfileScreen({ navigation }) {
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const { showError, showSuccess } = useNotification();
-  const { isSubAgent: isAgentProfile, profile } = useProfile();
+  const { isSubAgent: isAgentProfile, isSuperAgent, profile } = useProfile();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [isAgent, setIsAgent] = useState(false);
   const [showPasswordSection, setShowPasswordSection] = useState(false);
@@ -758,6 +758,24 @@ export default function ProfileScreen({ navigation }) {
             </View>
           )}
         </View>
+
+        {(isAgentProfile || isSuperAgent) && (
+          <View style={s.section}>
+            <Text style={s.sectionEyebrow}>Business</Text>
+            <SecondaryButton
+              title="Manage storefront"
+              icon="storefront-outline"
+              onPress={() => navigation.navigate("Storefront")}
+            />
+            {isAgentProfile && (
+              <SecondaryButton
+                title="Tier management"
+                icon="layers-outline"
+                onPress={() => navigation.navigate("AgentTierManagement")}
+              />
+            )}
+          </View>
+        )}
 
         {/* About */}
         <View style={s.section}>

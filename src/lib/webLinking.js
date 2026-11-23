@@ -38,10 +38,13 @@ const AUTH_ROUTES = ["Login", "Signup", "ForgotPassword", "ResetPassword"];
 const APP_ROUTES = [
   "Home",
   "Profile",
+  "Storefront",
+  "AgentTierManagement",
   "PrivacyPolicy",
   "Notifications",
   "Data",
   "SuperAgentManagement",
+  "SuperAgentPricing",
   "SuperAgentOffers",
   "SuperAgentTierManagement",
   "SuperAgentAgents",

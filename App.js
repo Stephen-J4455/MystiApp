@@ -595,6 +595,19 @@ export default function App() {
                           }
                         />
                         <Stack.Screen
+                          name="Storefront"
+                          getComponent={() =>
+                            require("./src/screens/StorefrontScreen").default
+                          }
+                        />
+                        <Stack.Screen
+                          name="AgentTierManagement"
+                          getComponent={() =>
+                            require("./src/screens/StorefrontScreen")
+                              .AgentTierManagementScreen
+                          }
+                        />
+                        <Stack.Screen
                           name="PrivacyPolicy"
                           getComponent={() =>
                             require("./src/screens/PrivacyPolicyScreen").default
@@ -620,18 +633,21 @@ export default function App() {
                           }
                         />
                         <Stack.Screen
+                          name="SuperAgentPricing"
+                          getComponent={() =>
+                            require("./src/screens/SuperAgentPricingScreen").default
+                          }
+                        />
+                        <Stack.Screen
                           name="SuperAgentOffers"
                           getComponent={() =>
-                            require("./src/screens/SuperAgentOffersScreen")
-                              .default
+                            require("./src/screens/SuperAgentPricingScreen").default
                           }
                         />
                         <Stack.Screen
                           name="SuperAgentTierManagement"
                           getComponent={() =>
-                            require(
-                              "./src/screens/SuperAgentTierManagementScreen",
-                            ).default
+                            require("./src/screens/SuperAgentPricingScreen").default
                           }
                         />
                         <Stack.Screen

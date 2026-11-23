@@ -47,6 +47,7 @@ import {
   getTransactionChargeAmount,
 } from "../lib/paymentSettings";
 import { getGhanaPhoneError, sanitizeGhanaPhone } from "../lib/ghanaPhone";
+import { getPackageDescriptor } from "../lib/superAgentPricing";
 
 // Tab order for the data-type switcher. The key must match the value returned
 // by getBundleFamily in the component.
@@ -67,6 +68,95 @@ const formatUiNetwork = (value) => {
   const key = normalizeUiNetwork(value);
   if (!key) return "";
   return key.charAt(0).toUpperCase() + key.slice(1);
+};
+
+// Provider package IDs are scoped to their provider. Keep list keys separate
+// from the IDs sent to checkout.
+const withUniqueBundleCards = (bundles) => {
+  const cards = new Map();
+  for (const bundle of bundles) {
+    const provider = String(bundle.provider || "jehuca").toLowerCase();
+    const identity = bundle.pricingRowId != null
+      ? ["pricing", String(bundle.pricingRowId)]
+      : bundle.superAgentOfferId != null
+        ? ["offer", provider, String(bundle.superAgentOfferId)]
+        : [
+            "catalog",
+            provider,
+            normalizeUiNetwork(bundle.network),
+            String(bundle.package_id ?? bundle.id ?? ""),
+            bundle.type,
+            bundle.dataSize,
+          ];
+    const cardKey = JSON.stringify(identity);
+    if (!cards.has(cardKey)) cards.set(cardKey, { ...bundle, cardKey });
+  }
+  return [...cards.values()];
+};
+
+const normalizePackageDescriptor = (value) =>
+  String(value || "").toUpperCase().replace(/[\s()-]+/g, "");
+
+const mapCustomerBundles = (pricingRows, catalog, network) => {
+  const packages = new Map();
+  const catalogForNetwork = catalog.filter((pkg) => normalizeUiNetwork(pkg.network) === network);
+  const rows = pricingRows
+    .filter((row) => normalizeUiNetwork(row.network) === network)
+    .sort((a, b) =>
+      (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0) ||
+      Number(b.id || 0) - Number(a.id || 0)
+    );
+
+  for (const row of rows) {
+    const provider = String(row.provider || "jehuca").trim().toLowerCase();
+    const type = String(row.type || "").trim();
+    const descriptor = normalizePackageDescriptor(type);
+    const providerCatalog = catalogForNetwork.filter((pkg) =>
+      String(pkg.provider || "jehuca").trim().toLowerCase() === provider
+    );
+    const savedPackageId = String(row.package_id ?? "").trim();
+    const exact = savedPackageId
+      ? providerCatalog.find((pkg) => String(pkg.id) === savedPackageId)
+      : undefined;
+    const matchingPackages = exact ? [] : providerCatalog.filter((pkg) =>
+      normalizePackageDescriptor(getPackageDescriptor(pkg)) === descriptor ||
+      (row.size != null && Number(row.size) === Number(pkg.size) &&
+        normalizePackageDescriptor(pkg.type) === descriptor)
+    );
+    const catalogPackage = exact ?? (matchingPackages.length === 1 ? matchingPackages[0] : undefined);
+    const packageId = row.package_id || catalogPackage?.id || null;
+    const size = row.size ?? catalogPackage?.size ?? null;
+    const key = JSON.stringify([
+      provider,
+      network,
+      catalogPackage?.id != null || packageId != null
+        ? ["package", String(catalogPackage?.id ?? packageId)]
+        : ["descriptor", descriptor, size],
+    ]);
+    const staleId = Boolean(savedPackageId && !exact && catalogPackage);
+    const previous = packages.get(key);
+    // Prefer a checkout ID that matches the catalog, then the latest price.
+    if (previous && (!previous.staleId || staleId)) continue;
+
+    const uiNetwork = formatUiNetwork(row.network);
+    const price = Number(row.base_price || 0);
+    packages.set(key, {
+      staleId,
+      bundle: {
+        pricingRowId: row.id,
+        id: packageId || `${row.network}-${type}`,
+        package_id: packageId,
+        provider,
+        network: uiNetwork,
+        type,
+        name: `${uiNetwork} — ${type} · ${getProviderDisplayName(provider)}`,
+        price: `Ghc ${price.toFixed(2)}`,
+        base_price: price,
+        dataSize: size === null ? formatBundleSizeFromDescriptor(type) : `${size} GB`,
+      },
+    });
+  }
+  return [...packages.values()].map(({ bundle }) => bundle);
 };
 
 export default function DataScreen({ navigation, route }) {
@@ -883,7 +973,7 @@ export default function DataScreen({ navigation, route }) {
               };
             });
 
-          setBundles(mappedBundles);
+          setBundles(withUniqueBundleCards(mappedBundles));
           setLoading(false);
           return;
         }
@@ -988,7 +1078,7 @@ export default function DataScreen({ navigation, route }) {
             dataSize: `${pkg.size} GB`,
           };
         });
-        setBundles(mappedBundles);
+        setBundles(withUniqueBundleCards(mappedBundles));
         setLoading(false);
         return;
       }
@@ -1006,70 +1096,14 @@ export default function DataScreen({ navigation, route }) {
         await fetchPackagePricing(
           "normal_user_package_pricing",
           providers,
-          "provider, package_id, network, type, size, base_price, is_active",
+          "id, provider, package_id, network, type, size, base_price, is_active, updated_at",
           profile?.id,
         );
 
       if (pricingError) throw pricingError;
 
-      const mappedBundles = (pricingRows || [])
-        .filter(
-          (row) => normalizeUiNetwork(row.network) === network,
-        )
-        .map((row) => {
-          const provider = String(row.provider || "jehuca").toLowerCase();
-          const descriptor = String(row.type || "").trim();
-          const size = row.size ?? null;
-          const uiNetwork = formatUiNetwork(row.network);
-          const displayName = `${uiNetwork} — ${descriptor} · ${getProviderDisplayName(provider)}`;
-          const normalizedDescriptor = descriptor.toUpperCase();
-          const catalogPackage = catalogOffers.find((pkg) => {
-            if (
-              String(pkg.provider || "jehuca").toLowerCase() !== provider ||
-              normalizeUiNetwork(pkg.network) !== normalizeUiNetwork(row.network)
-            ) {
-              return false;
-            }
-            if (
-              row.package_id &&
-              String(pkg.id) === String(row.package_id)
-            ) {
-              return true;
-            }
-            const pkgType = String(pkg.type || "").trim().toUpperCase();
-            const pkgSize =
-              pkg.size !== undefined && pkg.size !== null
-                ? `${pkg.size}GB`
-                : "";
-            const pkgDescriptor =
-              pkgSize && !pkgType.includes(pkgSize)
-                ? `${pkgType} - ${pkgSize}`
-                : pkgType || pkgSize;
-            return pkgDescriptor === normalizedDescriptor;
-          });
-
-          return {
-            id:
-              row.package_id ||
-              catalogPackage?.id ||
-              `${row.network}-${descriptor}`,
-            package_id: row.package_id || catalogPackage?.id || null,
-            provider,
-            network: uiNetwork,
-            type: descriptor,
-            name: displayName,
-            price: `Ghc ${Number(row.base_price || 0).toFixed(2)}`,
-            base_price: Number(row.base_price || 0),
-            dataSize:
-              size !== null
-                ? `${size} GB`
-                : catalogPackage?.size !== undefined &&
-                    catalogPackage?.size !== null
-                  ? `${catalogPackage.size} GB`
-                  : formatBundleSizeFromDescriptor(descriptor),
-          };
-        });
-      setBundles(mappedBundles);
+      const mappedBundles = mapCustomerBundles(pricingRows || [], catalogOffers, network);
+      setBundles(withUniqueBundleCards(mappedBundles));
     } catch (error) {
       console.error("Error:", error);
       showError("Error", "Failed to load data bundles");
@@ -2153,7 +2187,7 @@ export default function DataScreen({ navigation, route }) {
                 <View key={networkName} style={s.group}>
                   {networkBundles.map((bundle) => (
                     <TouchableOpacity
-                      key={bundle.id}
+                      key={bundle.cardKey}
                       style={s.bundleCard}
                       activeOpacity={0.85}
                       onPress={() => {

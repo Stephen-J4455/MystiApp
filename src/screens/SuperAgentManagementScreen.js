@@ -125,7 +125,7 @@ export default function SuperAgentManagementScreen({ navigation }) {
           <Ionicons name="information-circle" size={20} color={c.mint} />
           <Text style={styles.infoBannerText}>
             {isEnterprise
-              ? "Admin sets the base price for every bundle. Use Tier Management to set what your agents pay per tier, then assign offers from there."
+              ? "Use Pricing to publish bundle offers, create tiers, and set prices for your agents."
               : "Your Pro badge includes analytics, orders, AFA registration, wallet top-ups, and transaction access. Contact an administrator for Enterprise management tools."}
           </Text>
         </View>
@@ -133,10 +133,10 @@ export default function SuperAgentManagementScreen({ navigation }) {
         {isEnterprise ? (
           <TouchableOpacity
             style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentOffers")}
+            onPress={() => navigation.navigate("SuperAgentPricing")}
           >
             <Ionicons name="pricetag" size={20} color={c.onAccent} />
-            <Text style={styles.actionText}>Manage Offers</Text>
+            <Text style={styles.actionText}>Manage Pricing</Text>
           </TouchableOpacity>
         ) : null}
 
@@ -147,16 +147,6 @@ export default function SuperAgentManagementScreen({ navigation }) {
           >
             <Ionicons name="people" size={20} color={c.onAccent} />
             <Text style={styles.actionText}>Manage Agents</Text>
-          </TouchableOpacity>
-        ) : null}
-
-        {isEnterprise ? (
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={() => navigation.navigate("SuperAgentTierManagement")}
-          >
-            <Ionicons name="layers" size={20} color={c.onAccent} />
-            <Text style={styles.actionText}>Manage Tiers</Text>
           </TouchableOpacity>
         ) : null}
 
@@ -184,6 +174,14 @@ export default function SuperAgentManagementScreen({ navigation }) {
         >
           <Ionicons name="refresh-circle" size={20} color={c.onAccent} />
           <Text style={styles.actionText}>Held Agent Orders</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.actionButton}
+          onPress={() => navigation.navigate("Storefront")}
+        >
+          <Ionicons name="storefront-outline" size={20} color={c.onAccent} />
+          <Text style={styles.actionText}>Manage Storefront</Text>
         </TouchableOpacity>
 
         {/*

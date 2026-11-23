@@ -14,18 +14,16 @@ import { Ionicons } from "@expo/vector-icons";
 import { supabase } from "../lib/supabase";
 import { useNotification } from "../contexts/NotificationContext";
 import { useProfile } from "../contexts/ProfileContext";
-import { profileRole } from "../lib/profileRole";
 import { sanitizeGhanaPhone } from "../lib/ghanaPhone";
 import { useThemedStyles } from "../components/ui";
 import { fonts } from "../components/theme";
-import { getEdgeFunctionName } from "../lib/env";
 import { useDockBottomPadding } from "../hooks/useDockBottomPadding";
 import {
   updateSubAgentTier,
   fetchSuperAgentTiers,
   createSubAgent,
 } from "../services/superAgentService";
-import { fetchSubAgentBalances } from "../lib/superAgentRoster";
+import { fetchAssignedSubAgents, fetchSubAgentBalances } from "../lib/superAgentRoster";
 
 export default function SuperAgentAgentsScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
@@ -116,29 +114,7 @@ export default function SuperAgentAgentsScreen({ navigation }) {
 
   const fetchAgents = async (superAgentId) => {
     try {
-      const { data, error } = await supabase.functions.invoke(
-        getEdgeFunctionName("super-agent-user-management"),
-        {
-          body: {
-            action: "listUsers",
-            superAgentId,
-          },
-        },
-      );
-
-      if (error) throw error;
-
-      // `role` and `superAgentId` come from `user_profiles`, resolved
-      // server-side and attached to each member by `listUsers`. The previous
-      // filter read `member.user_metadata.super_agent_id`, which the LISTED
-      // account can rewrite at will via `auth.updateUser()` - so a sub-agent
-      // could point that key at a different Super Agent and appear in someone
-      // else's roster.
-      const assignedAgents = (data?.users || []).filter(
-        (member) =>
-          profileRole({ role: member.role }) === "Agent" &&
-          String(member.superAgentId || "") === String(superAgentId),
-      );
+      const assignedAgents = await fetchAssignedSubAgents(superAgentId);
 
       setAgents(assignedAgents);
             // Seeded once the roster is known, and deliberately NOT on every fetch:

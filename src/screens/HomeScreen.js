@@ -1364,13 +1364,6 @@ export default function HomeScreen({ navigation }) {
       onPress: () => navigation.navigate("SuperAgentAnalytics"),
     },
     {
-      key: "offers",
-      label: "Offers",
-      icon: "pricetags-outline",
-      tint: c.mint,
-      onPress: () => navigation.navigate("SuperAgentOffers"),
-    },
-    {
       key: "agents",
       label: "Agents",
       icon: "people-outline",
@@ -1380,11 +1373,11 @@ export default function HomeScreen({ navigation }) {
     ...(isEnterpriseSuperAgent
       ? [
           {
-            key: "tiers",
-            label: "Tiers",
-            icon: "layers-outline",
+            key: "pricing",
+            label: "Pricing",
+            icon: "pricetags-outline",
             tint: c.mint,
-            onPress: () => navigation.navigate("SuperAgentTierManagement"),
+            onPress: () => navigation.navigate("SuperAgentPricing"),
           },
           {
             key: "paystack",
@@ -1427,18 +1420,11 @@ export default function HomeScreen({ navigation }) {
             onPress: () => navigation.navigate("History"),
           },
           {
-            key: "tiers",
-            icon: "layers-outline",
-            label: "Tier Management",
-            tint: c.mint,
-            onPress: () => navigation.navigate("SuperAgentTierManagement"),
-          },
-          {
-            key: "offers",
+            key: "pricing",
             icon: "pricetags-outline",
-            label: "Offer Management",
+            label: "Pricing",
             tint: c.mint,
-            onPress: () => navigation.navigate("SuperAgentOffers"),
+            onPress: () => navigation.navigate("SuperAgentPricing"),
           },
           {
             key: "agents",

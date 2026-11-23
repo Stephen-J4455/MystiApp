@@ -79,8 +79,7 @@ export const copyToClipboard = async (text) => {
     return false;
   }
   try {
-    await clipboard.setStringAsync(String(text ?? ""));
-    return true;
+    return (await clipboard.setStringAsync(String(text ?? ""))) !== false;
   } catch (error) {
     console.error("[clipboard] Could not write to the clipboard:", error);
     return false;

@@ -119,19 +119,11 @@ export const MORE_ITEMS = [
     requires: "enterprise",
   },
   {
-    routeName: "SuperAgentOffers",
-    label: "Offers",
-    caption: "Promo plans",
+    routeName: "SuperAgentPricing",
+    label: "Pricing",
+    caption: "Offers and tiers",
     icon: "pricetags-outline",
     activeIcon: "pricetags",
-    requires: "enterprise",
-  },
-  {
-    routeName: "SuperAgentTierManagement",
-    label: "Tiers",
-    caption: "Level rules",
-    icon: "layers-outline",
-    activeIcon: "layers",
     requires: "enterprise",
   },
   {

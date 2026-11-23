@@ -51,6 +51,21 @@
 import { supabase } from "./supabase";
 import { getEdgeFunctionName } from "./env";
 import { getEdgeFunctionErrorMessage } from "./edgeFunctions";
+import { profileRole } from "./profileRole";
+
+export const fetchAssignedSubAgents = async (superAgentId) => {
+  const { data, error } = await supabase.functions.invoke(
+    getEdgeFunctionName("super-agent-user-management"),
+    { body: { action: "listUsers", superAgentId } },
+  );
+  if (error) throw new Error(await getEdgeFunctionErrorMessage(error));
+  if (data?.error) throw new Error(data.error);
+  return (data?.users || []).filter(
+    (member) =>
+      profileRole({ role: member.role }) === "Agent" &&
+      String(member.superAgentId || "") === String(superAgentId),
+  );
+};
 
 /**
  * PostgREST caps an un-paginated select at `max-rows` (1000 by default) and
