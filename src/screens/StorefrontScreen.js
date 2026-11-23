@@ -18,7 +18,17 @@ import {
 const emptyStore = { name: "", slug: "", published: false, ...defaultBranding };
 const emptyTier = { name: "", active: true };
 const emptyItem = { price: "", active: true };
-const statuses = { pending: "Pending", fulfilled: "Fulfilled", declined: "Declined" };
+const statuses = {
+  pending: "Manual order", fulfilled: "Fulfilled", declined: "Declined", awaiting_payment: "Awaiting payment",
+  dispatching: "Paid · Sending to provider", sent_to_provider: "Paid · Sent to provider",
+  provider_review: "Paid · Needs provider review", test_paid: "Test payment verified",
+};
+
+function orderStatusLabel(order) {
+  return order.status === "dispatching" && order.payment_updated_at &&
+    Date.now() - Date.parse(order.payment_updated_at) > 120000
+    ? statuses.provider_review : statuses[order.status] ?? order.status;
+}
 const orderDate = new Intl.DateTimeFormat("en-GH", {
   dateStyle: "medium", timeStyle: "short", timeZone: "Africa/Accra",
 });
@@ -277,12 +287,13 @@ function GuestOrders({ ownerId }) {
   }
 
   return <Panel title="Guest orders">
-    <Note>Fulfill orders through your usual Mysti workflow, then update their status here.</Note>
+    <Note>Paystack orders go to the provider after payment. Orders marked for review need reconciliation.</Note>
     <SecondaryButton title="Refresh orders" icon="refresh-outline" onPress={() => setReload((value) => value + 1)} />
     {loading ? <ActivityIndicator /> : error ? <Note error>Could not load guest orders.</Note> : <>
       {orders.length === 0 && <Note>{page === 0 ? "No guest orders yet." : "No older orders."}</Note>}
       {orders.slice(0, orderPageSize).map((order) => <Panel key={order.id} title={`${order.network} · ${order.bundle}`}>
-        <Note>GH₵{pesewasToCedis(order.price_pesewas)} · {statuses[order.status]}</Note>
+        <Note>GH₵{pesewasToCedis(order.price_pesewas)} · {orderStatusLabel(order)}</Note>
+        {!!order.provider_order_id && <Note selectable>Provider reference {order.provider_order_id}</Note>}
         <Note selectable>{order.phone}</Note>
         <Note>{orderDate.format(new Date(order.created_at))}</Note>
         <Note selectable>Ref {order.id}</Note>

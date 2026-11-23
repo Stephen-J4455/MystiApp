@@ -108,7 +108,7 @@ export async function loadStorefront(ownerId) {
 export async function loadStoreOrders(ownerId, page) {
   const first = page * orderPageSize;
   return checked(await supabase.from("mysti_store_orders")
-    .select("id,network,bundle,price_pesewas,phone,status,created_at")
+    .select("id,network,bundle,price_pesewas,phone,status,created_at,provider_order_id,payment_updated_at")
     .eq("owner_id", ownerId).order("created_at", { ascending: false }).order("id")
     .range(first, first + orderPageSize));
 }
